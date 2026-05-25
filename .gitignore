@@ -1,0 +1,19 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# renv
+renv/library/
+renv/staging/
+
+# Package build artefacts
+*.tar.gz
+*.zip
+/doc/
+/Meta/
+
+# OS
+.DS_Store
+Thumbs.db

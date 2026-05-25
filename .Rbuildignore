@@ -1,0 +1,6 @@
+^\.git$
+^\.gitignore$
+^DSMHelper\.Rproj$
+^\.Rproj\.user$
+^renv$
+^renv\.lock$

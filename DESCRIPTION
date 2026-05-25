@@ -1,0 +1,58 @@
+Package: DSMHelper
+Title: Distance Sampling and Density Surface Modelling Utilities
+Version: 0.1.0
+Authors@R:
+    person("Dave", "Fifield", email = "fifielddave@gmail.com",
+           role = c("aut", "cre"))
+Description: Utility functions for preparing data, fitting detection functions,
+    building density surface models (DSMs), generating predictions, and
+    estimating variance for seabird at-sea density analyses based on ECSAS
+    survey data. Extracted from the Atlantic DSM analysis pipeline.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    checkmate,
+    callr,
+    Distance,
+    dplyr,
+    dsm,
+    dsmextra,
+    furrr,
+    future,
+    geodist,
+    geosphere,
+    ggplot2,
+    gratia,
+    gstat,
+    here,
+    htmltools,
+    leaflet,
+    leafsync,
+    lubridate,
+    magrittr,
+    mapview,
+    ncdf4,
+    plyr,
+    purrr,
+    raster,
+    rerddapXtracto,
+    rmarkdown,
+    sf,
+    sp,
+    stars,
+    stringr,
+    terra,
+    tidync,
+    tidyr,
+    viridis,
+    zoo
+Remotes:
+    dill/dsmextra,
+    DMEthier/ECSASconnect
+Suggests:
+    ECSASconnect,
+    knitr,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
