@@ -49,8 +49,8 @@ Imports:
     viridis,
     zoo
 Remotes:
-    dill/dsmextra,
-    DMEthier/ECSASconnect
+    densitymodelling/dsmextra,
+    RoyChristian/ECSASconnect
 Suggests:
     ECSASconnect,
     knitr,

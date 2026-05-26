@@ -1,4 +1,4 @@
-﻿# DSMHelper - Distance Sampling and Density Surface Modelling Utilities
+# DSMHelper - Distance Sampling and Density Surface Modelling Utilities
 # Combined from functions.R and ds_utils_0.6.R (Atlantic DSM project)
 #
 # TODO - functions that reference project-specific globals and need updating
@@ -17,11 +17,18 @@
 # ============================================================================
 # From functions.R
 # ============================================================================
-# Make sure both distance and distbegin/distend columns are not both in data
-# otherwise ds() (as of Distance 1.0.9) will get mad. If distbegin and distend
-# are both all NA (as for ECSAS ship data) then just remove them. If they're not
-# NA then (e.g., in the case of aerial data) then get rid of distance after 
-# making sure distance == (distbegin + distend)/2
+
+#' Validate and reconcile distance and interval distance columns
+#'
+#' Ensures an observation data frame does not simultaneously carry a
+#' \code{distance} column and non-NA \code{distbegin}/\code{distend} columns,
+#' which would confuse \code{\link[Distance]{ds}}.  All-NA interval columns
+#' are dropped; otherwise \code{distance} is dropped after confirming it
+#' equals \code{(distbegin + distend) / 2}.
+#'
+#' @param data Data frame of observation data.
+#' @return \code{data} with the redundant column(s) removed.
+#' @export
 check.distdata.cols <- function(data) {
   if (!is.null(data$distance) && !is.null(data$distbegin) && !is.null(data$distend)) {
     if (all(is.na(data$distbegin)) && all(is.na(data$distend))) {
@@ -42,10 +49,30 @@ check.distdata.cols <- function(data) {
     }
   }
   data
-}    
+}
 
 
-# rel.folder = path (relative to here()) to place the output file in
+
+#' Flag watches with suspicious GPS positions
+#'
+#' Wraps \code{ECSAS.find.suspicious.posn()} and annotates results with
+#' whether each flagged watch was previously recorded as fixed in the
+#' database.  Results are written to a CSV in \code{rel.folder}.
+#'
+#' @param alldat Data frame of all watch data.
+#' @param rel.folder Path relative to \code{here()} where the output CSV is
+#'   written.
+#' @param leave Optional vector of watch IDs to exclude from flagging; passed
+#'   to \code{ECSAS.find.suspicious.posn()}.
+#' @param fixed_db Optional character vector of watch IDs already recorded as
+#'   fixed in the database.
+#' @param quiet If \code{TRUE} (default), suppresses printing of problem IDs
+#'   and diagnostic histograms.
+#' @param filename Name of the output CSV file.
+#' @param ... Additional arguments passed to
+#'   \code{ECSAS.find.suspicious.posn()}.
+#' @return Data frame of suspicious watches, or \code{NULL} if none found.
+#' @export
 check.problem.data = function(alldat,
                               rel.folder,
                               leave = NULL,
@@ -53,7 +80,7 @@ check.problem.data = function(alldat,
                               quiet = TRUE,
                               filename = "suspicious_posns.csv",
                               ...) {
-  
+
   # Look for watches with problematic watches
   probs <- ECSAS.find.suspicious.posn(alldat, leave = leave, ...) %>%
     mutate(prev_fixed = WatchID %in% fixed_db)
@@ -96,33 +123,43 @@ check.problem.data = function(alldat,
 
 
 
-# Creates data structure needed for distance sampling and dsm analysis.
-#
-# Takes a set of raw data and creates separate obs, and watches clipped to the
-# study area and stores them along with the distdata objects in a list called
-# "the.data" and returns it. file.prefix is a string that is used to form the
-# filenames for various shapefiles. Typically either "ECSAS.ship" etc.
-#
-# dataset = character string identifying the dataset. Good for multi dataset
-# analyses.
-# inproj, outproj - projections of input and output datasets respectively
-# file.prefix - filename prefix for obs and watches shapefiles that gets
-#     prepended to "_obs.shp" and "_watches.shp" to form the output shapefile
-#     names.
-# saveshp - whether to save shapefiles or not.
-# intransect.only - only include observations where InTransect was TRUE?
-#
-# Note that obs with no count, no distmeth, non-birds, FlySwim != "W" or "F" or
-#   association == 18 are filtered out. 
-create.survey.data <- function(raw.dat = NULL, 
+#' Build observation and watch tables from raw ECSAS data
+#'
+#' Takes raw ECSAS data, filters observations, clips both watches and
+#' observations to the study area, and optionally assembles watches into
+#' transects.  Returns a list with elements \code{distdata}, \code{watches},
+#' and (if \code{create_transects = TRUE}) \code{transects}.
+#'
+#' Expects \code{study.area} (an \code{sf} polygon) to exist in the calling
+#' environment.
+#'
+#' @param raw.dat Data frame of raw ECSAS records.
+#' @param dataset Character string identifying the dataset (e.g.
+#'   \code{"ECSAS"}, \code{"SOMEC"}).
+#' @param file.prefix Filename prefix used to name output shapefiles
+#'   (e.g. \code{"ECSAS.ship"}).
+#' @param inproj EPSG code or CRS object for the input coordinates.
+#' @param outproj EPSG code or CRS object for output data; defaults to the
+#'   project global \code{segProj}.
+#' @param saveshp If \code{TRUE} (default), write watches and observations
+#'   shapefiles to \code{ShapeDir}.
+#' @param create_transects If \code{TRUE}, aggregate watches on the same day,
+#'   ship, observer, and direction into transects.
+#' @param intransect.only If \code{TRUE} (default), retain only observations
+#'   where \code{InTransect == TRUE}.
+#' @return Named list with elements \code{distdata}, \code{watches}, and
+#'   optionally \code{transects}.
+#' @export
+create.survey.data <- function(raw.dat = NULL,
                                dataset = NULL,
                                file.prefix = NULL,
                                inproj = 4326,
                                outproj = segProj,
                                saveshp = TRUE,
+                               create_transects = FALSE,
                                intransect.only = TRUE) {
 
-  
+
   coll = makeAssertCollection()
   assert_data_frame(raw.dat, add = coll)
   assert(
@@ -135,82 +172,103 @@ create.survey.data <- function(raw.dat = NULL,
   )
   reportAssertions(coll)
 
-  
+
   # create watches
   message("Creating watches...")
+  keep_cols <- c("SurveyType", "TransectID", "Program", "CruiseID", "WatchID",
+                 "ObserverName", "TransFarEdge", "DistMeth", "Date", "StartTime",
+                 "EndTime", "LatStart", "LongStart", "LatEnd", "LongEnd",
+                 "WatchLenKm", "ObsHeight", "CalcDurMin", "TotalWidthKm")
+
+  # These three only needed for making transects
+  if (create_transects)
+    keep_cols <- c(keep_cols, c("PlatformDir", "PlatformName", "PlatformSpeed"))
+
   watches <- raw.dat %>%
-    select(
-      SurveyType,
-      TransectID,
-      Program,
-      CruiseID,
-      WatchID,
-      ObserverName,
-      TransFarEdge,
-      DistMeth,
-      Date,
-      StartTime,
-      EndTime,
-      LatStart,
-      LongStart,
-      LatEnd,
-      LongEnd,
-      WatchLenKm,
-      ObsHeight,
-      CalcDurMin,
-      TotalWidthKm,
-      WhatCount
-    ) %>%
-    mutate(
-      Sample.Label = WatchID,
-      # For ecsas, TransectSides is 1 for ship, and assigned elsewhere in 
-      # Extract_data.Rmd for air. For SOMEC, both aerial and ship data pass through
-      # here and all aerial surveys are 2 sided whereas ship are 1.
-      TransectSides = case_when(dataset == "SOMEC" &
-                                  SurveyType == "Aerial" ~ 2, .default = 1)
-    ) %>% 
-    # Combine multiple observers on a watch to a single value
-    group_by(across(-ObserverName)) %>%
-    summarise(
-      ObserverName = paste(unique(ObserverName), collapse = ", "),
-      .groups = "drop"
-    ) %>% 
-    arrange(CruiseID, Sample.Label, ObserverName, Date, StartTime)
-  
-  # Make sure we didn't loose any watches
-  if(length(setdiff(raw.dat$WatchID, watches$WatchID)) != 0) {
-    missing_ids <- setdiff(raw.dat$WatchID, watches$WatchID)
-    stop("Create.survey.data: lost the following WatchIDs after collapsing watches with multiple observers ", 
-         paste(missing_ids, collapse = ", "))
+    select(all_of(keep_cols)) %>%
+    mutate(Sample.Label = WatchID,
+           TransectSides = 1) %>%
+    distinct() %>%
+    arrange(CruiseID, ObserverName, Date, StartTime)
+
+  # SOMEC data has multiple observers in the same watch (which I guess is ok)
+  if (dataset == "SOMEC") {
+    watches <- watches %>%
+      select(-ObserverName) %>%
+      distinct()
   }
-  
+
   # make sure all data for a watch is consistent. Find rows with duplicate watchIDs
   # and remove these watches
   dups <- watches %>%
-    group_by(WatchID) %>% 
-    summarise(nrows = n()) %>% 
-    filter(nrows > 1) %>% 
+    group_by(WatchID) %>%
+    summarise(nrows = n()) %>%
+    filter(nrows > 1) %>%
     pull("WatchID")
-  
+
   # Remove watches with inconsistent watch info
   if (length(dups) > 0) {
     warning(paste0(sprintf("Removing %d watches due to inconsistent watch info between rows: ", length(dups)),
                    paste(dups, collapse = ", ")), immediate. = TRUE)
     watches <- filter(watches, !(WatchID %in% dups))
   }
-  
+
   # clip to study area
   watches <- watches %>%
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>% 
+    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>%
     st_transform(st_crs(4326)) %>% # for ms_clip below
     select(WatchID) %>% # just keep WatchID
     ms_clip(study.area %>% st_transform(st_crs(4326))) %>%   # do the clipping -
     left_join(watches, by = "WatchID") %>%  # add other cols back in
-    st_transform(outproj) %>% 
-    mutate(StartTime = as.character(StartTime),
-           EndTime = as.character(EndTime),) 
-  
-  # Save as shapefile
+    st_transform(outproj)
+
+
+  # Create transects: combine watches on on same day, same ship, same observer
+  # and same direction into transects.
+  if (create_transects) {
+    message("Creating transects...")
+    transects <- ECSAS.create.transects(st_drop_geometry(watches)) %>%
+      sf::st_as_sf()
+
+    # Modify watches and set the Sample.Label for each watch
+    watches %<>% ECSAS.add.sample.label(st_drop_geometry(transects))
+
+    # Cconvert Watches list column in transects object into vector of watchID's
+    # contained in each transect since st_write (and other downstream code?)
+    # can't deal with list cols
+    transects %<>%
+      mutate(wtchs = unname(unlist(
+        split(., .$Sample.Label) %>% map( ~ unlist(.x$Watches) %>%
+                                            paste(collapse = ", "))
+      )),
+      length = sf::st_length(.)) %>%
+      select(-Watches) %>%
+      rename(Watches = wtchs)
+
+
+    if (saveshp) {
+      # Will whine about discarded datum and abbreviated field names until these
+      # warnings are removed from new rgdal.
+      layer.name <- paste0(file.prefix, "_transects.shp")
+      message(sprintf(
+        "Saving transects to shapefile '%s'",
+        file.path(ShapeDir, layer.name)
+      ))
+
+      suppressWarnings(
+        st_write(
+          transects,
+          dsn = ShapeDir,
+          layer = layer.name,
+          driver = "ESRI Shapefile",
+          delete_layer = TRUE
+        )
+      )
+    }
+  }
+
+
+  # Save watches as shapefile
   if (saveshp) {
     # Will whine about discarded datum and abbreviated field names until these
     # warnings are removed from new rgdal.
@@ -219,7 +277,7 @@ create.survey.data <- function(raw.dat = NULL,
       "Saving watches to shapefile '%s'",
       file.path(ShapeDir, layer.name)
     ))
-    
+
     suppressWarnings(
       st_write(
         watches,
@@ -231,13 +289,18 @@ create.survey.data <- function(raw.dat = NULL,
     )
   }
 
+  # no longer remember why this was desirable
+  watches <- mutate(watches,
+                    StartTime = as.character(StartTime),
+                    EndTime = as.character(EndTime))
+
   # Create Obs: remove non-birds, convert distances to km,  windforce is
   # converted to windspeed if necessary, convert InTransect to T/F, remove ship
-  # followers, remove zeros (ie. watches where Count == NA), 
+  # followers, remove zeros (ie. watches where Count == NA),
   # only keep Flyswim == W or F (not L or S). Add in sample.Label,
   # rename columns and select ones of interest
   message("Creating observations...")
-  
+
   obs <- raw.dat %>%
     mutate(
       Region.Label = 1,
@@ -263,11 +326,11 @@ create.survey.data <- function(raw.dat = NULL,
     # and add FlockID if there isn't one
     mutate(DistType = assign.dist.type(.),
            FlockID = case_when(all(is.na(FlockID)) ~ 1:nrow(.),
-                               TRUE ~ FlockID)) %>% 
+                               TRUE ~ FlockID)) %>%
     left_join(watches[, c("WatchID", "Sample.Label")], by = "WatchID") %>%
     rename(object = FlockID,
            size = Count,
-           distance = Distance) %>% 
+           distance = Distance) %>%
     select(
       SurveyType,
       object,
@@ -313,8 +376,6 @@ create.survey.data <- function(raw.dat = NULL,
                                         by = c("Windforce" = "beaufort"))$speed.kts,
         TRUE ~ Windspeed
       ),
-      # Only applicable to standard ECSAS ship surveys. Not currently used for 
-      # anything.
       weights = case_when(
         DistanceCode %in% c("A", "B") ~ 2,
         DistanceCode %in% c("C", "D") ~ 1,
@@ -331,16 +392,16 @@ create.survey.data <- function(raw.dat = NULL,
   # Make sure there's still some left
   if (nrow(obs) == 0)
     warning("No observations left after filtering!", immediate. = TRUE)
-  
+
   # Clip to study area
   obs <- obs %>%
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>% 
+    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>%
     st_transform(st_crs(4326)) %>% # for ms_clip below
     select(object) %>% # just keep WatchID
     ms_clip(study.area %>% st_transform(st_crs(4326))) %>%   # do the clipping -
     left_join(obs, by = "object") %>%  # add other cols back in
-    st_transform(outproj)  
- 
+    st_transform(outproj)
+
   # Save as shapefile
   if (saveshp) {
     # Will whine about discarded datum and abbreviated field names until these
@@ -350,7 +411,7 @@ create.survey.data <- function(raw.dat = NULL,
       "Saving obs to shapefile '%s'",
       file.path(ShapeDir, layer.name)
     ))
-    
+
     suppressWarnings(
       st_write(
         obs,
@@ -361,41 +422,51 @@ create.survey.data <- function(raw.dat = NULL,
       )
     )
   }
-  
+
   ##### After all that, now just create a single distdata for use in distance
   #sampling.This doesn't actually get used (unless we do analysis of all
   #seabirds). Rather, specific datasets for a given species/group are created by
   #create.dsm.data( in order to properly generate the samples where there were 0
   #observations of a given species.
   message("Creating distdata....")
-  distdata <- obs %>% 
-    st_drop_geometry() %>% 
+  distdata <- obs %>%
+    st_drop_geometry() %>%
     droplevels
 
   # Set dataset attribute
   distdata$Dataset <- watches$Dataset <- dataset
-  
+
   the.data <-
-    list(
-      distdata = distdata,
-      watches = st_drop_geometry(watches)
-    )
-  
+    if (create_transects) {
+      list(distdata = distdata,
+           watches = st_drop_geometry(watches),
+           transects = transects)
+    } else {
+      list(
+        distdata = distdata,
+        watches = st_drop_geometry(watches))
+    }
+
   message("\nDone\n")
   the.data
 }
 
-# Convert watches object to spatialinesdataframe
+#' Convert a watches data frame to a SpatialLinesDataFrame
+#'
+#' @param watches Data frame with columns \code{WatchID}, \code{LongStart},
+#'   \code{LatStart}, \code{LongEnd}, \code{LatEnd}.
+#' @return \code{SpatialLinesDataFrame} in WGS 84 (EPSG 4326).
+#' @export
 watches.to.lines <- function(watches) {
-  
-  lins <- watches %>% 
-    sp::split(.$WatchID) %>% 
+
+  lins <- watches %>%
+    sp::split(.$WatchID) %>%
     lapply(function(x) {
       sp::Lines(list(sp::Line(
-        matrix(c(x$LongStart, x$LatStart, x$LongEnd, x$LatEnd), 
-               nrow =  2, byrow = T))), 
-        x$WatchID[1L])  
-      }) %>% 
+        matrix(c(x$LongStart, x$LatStart, x$LongEnd, x$LatEnd),
+               nrow =  2, byrow = T))),
+        x$WatchID[1L])
+      }) %>%
     sp::SpatialLines()
 
   watches  <- as.data.frame(watches)
@@ -406,37 +477,59 @@ watches.to.lines <- function(watches) {
 }
 
 
-my.gam.check <- function(b, old.style = FALSE, type = c("deviance", "pearson", 
-  "response"), k.sample = 5000, k.rep = 200, rep = 0, level = 0.9, 
-  rl.col = 2, rep.col = "gray80", ...) 
+#' Custom GAM diagnostic plots and basis-dimension checks
+#'
+#' A wrapper around \code{\link[mgcv]{gam.check}} that plots Q-Q, residuals
+#' vs linear predictor, a residual histogram, and response vs fitted values,
+#' then runs \code{\link[mgcv]{k.check}}.
+#'
+#' @param b A fitted \code{gam} or \code{bam} object.
+#' @param old.style If \code{TRUE}, use \code{qqnorm} instead of
+#'   \code{\link[mgcv]{qq.gam}}.
+#' @param type Residual type; one of \code{"deviance"}, \code{"pearson"}, or
+#'   \code{"response"}.
+#' @param k.sample Number of data points subsampled for the basis-dimension
+#'   check.
+#' @param k.rep Number of replicates for the basis-dimension check.
+#' @param rep Number of simulations for \code{\link[mgcv]{qq.gam}}.
+#' @param level Reference band coverage for \code{\link[mgcv]{qq.gam}}.
+#' @param rl.col Colour for the reference line in \code{\link[mgcv]{qq.gam}}.
+#' @param rep.col Colour for the simulation envelope.
+#' @param ... Additional arguments passed to plot functions.
+#' @return \code{invisible(NULL)}, called for its side-effects (plots and
+#'   printed output).
+#' @export
+my.gam.check <- function(b, old.style = FALSE, type = c("deviance", "pearson",
+  "response"), k.sample = 5000, k.rep = 200, rep = 0, level = 0.9,
+  rl.col = 2, rep.col = "gray80", ...)
 {
   type <- match.arg(type)
   resid <- residuals(b, type = type)
-  linpred <- if (is.matrix(b$linear.predictors) && !is.matrix(resid)) 
+  linpred <- if (is.matrix(b$linear.predictors) && !is.matrix(resid))
     napredict(b$na.action, b$linear.predictors[, 1])
   else napredict(b$na.action, b$linear.predictors)
-  
+
   if (old.style)  {
     message("qqnorm:")
     qqnorm(resid, ...)
   } else {
     message("qq.gam: ")
-    qq.gam(b, rep = rep, level = level, type = type, rl.col = rl.col, 
+    qq.gam(b, rep = rep, level = level, type = type, rl.col = rl.col,
     rep.col = rep.col, ...)
   }
-  plot(linpred, resid, main = "Resids vs. linear pred.", xlab = "linear predictor", 
+  plot(linpred, resid, main = "Resids vs. linear pred.", xlab = "linear predictor",
     ylab = "residuals", ...)
-  hist(resid, xlab = "Residuals", main = "Histogram of residuals", 
+  hist(resid, xlab = "Residuals", main = "Histogram of residuals",
     ...)
-  fv <- if (inherits(b$family, "extended.family")) 
+  fv <- if (inherits(b$family, "extended.family"))
     predict(b, type = "response")
   else fitted(b)
-  if (is.matrix(fv) && !is.matrix(b$y)) 
+  if (is.matrix(fv) && !is.matrix(b$y))
     fv <- fv[, 1]
-  try(plot(fv, napredict(b$na.action, b$y), xlab = "Fitted Values", 
-    ylab = "Response", main = "Response vs. Fitted Values", 
+  try(plot(fv, napredict(b$na.action, b$y), xlab = "Fitted Values",
+    ylab = "Response", main = "Response vs. Fitted Values",
     ...))
-  gamm <- !(b$method %in% c("GCV", "GACV", "UBRE", "REML", 
+  gamm <- !(b$method %in% c("GCV", "GACV", "UBRE", "REML",
     "ML", "P-ML", "P-REML", "fREML"))
   if (gamm) {
     cat("\n'gamm' based fit - care required with interpretation.")
@@ -451,13 +544,29 @@ my.gam.check <- function(b, old.style = FALSE, type = c("deviance", "pearson",
   }
 }
 
-# Do observed/expected for density response or abundance response
-oe.dens <- function(model, covar, cut = NULL, plotit = FALSE, debug = FALSE, ...) 
+#' Observed vs expected density or abundance by covariate
+#'
+#' Aggregates observed and model-predicted counts (or densities) by levels of
+#' \code{covar} and optionally plots them against each other.
+#'
+#' @param model Fitted \code{dsm} model object.
+#' @param covar Character string naming the covariate column in
+#'   \code{model$data} to aggregate by.
+#' @param cut Optional numeric vector of breakpoints passed to \code{cut()}
+#'   to bin a continuous covariate.
+#' @param plotit If \code{TRUE}, produce a scatter plot of observed vs
+#'   expected.
+#' @param debug If \code{TRUE}, drop into \code{browser()} at the start.
+#' @param ... Additional arguments passed to \code{plot()}.
+#' @return 2-row matrix (Observed, Expected) with one column per level of
+#'   \code{covar}.
+#' @export
+oe.dens <- function(model, covar, cut = NULL, plotit = FALSE, debug = FALSE, ...)
 {
     if (debug) browser()
     #get data
     oe <- model$data
-    
+
     # add in predictions as abundances
     resp <- as.character(model$formula[[2]])
     if (resp %in% c("D", "density", "Dhat", "density.est")) {
@@ -476,22 +585,31 @@ oe.dens <- function(model, covar, cut = NULL, plotit = FALSE, debug = FALSE, ...
     colnames(oe) <- cn
     if (plotit) {
       maxlim <- max(oe[1,], oe[2,], na.rm = TRUE)
-      plot(oe[1,], oe[2,], xlab = "obs", ylab = "exp", 
-           main = paste0("Obs vs exp at specific values of ", covar), 
+      plot(oe[1,], oe[2,], xlab = "obs", ylab = "exp",
+           main = paste0("Obs vs exp at specific values of ", covar),
            xlim = c(0, maxlim), ylim = c(0, maxlim), ...)
     }
     return(oe)
 }
 
 
-# Render a full preliminary dsm analysis Rmd for one species.
-# XXX Used?
+#' Render a full preliminary DSM analysis report for one species
+#'
+#' Knits \code{Generic_full_test.Rmd} with the given species as a parameter
+#' and writes the HTML output to \code{ResultsDir/<species>/}.
+#'
+#' Expects project globals \code{ResultsDir} and \code{RDir} in the calling
+#' environment.
+#'
+#' @param species Character string species code (e.g. \code{"ATPU"}).
+#' @return \code{invisible(NULL)}, called for its side-effect (rendered HTML).
+#' @export
 do.full.prelim <- function(species){
-  
+
   if(!dir.exists(file.path(ResultsDir, species))) {
     dir.create(file.path(ResultsDir, species))
   }
-  
+
   out.file <-
     file.path(ResultsDir,
               species,
@@ -507,17 +625,26 @@ do.full.prelim <- function(species){
 }
 
 
-# Set default convert.units, cutpoints, etc values when setting up ddf model
-# list.
+#' Set default detection function spec values by platform class
+#'
+#' Populates \code{convert_units}, \code{cutpoints}, and
+#' \code{distance.centers} in a DDF spec list based on whether the spec name
+#' indicates a ship or aerial survey.
+#'
+#' @param ddf.def A single DDF spec list to be populated.
+#' @param nm Character string DDF spec name of the form
+#'   \code{"<dataset>_<Ship|Aerial>_<behav>_<D|N>"}.
+#' @return \code{ddf.def} with platform-appropriate default values filled in.
+#' @export
 set.def.df.spec.values <- function(ddf.def, nm) {
-  
-  if(length(nm) != 1) 
+
+  if(length(nm) != 1)
     stop("set.def.df.spec.values: length of ddf name is not 1.")
-  
-  
-  # Note that the convert_units won't actually get used because we 
+
+
+  # Note that the convert_units won't actually get used because we
   # only use ds() to compute the detection function and not
-  # abundance. 
+  # abundance.
   if(str_detect(nm, "Ship")) {
     # ECSAS and SOMEC Ship surveys have set cutpoints whereas aerial uses distbegin
     # and distend columns computed in 00.01_Extract_data.Rmd.
@@ -532,40 +659,78 @@ set.def.df.spec.values <- function(ddf.def, nm) {
   ddf.def
 }
 
-# Parse a ddf name of the form "ECSAS_Ship_F_D" and return a list of the 
-# 4 elements.
-# dataset - ECSAS, Quebec, ???
-# platform_class - ship/aerial
-# behav - fly, swim
-# dist_type - distances/no_distances
+#' Parse a DDF spec name into its four components
+#'
+#' Splits a name of the form \code{"<dataset>_<platform>_<behav>_<dist>"} and
+#' returns the parts as a named list.
+#'
+#' @param nm Character string DDF spec name, e.g. \code{"ECSAS_Ship_F_D"}.
+#' @return Named list with elements \code{dataset}, \code{platform_class},
+#'   \code{behav}, and \code{dist_type}.
+#' @export
 parse.df.name <- function(nm){
   res <- str_split_1(nm, fixed("_"))
   list(dataset = res[1], platform_class = res[2], behav = res[3], dist_type = res[4])
 }
 
 
-# Three functions to peel off specific aspects of a ddf spec name
-# ECSAS, Quebec, etc.
+#' Extract the dataset component from a DDF spec name
+#'
+#' @param nm Character string DDF spec name (e.g. \code{"ECSAS_Ship_F_D"}).
+#' @return Character string dataset identifier (e.g. \code{"ECSAS"}).
+#' @export
 get.dataset <- function(nm) {
   parse.df.name(nm)$dataset
 }
 
-#Ship or Aerial
+#' Extract the platform class from a DDF spec name
+#'
+#' @param nm Character string DDF spec name.
+#' @return \code{"Ship"} or \code{"Aerial"}.
+#' @export
 get.platform.class <- function(nm) {
   parse.df.name(nm)$platform_class
 }
 
-#F or W
+#' Extract the behaviour component from a DDF spec name
+#'
+#' @param nm Character string DDF spec name.
+#' @return \code{"F"} (flying) or \code{"W"} (water).
+#' @export
 get.behav <- function(nm) {
   parse.df.name(nm)$behav
 }
 
-# D or N
+#' Extract the distance-type component from a DDF spec name
+#'
+#' @param nm Character string DDF spec name.
+#' @return \code{"D"} (distances available) or \code{"N"} (no distances).
+#' @export
 get.dist_type <- function(nm) {
   parse.df.name(nm)$dist_type
 }
 
-# Process all ddf specs for a given species. Called from Generic_1_ddf_fitting.Rmd
+#' Process all DDF specs for a given species
+#'
+#' Iterates over every element of \code{df.specs} calling
+#' \code{\link{do.det.fcn.spec}} for each, then saves the updated spec list
+#' with \code{\link{save.ddf.specs}}.  Called from
+#' \code{Generic_1_ddf_fitting.Rmd}.
+#'
+#' @param df.specs Named list of DDF specification lists, one per
+#'   dataset/platform/behaviour combination.
+#' @param species Character string species code.
+#' @param distdata Data frame of observation data for the species.
+#' @param do.final.only If \code{TRUE}, fit only the pre-selected final model;
+#'   otherwise fit all candidate models.
+#' @param rerun If \code{TRUE}, re-fit models even when saved results exist.
+#' @param parallel If \code{TRUE}, use parallel processing via
+#'   \code{doSNOW}.
+#' @param nCores Number of cores for parallel processing.
+#' @param do.eda If \code{TRUE} (default), produce exploratory data plots.
+#' @param ... Additional arguments passed to \code{\link{do.det.fcn.spec}}.
+#' @return Updated \code{df.specs} list with fitted models attached.
+#' @export
 do.det.fcn.specs <-
   function(df.specs,
            species,
@@ -576,7 +741,7 @@ do.det.fcn.specs <-
            nCores,
            do.eda = TRUE,
            ...) {
-    
+
   ret <- df.specs %>%
     imap(
       do.det.fcn.spec,
@@ -589,16 +754,20 @@ do.det.fcn.specs <-
       do.eda = do.eda,
       ...
     )
-  
+
   # resave ddf spec for this species which may now have final fitted model
   #  and fitted distdata objects
   save.ddf.specs(ret, species)
-  
+
   ret
 }
 
-# Save ddf specs (multiple specs - one for each dataset, platform_class and behav)
-# for a single species.
+#' Save DDF specs for a single species to an RData file
+#'
+#' @param df.mod.specs Named list of DDF spec lists for the species.
+#' @param species Character string species code; used to form the filename.
+#' @return \code{invisible(NULL)}, called for its side-effect (file written).
+#' @export
 save.ddf.specs <- function(df.mod.specs, species) {
   filename <- file.path(RDataDir, paste0(species, dfModListSuffix))
   message(sprintf("Saving ddf specs for %s in '%s'", species, filename))
@@ -606,21 +775,33 @@ save.ddf.specs <- function(df.mod.specs, species) {
 }
 
 
-# Do ddf fitting for a given df.spec (which will be for one
-# dataset/platform_class/behav for 1 species), extracting the correct data, building
-# either all candidate ddfs, or just the final one. If final.only, store the
-# returned ddf in the df.mod.list structure.
-#
-# df.spec - the ddf specification (see my structure in analysis_settings.R)
-# 
-# df.spec.nm - name of the df.spec - e.g., ECSAS_Ship_W
-# 
-# species - char vector 
-# 
-# distdata - should only contain obs for given species, but we filter on species
-#   anyway just in case.
-# 
-# Typically called once for each ddf specification in each species in df.mod.list
+#' Fit detection function(s) for one DDF spec and species
+#'
+#' Filters \code{distdata} for the appropriate dataset, platform class,
+#' behaviour, and distance type; runs EDA plots; then calls
+#' \code{\link{do.det.fcn}} to fit either all candidate detection functions or
+#' just the pre-selected final model.  Stores the fitted model and augmented
+#' distdata back into \code{df.spec} when \code{do.final.only = TRUE}.
+#'
+#' Expects project globals \code{spec.grps}, \code{seasons},
+#' \code{ResultsDir}, and \code{ddftype_levels} in the calling environment.
+#'
+#' @param df.spec A single DDF specification list.
+#' @param df.spec.nm Name of the spec, e.g. \code{"ECSAS_Ship_W_D"}.
+#' @param species Character string species code.
+#' @param distdata Data frame of observation data (all species; filtered
+#'   internally).
+#' @param do.final.only If \code{TRUE}, fit only the final model and store it
+#'   in \code{df.spec}.
+#' @param rerun If \code{TRUE}, re-fit even when saved results exist.
+#' @param parallel If \code{TRUE}, use parallel processing.
+#' @param nCores Number of cores for parallel processing.
+#' @param do.eda If \code{TRUE}, produce EDA plots.
+#' @param ... Additional arguments passed to \code{\link{do.det.fcn}}.
+#' @return Updated \code{df.spec} with \code{fitted.model},
+#'   \code{fitted.distdata}, and \code{ddftype} added when
+#'   \code{do.final.only = TRUE}.
+#' @export
 do.det.fcn.spec <- function(df.spec,
                             df.spec.nm,
                             species,
@@ -631,7 +812,7 @@ do.det.fcn.spec <- function(df.spec,
                             nCores,
                             do.eda,
                             ...) {
-  
+
   dataset <- get.dataset(df.spec.nm)
   platform_class <- get.platform.class(df.spec.nm)
   behav <- get.behav(df.spec.nm)
@@ -662,7 +843,7 @@ do.det.fcn.spec <- function(df.spec,
 
   # Filter distdata based on whether this is a ddf for obs with no perp
   # distances, or a normal one. Record this fact in distdata for use by
-  # create.dsm.data). 
+  # create.dsm.data).
   if (dist_type == "N") {
     distdata <- filter(
       distdata,
@@ -671,11 +852,11 @@ do.det.fcn.spec <- function(df.spec,
       FlySwim == behav,
       Alpha %in% spec.grps[[species]],
       # only doing 300m strip transect, ignore others (only a few)
-      !(DistanceCode %in% c("F", "G", "I", "K", "5")), 
+      !(DistanceCode %in% c("F", "G", "I", "K", "5")),
       # Weed out ones with NA distance but width of transect was more than 300m
-      TransFarEdge <= 300 | is.na(TransFarEdge), 
+      TransFarEdge <= 300 | is.na(TransFarEdge),
       (DistType != "Perp." | is.na(distance))
-    ) 
+    )
   } else if (dist_type == "D"){
     # Normal ddf
     # Filter perp distances for this species, behav, platform_class, dataset
@@ -694,7 +875,7 @@ do.det.fcn.spec <- function(df.spec,
 
   # assign season
   distdata <- assign.season(distdata, seasons[[species]])
-  
+
   # # XXXX should make dynamic instead of relying on a static list.
   if (isTRUE(df.spec$remove.fishing))
     distdata %<>% filter(!(CruiseID %in% fishingCruises))
@@ -715,7 +896,7 @@ do.det.fcn.spec <- function(df.spec,
       suffix = plot_title_suffix)
   }
 
-  
+
   # Only need to call do.det.fcn() if we're doing final ddfs (no matter if strip
   # trnasect or normal), OR we're doing all possible ddfs and dist_type is "D".
   # In the latter case, we are doing all possible ddfs as a side effect and
@@ -723,13 +904,13 @@ do.det.fcn.spec <- function(df.spec,
   # to call it to fit all possible models if dist_type is "D" since if it was
   # "N" then we already know what the final model will be (dummy_ddf) and there
   # is no need to fit "all possible" models since there aren't any.
-  # 
+  #
   # XXX Need to think about moving much of the above code into this conditional
-  # since most of it doesn't need to be run in do.final == TRUE. 
+  # since most of it doesn't need to be run in do.final == TRUE.
   if(do.final.only == TRUE || dist_type == "D"){
     # fit det fcn(s)
     res <- do.det.fcn(distdata = distdata,
-                      dsetname = dataset, 
+                      dsetname = dataset,
                       species = species,
                       df.model = df.spec,
                       df.model.nm = df.spec.nm,
@@ -740,7 +921,7 @@ do.det.fcn.spec <- function(df.spec,
                       nCores = nCores,
                       ...)
     # When do.final.only is FALSE, res is either a list of models or a dataframe
-    # of model specifications (if runModels was FALSE in do.ds) so no point in 
+    # of model specifications (if runModels was FALSE in do.ds) so no point in
     # trying to get the df_final and distdata elements.
     if (do.final.only) {
       df.spec$fitted.model <- res$df_final
@@ -751,13 +932,23 @@ do.det.fcn.spec <- function(df.spec,
         factor(levels = ddftype_levels)
     }
   }
-  
+
   # return the per-species df.model (with newly added fitted.model object if
   # do.final.only was true)
   df.spec
 }
 
-# Return a dummy_ddf() for various situations
+#' Create a strip-transect dummy detection function
+#'
+#' Wraps \code{\link[dsm]{dummy_ddf}} to create a strip-transect detection
+#' function appropriate for the given dataset and platform class, using the
+#' project-standard truncation distances.
+#'
+#' @param distdata Data frame of observation data for this DDF spec.
+#' @param dataset Character string dataset name (currently \code{"ECSAS"}).
+#' @param platform_class Character string; \code{"Ship"} or \code{"Aerial"}.
+#' @return A \code{fake_ddf} object with \code{$data} set to \code{distdata}.
+#' @export
 create.strip.ddf <- function(distdata, dataset, platform_class) {
   # Set up appropriate one strip transect
   if (dataset == "ECSAS") {
@@ -768,7 +959,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
           immediate. = TRUE
         )
       }
-      
+
       # XXX need to replace calculation of left with info from the aerial
       # transect for each observer??? Since it isn't really the smallest
       # distance if there are obs and it isn't really 0 if there are no obs.
@@ -787,7 +978,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
           immediate. = TRUE
         )
       }
-      
+
       # For ECSAS ship we have defined cutpoints and no left trunc
       df_final <- dummy_ddf(
         distdata$object %>%
@@ -809,33 +1000,42 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
       "create.strip.ddf: unrecognized survey dataset name: %s",
       dataset
     ))
-  
+
   # replace the minimal data the dummy_ddf adds to df_final with our own with
   # more columns so that downstream processing can grab the distdata from df_final
   df_final$data <- distdata
   df_final
 }
 
-# Called to run final ddf for one specie and dataset combination. Run
-# ds() analysis either for all possible models or for just the final model
-# specified by df.model.
-#
-#
-# distdata = the observation dataframe to be subsetted for the analysis
-# species = char vector
-# df.model = det fcn model specification used if do.final.only is true.
-# dataset = chr string indicating which dataset (ECSAS, SOMEC, etc) we're analyzing. 
-# do.final.only = if true then the final chosen det fcn is fitted else all 
-#   candidate det fcns are run
-# rerun = logical, if true any previously run candidate det fcns will be re run.
-#   Previously run detection functions are those that have results in folder.
-# folder = where to save the df summaries. 
-# parallel = logical, should parallel processing be used to run multiple
-#   candidate det fcns at the same time.
-# nCores = number of (virtual) cores to use for parallel processing
-# ... = other args passed on to ds().
-# 
-# Return list with df_final and distdata (augmented with detProb and adjSize)
+#' Fit detection function(s) for one dataset/species combination
+#'
+#' Either fits the single pre-selected final detection function
+#' (\code{do.final.only = TRUE}) or runs all candidate models via
+#' \code{\link{do.ds}} (\code{do.final.only = FALSE}).  When fitting the
+#' final model, checks it with \code{\link{check.det.fcn}} and returns
+#' augmented distdata.
+#'
+#' @param distdata Data frame of observation data (already filtered for the
+#'   relevant species, behaviour, and platform).
+#' @param species Character string species code.
+#' @param df.model DDF specification list; used when \code{do.final.only =
+#'   TRUE}.
+#' @param df.model.nm Name of the DDF spec (e.g. \code{"ECSAS_Ship_W_D"}).
+#' @param dsetname Character string dataset name.
+#' @param do.final.only If \code{TRUE} (default), fit only the final model.
+#' @param cleanFolder If \code{TRUE}, remove existing results from
+#'   \code{folder} before fitting (only used when \code{do.final.only =
+#'   FALSE}).
+#' @param rerun If \code{TRUE}, re-fit even when saved results exist.
+#' @param parallel If \code{TRUE}, use parallel processing.
+#' @param folder Path to the folder where candidate model summaries are saved.
+#' @param nCores Number of cores for parallel processing.
+#' @param ... Additional arguments passed to \code{\link[Distance]{ds}}.
+#' @return When \code{do.final.only = TRUE}: named list with elements
+#'   \code{df_final} (fitted model) and \code{distdata} (augmented with
+#'   \code{detProb} and \code{adjSize}).  When \code{do.final.only = FALSE}:
+#'   return value of \code{\link{do.ds}}.
+#' @export
 do.det.fcn <- function(distdata,
                        species,
                        df.model = NULL,
@@ -848,18 +1048,18 @@ do.det.fcn <- function(distdata,
                        folder,
                        nCores = 1,
                        ...) {
-  
+
   # set up species and spill specific pathnames
   # source(here::here("species settings.r"), echo = T, local = TRUE)
-  
+
   dataset <- get.dataset(df.model.nm)
   platform_class <- get.platform.class(df.model.nm)
-  
+
   # Set truncation distance if necessary for surveys without known set cutpoints
   if (dataset == "ECSAS") {
     if (platform_class == "Aerial") {
       truncation <-
-        list(left = ifelse(nrow(distdata) == 0, 0, min(distdata$distbegin)), 
+        list(left = ifelse(nrow(distdata) == 0, 0, min(distdata$distbegin)),
              right = ecsas.air.right.trunc)
     } else if (platform_class == "Ship") {
       truncation <- max(df.model$cutpoints)
@@ -868,32 +1068,32 @@ do.det.fcn <- function(distdata,
   } else
     # Add PQ stuff here later
     stop(sprintf("do.det.fcn: unrecognized survey dataset name: %s", dataset))
-  
+
   if (do.final.only) {
     # CleanFolder only applies when fitting all possible ddfs.
     if (cleanFolder)
-      warning("do.det.fcn: do.final == TRUE, ignoring cleanFolder == TRUE.", 
+      warning("do.det.fcn: do.final == TRUE, ignoring cleanFolder == TRUE.",
               immediate. = TRUE)
-    
+
     # Doing final ddf
     if (df.model$strip) {
       df_final <- create.strip.ddf(distdata, dataset, platform_class)
     } else { # df.model$strip == FALSE
-        
+
       if (rerun) {
         # (re-)fit the model - Doing a real ddf
-        
+
         # remove unneeded cols, but be careful because some cols are needed
         # downstream by create.dsm.data) for example.
         # and remove redundant distance or distbegin/distend cols.
         distdata <-
-          distdata %>% 
-          dplyr::select(object, size, distbegin, distend, distance, Season, 
+          distdata %>%
+          dplyr::select(object, size, distbegin, distend, distance, Season,
                         SurveyType, FlySwim, Sample.Label, WatchID, Alpha, Dataset,
-                        LatStart, LongStart, 
-                        all_of(all.vars(df.model$final.formula))) %>% 
+                        LatStart, LongStart,
+                        all_of(all.vars(df.model$final.formula))) %>%
           check.distdata.cols()
-            
+
         ###### use do.ds machinery to re-fit final model
         df_final <- do.ds(
           data = distdata,
@@ -923,14 +1123,14 @@ do.det.fcn <- function(distdata,
           # Note df_final will be a list with one element and we need to peel it
           # off.
           pluck(1)
-        
+
       } else { # rerun = FALSE
         # Look for file with results of running this model already
-      
-        # Sometimes I forget to add as.formula() to final model specs, so 
+
+        # Sometimes I forget to add as.formula() to final model specs, so
         # check it here.
         stopifnot(class(df.model$final.formula) == "formula")
-        
+
         nam <- with(df.model,
                     create.model.name(final.key, final.formula, final.adj))
         pat <- paste0("AIC.*_", nam, ".RData")
@@ -939,21 +1139,21 @@ do.det.fcn <- function(distdata,
           message("do.det.fcn: do.final == TRUE and rerun == FALSE. Looking for existing ddf model results file. Found ", length(file), " file(s), should be 1. Quitting.")
           stop()
         }
-        
+
         # get the model
         load(file)
         df_final <- model
       } # End rerun = FALSE
-    } # End strip == FALSE    
-    
+    } # End strip == FALSE
+
     # Check model and augment distdata with detprob and adjSize
     distdata <- check.det.fcn(df_final, species, df.model.nm)
-    
+
     return(list(df_final = df_final, distdata = distdata))
   } else {  # do.final.only == FALSE, doing all possible models
     # Do all candidate ddfs
     # folder <- ifelse(is.null(folder), summaryDir, folder) # folder is required now.
-    
+
     # Remove redundant distance or distbegin/distend cols.
     distdata <- check.distdata.cols(distdata)
     do.ds(
@@ -972,8 +1172,21 @@ do.det.fcn <- function(distdata,
   }
 }
 
-# Exploratory data analysis
-# Produce plots distance vs various covariates
+#' Distance sampling exploratory data analysis plots
+#'
+#' Produces covariate-vs-distance plots for each variable listed in the DDF
+#' spec, dispatching to \code{\link{plot.covar}}.
+#'
+#' @param distdata Data frame of observation data.
+#' @param species Character string species code; used in plot titles.
+#' @param do.final.only If \code{TRUE}, plot only the covariates in the final
+#'   model formula; otherwise plot all candidate covariates.
+#' @param df.spec DDF specification list supplying the formula and candidate
+#'   covariates.
+#' @param suffix Character string appended to plot titles to identify the
+#'   dataset/platform/behaviour combination.
+#' @return \code{invisible(NULL)}, called for its side-effect (plots).
+#' @export
 ds.eda <-
   function(distdata = NULL,
            species = NULL,
@@ -981,17 +1194,17 @@ ds.eda <-
            df.spec = NULL,
            suffix = "") # to identify dataset, platform_class, and behaviour
 {
-  
+
   if (nrow(distdata) == 0)
     return()
-    
+
   if (do.final.only == TRUE) {
     vars <- all.vars(df.spec$final.formula)
   } else {
     vars <- df.spec$candidate.covars
   }
-  
-  # plot individual covars 
+
+  # plot individual covars
     walk(
       vars,
       plot.covar,
@@ -999,12 +1212,24 @@ ds.eda <-
       species = species,
       df.spec = df.spec,
       suffix = suffix
-    )  
+    )
 }
 
 
-# Make a plot of a covar vs distance. Note the use of get(covar) to handle non-standard
-# evaluation and allows us to pass a column name in covar.
+#' Plot a covariate against distance categories
+#'
+#' Produces a boxplot (for \code{"size"}), a violin plot (for factor
+#' covariates), or a scatter plot with a linear smoother (for continuous
+#' covariates).
+#'
+#' @param covar Character string name of the covariate column to plot.
+#' @param distdata Data frame of observation data.
+#' @param species Character string species code; used in the plot title.
+#' @param df.spec DDF specification list supplying cutpoints and distance
+#'   centres.
+#' @param suffix Character string appended to the plot title.
+#' @return \code{invisible(NULL)}, called for its side-effect (plot).
+#' @export
 plot.covar <-
   function(covar = NULL,
            distdata = NULL,
@@ -1021,7 +1246,7 @@ plot.covar <-
   } else if (is.factor(distdata[, covar][[1]])) {
     p <- ggplot(data = as.data.frame(distdata), aes(get(covar), distance))
     p <- p + geom_violin(draw_quantiles = c(.25, .5, .75), scale = "count")
-    p <- p + scale_y_continuous(labels = as.character(df.spec$distance.centers), 
+    p <- p + scale_y_continuous(labels = as.character(df.spec$distance.centers),
                                 breaks = df.spec$distance.centers)
     p <- p + labs(y = "Distance Category", x = covar, title = title)
     print(p)
@@ -1039,43 +1264,64 @@ plot.covar <-
   }
 }
 
-# The next 3 functions are used to convert a dataframe that contains 
-# coords of endpoints of a line (ie transect or watch) into an sf line object
-#
-# Make a linestring from from a matrix of coords for 2 points
+#' Make an sf linestring from a two-row coordinate matrix
+#'
+#' @param xy2 Numeric matrix with 2 rows and 2 columns (lon, lat).
+#' @return An \code{sfg} linestring object.
+#' @export
 make.line <- function(xy2){
   st_linestring(matrix(xy2, nrow=2, byrow=TRUE))
 }
 
-# convert dataframe of coords to lines
+#' Convert endpoint coordinate columns to an sfc linestring geometry
+#'
+#' @param df Data frame containing start/end coordinate columns.
+#' @param names Character vector of four column names giving start lon, start
+#'   lat, end lon, end lat.
+#' @param crs CRS to assign to the returned geometry.
+#' @return An \code{sfc_LINESTRING} object with one element per row of
+#'   \code{df}.
+#' @export
 make.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd"), crs){
   m = as.matrix(df[,names])
   lines = apply(m, 1, make.line, simplify=FALSE)
   st_sfc(lines, crs = crs)
 }
 
-# Convert a dataframe to lines. Used in Extract_data.Rmd
+#' Convert a data frame of endpoint coordinates to an sf linestring object
+#'
+#' @param df Data frame with coordinate columns.
+#' @param names Character vector of four column names (start lon, start lat,
+#'   end lon, end lat).
+#' @param crs CRS to assign to the output.
+#' @return \code{df} as an \code{sf} object with a linestring geometry column.
+#' @export
 sf.pts.to.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd"), crs){
   geom = make.lines(df, names, crs)
   df = st_sf(df, geometry=geom)
   df
 }
 
-# Assign season based on date ignoring year.  Works across new year boundary
-#
-# Inputs:
-#   dat - object containing data to be assigned. 
-#   season.def - definition of the seasons.
-#   datefield - Character string giving the name of the date field in dat.
-#   
-# Outputs:
-#   Input dataframe with a Season field added (if needed) set to  correct season.
+#' Assign season labels to observations based on date
+#'
+#' Matches each row's month-day to a season definition and adds a
+#' \code{Season} factor column.  Works correctly across the new-year boundary
+#' when a season definition spans December into January.
+#'
+#' @param dat Data frame (or sf object) to annotate.
+#' @param season.def Named list of season definitions; each element is a
+#'   named numeric vector with \code{"from"} and \code{"to"} entries encoded
+#'   as \code{MMDD} integers.
+#' @param datefield Character string giving the name of the date column in
+#'   \code{dat}.
+#' @return \code{dat} with a \code{Season} factor column added.
+#' @export
 assign.season <- function(dat, season.def, datefield = "Date"){
 
   if (is.null(season.def)) {
     stop("assign.season: season.def is NULL. Could not find a season definition for this species!")
   }
-  
+
   # Short circuit exit if no data
   if (nrow(dat) == 0)
     return(dat)
@@ -1083,14 +1329,14 @@ assign.season <- function(dat, season.def, datefield = "Date"){
   # init
   dat$Season <- NA
   season.index <- rep(NA, nrow(dat))
-  
+
   # convert dates to my format
   dates <- pull(dat, datefield)
   dat$monthday <- month(dates) * 100 + day(dates)
-  
+
   # step through each season with cheesy for loop
   for (i in seq_along(season.def)) {
-    
+
     # Get logical index of matching rows
     if (season.def[[i]]["from"] > season.def[[i]]["to"]) {
       # wraps around new year
@@ -1101,7 +1347,7 @@ assign.season <- function(dat, season.def, datefield = "Date"){
       criteria <-
         between(dat$monthday, season.def[[i]]["from"], season.def[[i]]["to"])
     }
-    
+
     # assign the current season to the index of matching rows
     season.index[criteria] <- i
   }
@@ -1111,7 +1357,7 @@ assign.season <- function(dat, season.def, datefield = "Date"){
     names(season.def)[season.index],
     levels = season.names,
   )
-  
+
   if(any(is.na(dat$Season)))
     warning(sprintf("assign.season: %d rows failed to have season assigned",
                     sum(is.na(dat$Season))), immediate. = TRUE)
@@ -1119,7 +1365,17 @@ assign.season <- function(dat, season.def, datefield = "Date"){
 }
 
 
-# Convert a dataframe to sf and save as shapefile. Called from Extract_data.Rmd
+#' Convert a data frame to sf and write as a shapefile
+#'
+#' @param df Data frame to convert.
+#' @param coords Character vector of two column names giving longitude and
+#'   latitude.
+#' @param crs Input CRS; default WGS 84 (EPSG 4326).
+#' @param out.proj Target CRS to reproject to before writing.
+#' @param dsn Directory path for the output shapefile.
+#' @param layer Layer name (filename without extension) for the shapefile.
+#' @return \code{invisible(NULL)}, called for its side-effect (file written).
+#' @export
 df.to.shapefile <- function(df,
                             coords = c("LongStart", "LatStart"),
                             crs = st_crs(4326),
@@ -1140,8 +1396,17 @@ df.to.shapefile <- function(df,
     )
 }
 
-# Get distances and SD between successive GPS points along a watch. Called from
-# Extract_data.Rmd.
+#' Compute distances and their SD between successive GPS positions in a watch
+#'
+#' Adds \code{dists} and \code{dists.sd} columns to a single-row watch data
+#' frame that contains a \code{posns} list column of GPS coordinates.
+#'
+#' @param watch Single-row data frame with a \code{posns} list column
+#'   containing a matrix of GPS coordinates.
+#' @return \code{watch} augmented with \code{dists} (list column of pairwise
+#'   distances in metres) and \code{dists.sd} (SD of those distances, or
+#'   \code{-1} if fewer than 3 positions).
+#' @export
 add.dist.sd <- function(watch) {
   if (nrow(watch$posns[[1]]) > 2) {
     watch$dists <-
@@ -1153,119 +1418,151 @@ add.dist.sd <- function(watch) {
   watch
 }
 
-# get the sum of lengths between GPS positions for a given watch. Return value
-# is in km. Called from Extract_data.Rmd.
+#' Compute the GPS-track length of a watch in kilometres
+#'
+#' Filters \code{posns} to the time window of \code{watch} and sums geodesic
+#' distances between consecutive positions.
+#'
+#' @param watch Single-row data frame with \code{WatchStartTime} and
+#'   \code{WatchEndTime} columns.
+#' @param posns Data frame of GPS positions with a \code{datetime} column.
+#' @return Numeric scalar: total track length in km (0 if fewer than 2
+#'   positions).
+#' @export
 get.gps.length <- function(watch, posns) {
-  # get positions in this watch  
+  # get positions in this watch
   posns <- filter(posns,
                   between(posns$datetime, watch$WatchStartTime, watch$WatchEndTime))
-  
+
   # sum distances between the points. Note that the units of val will
   # depend on the projection of the coords in posns, but we assume here
   # they are in meters
   if (nrow(posns) >= 2) {
     val <-
-      list(geodist::geodist(posns, sequential = TRUE, measure = "geodesic")) %>% 
-      unlist %>% 
+      list(geodist::geodist(posns, sequential = TRUE, measure = "geodesic")) %>%
+      unlist %>%
       sum
   } else {
     val <- 0
   }
-  
+
   val/1000
-} 
+}
 
 
-# make a raster from an sf object element for a given season. Called from
-# dsm.pred()
+#' Rasterize one variable from a seasonal sf prediction grid
+#'
+#' Filters \code{obj} to \code{season}, converts to a \code{SpatVector}, and
+#' rasterizes \code{variable} onto a grid whose resolution is
+#' \code{predgridCellLength * 1000} metres (project global).
+#'
+#' @param season Character string season label used to filter \code{obj}.
+#' @param obj \code{sf} data frame with a \code{Season} column and a column
+#'   named \code{variable}.
+#' @param variable Character string name of the column to rasterize.
+#' @return A \code{SpatRaster} layer for the given season.
+#' @export
 make.season.raster <- function(season, obj, variable) {
-  v <- filter(obj, Season == season) %>% 
+  v <- filter(obj, Season == season) %>%
     # Convert sf to SpatVector
     vect()
-  
+
   # Create a raster template with the same extent and resolution. Assumes
   # predgridCellLength is in km and raster projection units are metres.
   r <- rast(v, resolution = predgridCellLength * 1000)
-    
+
   # Rasterize, using an attribute field (e.g., "ID")
   ret <- rasterize(v, r, field = variable)
-    
+
   ret
 }
 
-# copy objects from one env to another. Useful after running a background job
-# whose results are returned in an environment that you save in an .rda file.
-# Reloading the .rda into a clean session will give one object (the environment)
-# in the global env. So use:
-#
-# copy.env(name_of_loaded_env, .GlobalEnv)
+#' Copy all objects from one environment to another
+#'
+#' Useful after reloading a background job result saved as an \code{.rda}
+#' file: call \code{copy.env(loaded_env, .GlobalEnv)} to promote all objects
+#' into the global environment.
+#'
+#' @param src Source environment.
+#' @param dst Destination environment.
+#' @return \code{invisible(NULL)}.
+#' @export
 copy.env <- function(src, dst) {
-  for(n in ls(src, all.names=TRUE)) 
+  for(n in ls(src, all.names=TRUE))
     assign(n, get(n, src), dst)
 }
 
-## Create initial segment data from watches
-# inproj - proj4string or EPSG of input watches
-# outproj - proj4string or EPSG of output segdata
-# depth and depht.g rasters are created by predgrid creation and are passed in.
-#
-# Note internally all extraction of environmental values from rasters uses
-# segProj and all saved rasters are in segProj. So, watch data coords will need
-# to be in segProj to do the extractino
-# 
-# Not using rxtractogon any more. Instead, netcdf files have been downloaded by hand 
-# and rasters extracted from them. Those rasters are utilized here.
+#' Build segment data with environmental covariates from watch data
+#'
+#' Creates the DSM segment data frame from \code{the.data$watches}, extracts
+#' depth, depth gradient, SST, and SST gradient at each watch location from
+#' pre-downloaded raster files, scales all covariates, and saves the result
+#' as both an RData file and a shapefile.
+#'
+#' Expects project globals \code{predLayerStudyAreaDir}, \code{segdatloc},
+#' and \code{ShapeDir} in the calling environment.
+#'
+#' @param the.data Named list with at least a \code{watches} element (as
+#'   returned by \code{\link{create.survey.data}}).
+#' @param study.area \code{sf} polygon defining the study area.
+#' @param inproj EPSG code or CRS for input watch coordinates.
+#' @param outproj EPSG code or CRS for output segdata.
+#' @param scale.factors Named list of mean and SD values used to standardise
+#'   each covariate (e.g. \code{list(depth_mean = x, depth_sd = y, ...)}).
+#' @param verbose If \code{TRUE}, print progress messages.
+#' @return \code{sf} data frame of segment data with covariates attached.
+#' @export
 create.segdata <- function(the.data,
                            study.area,
                            inproj,
                            outproj,
                            scale.factors,
                            verbose = FALSE) {
-  
+
   # create initial segdata and reproject
   if (verbose) message("Creating initial segdata from watches")
-  segdata <- the.data$watches %>% 
+  segdata <- the.data$watches %>%
     rename(Effort = WatchLenKm) %>%
     mutate(TransectID = as.character(TransectID),
            year = lubridate::year(Date),
            yday = lubridate::yday(Date),
            MonthYear = format(Date, "%Y-%m"),
-           segment.area = Effort * TotalWidthKm) %>% 
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = inproj, remove = FALSE) %>% 
-    st_transform(outproj) %>% 
-    cbind(st_coordinates(.)) %>% 
+           segment.area = Effort * TotalWidthKm) %>%
+    st_as_sf(coords = c("LongStart", "LatStart"), crs = inproj, remove = FALSE) %>%
+    st_transform(outproj) %>%
+    cbind(st_coordinates(.)) %>%
     rename(x = X, y = Y)
-  
+
   ###---------------------------------------------------------------------------
-  #### Load rasters 
+  #### Load rasters
   if (verbose) message("Loading environmental rasters")
-  
+
   # get the dates of monthly rasters needed (ie. sst, sst.g, etc) so we can read
   # the needed files into a big SpatRaster
-  dates.needed <- segdata$Date %>% 
-    as.character %>% 
-    str_sub(end = -4) %>% 
-    paste0("-16") %>% 
-    unique %>% 
+  dates.needed <- segdata$Date %>%
+    as.character %>%
+    str_sub(end = -4) %>%
+    paste0("-16") %>%
+    unique %>%
     str_sort
-  
+
   ### Depth and other static rasters
   # Depth
   depth <- rast(file.path(predLayerStudyAreaDir, "depth.img"))
-  
+
   # Depth gradient
   depth.g <- rast(file.path(predLayerStudyAreaDir, "depth.g.img"))
-  
-  # SST  
+
+  # SST
   files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.", dates.needed, ".img"))
   sst <- rast(files)
-  
+
   # SST gradient
   files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.g.", dates.needed, ".img"))
   sst.g <- rast(files)
-  
+
   ###---------------------------------------------------------------------------
-  ### Extract raster values at segdata locations  
+  ### Extract raster values at segdata locations
 
   ### Extract depth values
   if (verbose) message("Extracting depth at watch locations")
@@ -1274,9 +1571,9 @@ create.segdata <- function(the.data,
       depth,
       vect(segdata),
       bind = TRUE
-    ) %>%  
-    st_as_sf 
-  
+    ) %>%
+    st_as_sf
+
   ### Extract depth gradient values
   if (verbose) message("Extracting depth gradient at watch locations")
   segdata <-
@@ -1284,9 +1581,9 @@ create.segdata <- function(the.data,
       depth.g,
       vect(segdata),
       bind = TRUE
-    ) %>%  
-    st_as_sf 
-  
+    ) %>%
+    st_as_sf
+
   ### Extract SST values
   if (verbose) message("Extracting sst at watch locations")
   needed.layers <- paste0("sst.", segdata$MonthYear, "-16")
@@ -1296,9 +1593,9 @@ create.segdata <- function(the.data,
       vect(segdata),
       layer = needed.layers,
       bind = TRUE
-    ) %>% 
-    st_as_sf %>% 
-    rename(sst = value) %>% 
+    ) %>%
+    st_as_sf %>%
+    rename(sst = value) %>%
     select(-layer) # Note that layer is off by one even though the sst values is correct
 
   ### Extract SST gradient values
@@ -1310,15 +1607,15 @@ create.segdata <- function(the.data,
       vect(segdata),
       layer = needed.layers,
       bind = TRUE
-    ) %>% 
-    st_as_sf %>% 
-    rename(sst.g = value) %>% 
+    ) %>%
+    st_as_sf %>%
+    rename(sst.g = value) %>%
     select(-layer) # Note that layer is off by one even though the sst values is correct
-  
+
   ###---------------------------------------------------------------------------
   ## Add scaled versions of all preds.
   if (verbose) message("Scaling covars")
-  
+
   segdata %<>%
     mutate(depth.sc = (depth - scale.factors$depth_mean)/scale.factors$depth_sd,
            depth.g.sc = (depth.g - scale.factors$depth.g_mean)/scale.factors$depth.g_sd,
@@ -1327,7 +1624,7 @@ create.segdata <- function(the.data,
            sst.sc = (sst - scale.factors$sst_mean)/scale.factors$sst_sd,
            sst.g.sc = (sst.g - scale.factors$sst.g_mean)/scale.factors$sst.g_sd,
     )
-  
+
   ###---------------------------------------------------------------------------
   ## Save segdata
   if (verbose) message("Saving results")
@@ -1340,47 +1637,34 @@ create.segdata <- function(the.data,
     driver = "ESRI Shapefile",
     delete_layer = TRUE
   )
-    
+
   if (verbose) print("Done.")
   segdata
 }
 
-# NOTE: no longer used due to issues with timeouts/lags/delays/etc. 
-# but kept for posterity in case I return to this approach.
-#
-#
-# Extract remote sensing data given by dataset and parameter in a polygon given
-# by xcoord, ycoord (decimal degrees) for date given by tcoord and convert to a
-# raster with projection prj.
-#
-# note: if tcoord is a length 2 vector, rxtractogon will return a whole series
-# of data from tcoord[1] to tcoord[2], however that is not the intended use
-# here.
-#
-# NOTE: to get the right monthly raster, tcoord must be of form "year-month-15"
-# (or so), b/c rxtractogon() will choose the monthly dataset with the
-# closest data so specifying "year-month" or "year-month-01" may get the previous
-# month, which will cause no end of tears when trying to debug....
-#
-#
-# this is designed to be used as: map(tcoords, rxtractogon.rast, blah, blah,
-# blah, ...) to extract one raster per tcoord
-# #
-# Params:
-# tcoord - time coordinate for dataset to download. Not all datasets (e.g. ETOPO depth)
-#     have a tcoord in which case it should be null.
-#
-# dataset - name of ERDDAP dataset to access (e.g. jplMURSST41mday)
-#
-# parameter - name of paramter to get from dataset (e.g. sst)
-#
-# xcoord, ycoord - outline of area required (it will extract the bounding box)
-#
-# plotit - plot downloaded data
-#
-# saveit - save downloaded data to RasterDir 
-# 
-# folder - 
+#' Download one ERDDAP raster via rxtractogon
+#'
+#' \strong{Note: no longer used} due to timeout and lag issues; retained for
+#' reference.  Calls \code{rerddapXtracto::rxtractogon()} for the given time
+#' coordinate and returns a \code{RasterLayer}.
+#'
+#' @param tcoord Character string time coordinate (e.g.
+#'   \code{"2020-06-15"}), or \code{NULL} for static datasets such as
+#'   bathymetry.  Must be a single value; use with \code{purrr::map()} to
+#'   iterate over dates.
+#' @param dataset ERDDAP dataset identifier (e.g.
+#'   \code{"jplMURSST41mday"}).
+#' @param parameter Name of the variable within the dataset (e.g.
+#'   \code{"sst"}).
+#' @param xcoord Numeric vector of longitudes defining the bounding polygon.
+#' @param ycoord Numeric vector of latitudes defining the bounding polygon.
+#' @param plotit If \code{TRUE}, plot the downloaded raster.
+#' @param saveit If \code{TRUE}, write the raster to \code{folder} in HFA
+#'   format.
+#' @param folder Directory path for saving the raster when \code{saveit =
+#'   TRUE}.
+#' @return A \code{RasterLayer} in the input projection of the ERDDAP source.
+#' @export
 rxtractogon.rast <-
   function(tcoord,
            dataset,
@@ -1390,17 +1674,17 @@ rxtractogon.rast <-
            plotit = FALSE,
            saveit = FALSE,
            folder) {
-    
+
   # Some dataset (ie depth) don't require a tcoord
   if (is.null(tcoord)) {
     print(sprintf("Extracting %s from %s", parameter, dataset))
   } else {
     if (length(tcoord) != 1)
       stop(sprintf("tcoord should have length 1 but has length %d", length(tcoord)))
-    
+
     print(sprintf("Extracting %s from %s for %s", parameter, dataset, tcoord))
   }
-  
+
   dat <-
     rxtractogon(
       rerddap::info(dataset),
@@ -1413,7 +1697,7 @@ rxtractogon.rast <-
   dat <- pluck(dat, 1) # use 1 since it is always 1st element, but not always called same as value of parameter
   if (length(dim(dat)) > 2) # remove useless third dimension
     dat <- dat[,,1]
-  
+
   rast <- dat %>%
     t %>%                   # rxtracto returns matrix in odd order with x and y transposed and south to north so: transpose
     .[nrow(.):1, ] %>%       # ... and reverse order of rows
@@ -1424,31 +1708,38 @@ rxtractogon.rast <-
       ymx = max(ycoord),
       crs = latlongproj
     )
-  
+
   if (plotit)
     plot(rast, main = sprintf("%s from %s for %s", parameter, dataset, tcoord))
-  
+
   if (saveit) {
-    
+
     if (is.null(tcoord))
       filename <- file.path(folder, paste(layername, "img", sep = "."))
     else
       filename <- file.path(folder, paste(layername, tcoord, "img", sep = "."))
-    
+
     message("Saving downloaded ERDDAP raster to ", filename)
     if (!dir.exists(folder))
       dir.create(folder, recursive = TRUE)
     writeRaster(rast, filename = filename, format = "HFA", overwrite = TRUE)
   }
-  
+
   rast
 }
 
-# XXX No longer used??
-# function stolen from http://r-sig-geo.2731867.n2.nabble.com/Run-focal-function-on-a-multi-layer-raster-td7589931.html
-# to perform focal() on RasterStack
+#' Apply a focal filter to every layer of a RasterStack
+#'
+#' \strong{Note: possibly no longer used.}
+#'
+#' @param x A \code{RasterStack} (or filename that can be read as one).
+#' @param w Focal weight matrix passed to \code{\link[raster]{focal}}.
+#' @param ... Additional arguments passed to \code{\link[raster]{focal}}.
+#' @return A \code{RasterStack} with the focal operation applied to each
+#'   layer.
+#' @export
 multi.focal <- function(x, w = matrix(1, nrow = 3, ncol = 3), ...) {
-  
+
   if (is.character(x)) {
     x <- brick(x)
   }
@@ -1456,46 +1747,56 @@ multi.focal <- function(x, w = matrix(1, nrow = 3, ncol = 3), ...) {
   fun <- function(ind, x, w, ...){
     focal(x[[ind]], w = w, ...)
   }
-  
+
   n <- seq(nlayers(x))
   list <- lapply(X = n, FUN = fun, x = x, w = w, ...)
-  
+
   out <- stack(list)
   return(out)
 }
 
-# Reads all raster files in folder with names matching pattern and returns a raster
-# stack.
-# 
-# Useful for debugging and to avoid downloading from ERDDAP again.
-# 
-# e.g. x <- recreate.sst.mnth.from.files(RasterDir, "sst.+img$")
+#' Rebuild a raster stack from previously saved files
+#'
+#' Reads all files in \code{folder} whose names match \code{pattern} and
+#' stacks them.  Useful for reloading cached rasters without re-downloading
+#' from ERDDAP.
+#'
+#' @param folder Directory path to search.
+#' @param pattern Regular expression matched against filenames (e.g.
+#'   \code{"sst.+img$"}).
+#' @return A \code{RasterStack} with layer names derived from the filenames.
+#' @export
 recreate.sst.mnth.from.files <- function(folder, pattern){
   files <- list.files(folder, pattern = pattern, full.names = T)
-  r <- map(files, raster) %>% 
+  r <- map(files, raster) %>%
     stack
-  names(r) <- basename(files) %>% 
+  names(r) <- basename(files) %>%
     str_replace(fixed(".img"), "")
   r
 }
 
-# Extract data from a 3d matrix of data retrieved from a netCDF file
-# with ncvar_get() (arg. dat). Create a raster and name it according to the.date. 
-# 
-# Note: the data in the y-dimension need to be flipped since they are "upside down"
-#    in netcdf data.
-# 
-# 
-# dat - 3D matrix of values. Dimensions are (lon, lat, month) (may have lon and lat 
-#   reversed) 
-# the.date - the date (16 of the month for "sst")
-# index -  index of which month to pick off 
-# datname - the name of the layer (e.g. "sst") that dat represents. only used
-#    to label the plot.
-# x - x coords of dat
-# y - y coords of dat
-# inproj - projection of dat
-# outproj - projection of return raster dat
+#' Create a raster from one time slice of a NetCDF array
+#'
+#' Extracts the layer at position \code{index} from \code{dat}, flips the
+#' y-dimension (which is inverted in NetCDF convention), optionally reprojects
+#' or resamples to match \code{to}, and plots the result.
+#'
+#' @param the.date Date string labelling this layer (used in the plot title
+#'   and passed as the raster name); use \code{""} for static datasets.
+#' @param index Integer index of the time slice to extract from \code{dat}.
+#' @param dat 3-D numeric array with dimensions (lon, lat, time), as returned
+#'   by \code{ncdf4::ncvar_get()}.
+#' @param datname Character string variable name (e.g. \code{"sst"}); used
+#'   in the plot title.
+#' @param x Numeric vector of longitude coordinates.
+#' @param y Numeric vector of latitude coordinates.
+#' @param inproj Projection string or EPSG code for the input data.
+#' @param outproj Target projection for reprojection; ignored when \code{to}
+#'   is supplied.
+#' @param to Optional \code{SpatRaster} template; if supplied the result is
+#'   reprojected, resampled, and masked to match it.
+#' @return A \code{SpatRaster} for the requested time slice.
+#' @export
 create.ncdf.rast <-
   function(the.date,
            index,
@@ -1504,21 +1805,21 @@ create.ncdf.rast <-
            x,
            y,
            inproj,
-           outproj = NULL, 
+           outproj = NULL,
            to = NULL) {
-    
+
   message(sprintf(
       "Creating %s raster %s",
       datname,
       ifelse(as.character(the.date) == "", "", as.character(the.date))
     ))
-  
+
   the.data <- switch(length(dim(dat)), NULL, dat, dat[,, index])
 
   # Make sure data dimensionality is sensible
   if (is.null(the.data))
     stop(paste0("create.ncdf.rast: illegal data dimension: ", dims ))
-  
+
   res <-
     raster::raster(
       t(the.data),
@@ -1528,48 +1829,61 @@ create.ncdf.rast <-
       ymx = max(y),
       crs = CRS(inproj)
     ) %>%
-    raster::flip(direction = "y") %>% 
+    raster::flip(direction = "y") %>%
     rast
-  
+
   # is reprojection/resampling required
   if (!is.null(to)) {
     if (!is.null(outproj))
       warning("create.ncdf.rast: both 'outproj' and 'to' are provided, ignoring outproj",
               immediate. = TRUE)
-    
-    res <- terra::project(res, rast(to), threads = TRUE) %>% 
+
+    res <- terra::project(res, rast(to), threads = TRUE) %>%
       terra::mask(study.area)
   } else if (!is.null(outproj))
-    res <- terra::project(res, outproj, threads = TRUE) %>% 
+    res <- terra::project(res, outproj, threads = TRUE) %>%
       terra::mask(study.area)
-  
+
   plot(res, main = paste(datname, the.date))
   res
 }
 
 
 
-# Extract data from one NetCDF file
-# dataset - character string giving name of dataset to extract. (eg. "sst")
-# XXX TODO: figure out how to replace this with stars::read_ncdf()
+#' Convert a NetCDF file to a SpatRaster or RasterLayer
+#'
+#' Reads the named variable from a NetCDF file using \code{ncdf4} and returns
+#' a single \code{SpatRaster} (multiple layers if the file contains multiple
+#' time steps).
+#'
+#' @param filename Path to the NetCDF file.
+#' @param dataset Character string variable name to extract (e.g.
+#'   \code{"sst"}).
+#' @param inproj Projection string or EPSG code for the NetCDF coordinates.
+#' @param outproj Target projection; ignored when \code{to} is supplied.
+#' @param to Optional \code{SpatRaster} template for reprojection and
+#'   resampling.
+#' @return A named \code{SpatRaster} (one layer per time step, or a single
+#'   layer for static data).
+#' @export
 ncdf.to.raster <- function(filename,
                            dataset,
                            inproj,
                            outproj = NULL,
                            to = NULL) {
-  
+
   message(sprintf("Extracting %s from netCDF file: %s", dataset, filename))
-  
+
   x <- ncdf4::nc_open(filename)
   lon <- ncdf4::ncvar_get(x, "longitude")
   lat <- ncdf4::ncvar_get(x, "latitude")
   dat <- ncdf4::ncvar_get(x, dataset)
-  
+
   # Get dimension descriptors
-  dims <- tidync::tidync(filename) %>% 
-    tidync::activate(dataset) %>% 
+  dims <- tidync::tidync(filename) %>%
+    tidync::activate(dataset) %>%
     tidync::hyper_dims()
-  
+
   # netCDF may have multiple "layers" - one for each time step. Note there may
   # be only 1 time step.
   if ("time" %in% dims$name)
@@ -1593,11 +1907,11 @@ ncdf.to.raster <- function(filename,
       inproj = inproj,
       outproj = outproj,
       to = to
-  ) 
+  )
 
   # If there was more than one date then stack 'em.
   # Otherwise, just peel off the single raster
-  if(length(res) > 1){      
+  if(length(res) > 1){
     res <- rast(res)
     names(res) <- paste(dataset, dates, sep = ".")
   } else {
@@ -1607,21 +1921,28 @@ ncdf.to.raster <- function(filename,
   res
 }
 
-# Reads all raster files in folder with names matching pattern and returns a raster
-# or rasterstack.Called from Extract_env_rasters.Rmd
-# 
-# folder - where to find the files
-# pattern - filename pattern to match e.g. "^jplMURSST41mday.+nc$")
-# variable - the name of the variable in the NetCDF to extract, e.g. "sst"
-# inproj - projection of the input netcdf
-# outproj - projection to reproject to
-# to - a raster to be used to reproject/resample/match extent to. If both
-#     "outproj" and "to" are provided, "outproj" is ignored with a warning.
+#' Import and stack multiple NetCDF files as a SpatRaster
+#'
+#' Lists all files in \code{folder} matching \code{pattern}, calls
+#' \code{\link{ncdf.to.raster}} on each, and stacks the results.
+#'
+#' @param folder Directory path containing the NetCDF files.
+#' @param pattern Regular expression matched against filenames (e.g.
+#'   \code{"^jplMURSST41mday.+nc$"}).
+#' @param variable Character string variable name to extract from each file.
+#' @param inproj Projection string or EPSG code for the NetCDF data.
+#' @param outproj Target projection; ignored when \code{to} is supplied.
+#' @param to Optional \code{SpatRaster} template for reprojection and
+#'   resampling.  When both \code{outproj} and \code{to} are given,
+#'   \code{outproj} is ignored with a warning.
+#' @return A \code{SpatRaster} with all layers stacked (or a single
+#'   \code{SpatRaster} when only one file is found).
+#' @export
 import.netCDF <-
   function(folder, pattern, variable, inproj, outproj = NULL, to = NULL) {
-    
+
   files <- list.files(folder, pattern = pattern, full.names = T)
-  
+
   if (length(files) == 0) {
     stop("import.netCDF: no matching filenames")
   } else {
@@ -1634,8 +1955,8 @@ import.netCDF <-
         inproj = inproj,
         outproj = outproj,
         to = to
-      ) 
-    
+      )
+
     # If only 1 file, just return the first element of the list.
     # Note that if the single file had multiple layers (say years etc)
     # then the single element of res can still be a rasterbrick, but thats ok. I
@@ -1644,29 +1965,45 @@ import.netCDF <-
       res <- rast(res)
     } else
       res <- res[[1]]
-    
-  } 
+
+  }
   res
 }
 
 
-# Function to take a SpatRaster of monthly rasters (all months), extract the monthly
-# rasters of interest and take their mean. Usefule for creating, for example,
-# mean jan, feb, etc monthly averages. Used by Extract_env_rasters.rmd.
+#' Compute the mean raster for a given calendar month
+#'
+#' Selects all layers in \code{r} whose name encodes the given month and
+#' returns their pixel-wise mean.  Used to create climatological monthly
+#' averages from a multi-year monthly raster stack.
+#'
+#' @param mnth Integer calendar month (1 = January, …, 12 = December).
+#' @param r \code{SpatRaster} with layer names containing \code{"-MM-"}
+#'   date strings.
+#' @return A single-layer \code{SpatRaster} representing the mean for
+#'   \code{mnth}.
+#' @export
 rast.monthly.mean <- function(mnth, r){
   message("Getting monthly means for month ", mnth)
   r.mnths <- names(r) %>%
-    str_split_fixed(fixed("."), n = Inf) %>% 
-    extract(, 2) %>% 
-    str_split_fixed(fixed("-"), n = Inf) %>%  
-    extract(, 2) %>% 
+    str_split_fixed(fixed("."), n = Inf) %>%
+    extract(, 2) %>%
+    str_split_fixed(fixed("-"), n = Inf) %>%
+    extract(, 2) %>%
     as.integer
-  
+
   sel <- r[[which(r.mnths == mnth)]]
   mean(sel)
 }
 
-# Produce a dotchart of a dataframe column. Used by Generic_1.5_dsm_EDA.Rmd
+#' Produce a dotchart for a single column of a data frame
+#'
+#' Silently does nothing if \code{varname} is not present in \code{dat}.
+#'
+#' @param varname Character string column name to plot.
+#' @param dat Data frame containing the column.
+#' @return \code{invisible(NULL)}, called for its side-effect (plot).
+#' @export
 do.dotchart <- function(varname, dat) {
   if (varname %in% names(dat))
     dotchart(dat[, varname],
@@ -1675,12 +2012,20 @@ do.dotchart <- function(varname, dat) {
              ylab = "Order of the data")
 }
 
-# Compute seasonal mean for dynamic variable "var" (and its scaled version) from
-# monthly values stored in separate columns in dat.
-# Called once for each season and dynamic variable by get.seas.mean()
-# var - variable of interest (e.g., "sst")
-# dat - normally predgrid containing columns of monthly values variable var
-# start, end - start and end MONTHS to have values averaged across.
+#' Compute seasonal mean for one dynamic variable across a month range
+#'
+#' Averages the per-row monthly columns \code{<var>.MM} (and their scaled
+#' counterparts \code{<var>.MM_sc}) between \code{start} and \code{end}
+#' months and returns the means as a named list.
+#'
+#' @param var Character string variable name (e.g. \code{"sst"}).
+#' @param dat Data frame (normally a prediction grid) containing monthly
+#'   value columns named \code{<var>.<month>}.
+#' @param start Integer start month.
+#' @param end Integer end month.
+#' @return Named list with elements \code{<var>} and \code{<var>_sc}
+#'   containing the row-wise means.
+#' @export
 get.seas.mean.var <- function(var, dat, start, end) {
   var.names <- paste(var, start:end, sep = ".")
   var.names.sc <- paste0(var.names, "_sc")
@@ -1695,34 +2040,45 @@ get.seas.mean.var <- function(var, dat, start, end) {
 }
 
 
-# Compute species-specific seasonal means for dynamic vars listed in dyn.vars
-# mean of appropriate months for each dynamic variable (and their scaled
-# verions) listed in dyn.vars. Called once for each season and species from 
-# create.seasonal.predgrid()
-# 
-# seas - character string given season
-# season.spec - species-specific season boundaries, 
-# dat - normally predgrid containing columns of monthly values for various dynamic 
-#     variable
-# dyn.vars - char vector of names of dynamic variables (e.g. "sst", "sst.g")
+#' Compute seasonal means for all dynamic variables for one season
+#'
+#' Filters \code{dat} to rows matching \code{seas}, then calls
+#' \code{\link{get.seas.mean.var}} for each variable in \code{dyn.vars} to
+#' compute the mean over the months defined in \code{season.spec}.
+#'
+#' @param seas Character string season label.
+#' @param season.spec Named list of season boundary definitions for the
+#'   species (from the project \code{seasons} list).
+#' @param dat Data frame (normally a prediction grid) with monthly covariate
+#'   columns and a \code{Season} column.
+#' @param dyn.vars Character vector of dynamic variable names (e.g.
+#'   \code{c("sst", "sst.g")}).
+#' @return \code{dat} (filtered to \code{seas}) with seasonal mean columns
+#'   appended.
+#' @export
 get.seas.mean <- function(seas, season.spec, dat, dyn.vars) {
   start <- season.spec[[seas]]["from"] %/% 100
   end <- season.spec[[seas]]["to"] %/% 100
-  dat <- filter(dat, as.character(Season) == seas) 
+  dat <- filter(dat, as.character(Season) == seas)
   new.cols <- map(dyn.vars, get.seas.mean.var, dat = dat, start = start, end = end)
   cbind(dat, new.cols)
 }
 
 
-# Save current prediction htmls to folder. Useful for saving and comparing to
-# subsequent improved iterations.
-# 
-# XXX Perhaps not needed anymore now that i'm saving results htmls in git LFS?
+#' Copy prediction HTML reports for all species to a folder
+#'
+#' \strong{Note: may no longer be needed} now that results HTMLs are tracked
+#' in git LFS.  Iterates over \code{spec.grps} (project global) and copies
+#' each species prediction report to \code{folder}.
+#'
+#' @param folder Destination directory path (created if necessary).
+#' @return \code{invisible(NULL)}, called for its side-effect (files copied).
+#' @export
 save.prediction.htmls <- function(folder) {
   if (!dir.exists(folder))
     dir.create(folder, recursive = TRUE)
-  
-  names(spec.grps) %>% 
+
+  names(spec.grps) %>%
     map(function(species) {
       filename <- file.path(ResultsDir, species, paste0(species, "_3_prediction.html"))
       message(sprintf("Copying '%' in '%s'", filename, folder))
@@ -1731,30 +2087,46 @@ save.prediction.htmls <- function(folder) {
 }
 
 
-# Reclassify values in a terra raster, r, according to class.arg, project to
-# layer, to, and save in filename. Used by Extract_env_rasters.rmd
-# 
-# Note: class.arg can be either a 3-col matrix (from, to, becomes), a 2-col 
-#     matrix (is, becomes) or a 1-col matrix (or vector) which specifies cut points.
-#     normally used to convert Inf to NA with class.arg = cbind(Inf, NA)
+#' Reclassify, reproject, mask, and save a SpatRaster
+#'
+#' Passes \code{r} through \code{terra::classify()}, reprojects and resamples
+#' to match \code{to}, masks to \code{to}, and writes the result to
+#' \code{filename}.
+#'
+#' @param r Input \code{SpatRaster}.
+#' @param class.arg Reclassification argument passed to
+#'   \code{\link[terra]{classify}}: a 3-column (from, to, becomes), 2-column
+#'   (is, becomes), or 1-column cut-point matrix.  Commonly
+#'   \code{cbind(Inf, NA)} to convert infinite values to \code{NA}.
+#' @param to \code{SpatRaster} template used for reprojection, resampling,
+#'   and masking.
+#' @param filename Output file path (overwritten if it exists).
+#' @return \code{invisible(NULL)}, called for its side-effect (file written).
+#' @export
 reclassify.project.save <- function(r, class.arg, to, filename){
   outdir <- unique(dirname(filename))
-  
+
   if (!dir.exists(outdir))
     dir.create(outdir, recursive = TRUE )
-  
+
   r %>%
     classify(rcl = class.arg) %>%
     terra::project(y = to,
                    method = "bilinear",
                    threads = TRUE) %>%
-    terra::mask(to) %>% 
+    terra::mask(to) %>%
     terra::writeRaster(filename = filename,
                        overwrite = TRUE)
 }
 
-# extract names for dynamic variables (and their gradients if used) from
-# env_covars table
+#' Return names of dynamic environmental covariates (and their gradients)
+#'
+#' Reads the project-global \code{env_covar_spec} table and returns the names
+#' of all dynamic variables, appending \code{".g"} suffixes for any that have
+#' gradients enabled.
+#'
+#' @return Character vector of dynamic covariate names.
+#' @export
 dynamic.env.covar.names <- function(){
   dyn_vars <- filter(env_covar_spec, var_type == "dynamic")
   grads <- dyn_vars$var_name[dyn_vars$do_gradient]
@@ -1764,24 +2136,31 @@ dynamic.env.covar.names <- function(){
     dyn_vars$var_name
 }
 
-# Create seasonal predgrid - used by Generic_3_prediction.rmd
-# 
-# We will need 1 copy of the basic predgrid for each season. Seasonal dynamic 
-# predictors are formed as the average of monthly values within each season. Seasons
-# are defined on a per-species basis.
-# 
-# Once this seasonal predgrid is created, we will again need to make multiple copies
-# of it (just like segdata - 1 for Fly and 1 for Swim). 
-# Update May 30, 2025 - there should be as many copies as there are levels of the
-#  platform variable in the dsm model. This can be found in ddftype_to_platform().
-#
+#' Build a species-specific seasonal prediction grid
+#'
+#' Creates four seasonal copies of \code{predgrid}, computes seasonal mean
+#' values for all dynamic covariates, drops the monthly columns, and then
+#' replicates the grid once per level of the \code{platform} factor (one copy
+#' per level of \code{ddftype_to_platform}).  The combined grid is saved as a
+#' shapefile.
+#'
+#' Expects project globals \code{seasons}, \code{season.names},
+#' \code{ddftype_to_platform}, and \code{ShapeDir} in the calling
+#' environment.
+#'
+#' @param species Character string species code.
+#' @param predgrid \code{sf} data frame representing the prediction grid (one
+#'   row per cell, with monthly covariate columns).
+#' @return \code{sf} data frame with one row per (cell × season × platform)
+#'   combination, containing seasonal mean covariates.
+#' @export
 create.seasonal.predgrid <- function(species, predgrid) {
   # Get species-specific season setting and create predgrid.all.seas with 4 seasons
   season.spec <- seasons[[species]]
   ret <-
     rbind(predgrid, predgrid, predgrid, predgrid) %>%
     mutate(Season = as.factor(rep(season.names, each = nrow(predgrid))))
-  
+
   # Get seasonal means for dynamic variables
   match.re <- c("[0-9]$", "[0-9]_sc$")
   p.geom <- st_geometry(ret) # save geometry
@@ -1797,31 +2176,31 @@ create.seasonal.predgrid <- function(species, predgrid) {
     select(!matches(match.re)) %>%
     cbind(p.geom) %>% # add geometry back in
     st_sf
-  
+
   # Rename scaled columns to match what was in the model specs. This is harmless
   # if they are already named correctly with .sc.
   nms <- gsub( "_sc", ".sc", names(ret), fixed = TRUE)
   names(ret) <- nms
-  
+
   # Save the seasonal prediction grid for GIS mapping. When doing multiple
   # species, there will be a separate predgrid for each species since it's
-  # possible for the season boundaries to be species specific.  
-  st_write(ret, 
+  # possible for the season boundaries to be species specific.
+  st_write(ret,
              dsn = ShapeDir,
              layer = paste0(species, "_predgrid.shp"),
              driver = "ESRI Shapefile",
              delete_layer = TRUE
            )
-  
+
   # Make a copy for each value of platform in model (technically only needed by
   # factor and fs models but make copy anyways and run.dsm.pred will handle it
   # correctly for nofactor model).
-  ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>% 
-    setNames(unique(ddftype_to_platform)) %>% 
-    list_rbind(names_to = "platform") %>% 
+  ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
+    setNames(unique(ddftype_to_platform)) %>%
+    list_rbind(names_to = "platform") %>%
     st_sf
 
-  
+
   # From multiddf paper code:
   # create an extra column to account for the variance propagation model
   # the variance propagation adds a random effect covariate named "XX"
@@ -1830,13 +2209,24 @@ create.seasonal.predgrid <- function(species, predgrid) {
   ret
 }
 
-# Do prediction maps for all four seasons, for a single model, and species.
-# Called from Generic_3_prediction.rmd 
-# 
-# dat - a dataframe with 3 sets of seasonal predicions: 1 set for flying, 
-#     1 set for swimming, and 1 set for combined.
-#     
-# subs - which subset of predictions to plot: flying, swimming or combined
+#' Produce leaflet prediction maps for all four seasons
+#'
+#' Iterates over \code{season.names} (project global), calling
+#' \code{\link{do.pred.map}} for each season, and returns the resulting maps
+#' as a named list.
+#'
+#' @param dat \code{sf} data frame of prediction grid cells with columns
+#'   \code{subset}, \code{Season}, \code{Dens}, and geometry.
+#' @param model Fitted \code{dsm} object; its \code{$data} element is used to
+#'   add estimated abundance circles.
+#' @param modname Character string model name; used in messages.
+#' @param species Character string species code; used in messages and legend
+#'   titles.
+#' @param subs Which platform subset to map: \code{"Combined"} (default),
+#'   \code{"F"} (flying), or \code{"W"} (water).
+#' @param ... Additional arguments passed to \code{\link{do.pred.map}}.
+#' @return Named list of leaflet map objects, one per season.
+#' @export
 do.pred.maps <-
   function(dat,
            model,
@@ -1844,32 +2234,44 @@ do.pred.maps <-
            species,
            subs = c("Combined", "F", "W"),
            ...) {
-    
-    
+
+
   # Get data subset
   subs <- match.arg(subs)
   dat <- filter(dat, subset == subs)
-  segdata <- model$data %>% 
+  segdata <- model$data %>%
     st_as_sf
-  
+
   message(sprintf("%s, %s: Doing %s abundance prediction map for",
                   species, modname, subs))
-  
-    
-  ret <- season.names %>% 
+
+
+  ret <- season.names %>%
     map(do.pred.map, dat, segdata, modname, species, subs, ...)
 
   names(ret) <- season.names
   ret
 }
 
-# Produce a leaflet map of Density predictions from model modname for one 
-# species, season, and subset (Combined, F, or W). Called from do.pred.maps()
-# 
-# dat - predgrid (sf polygons) with NHat and Dens for all seasons
-# segdata - segdata for all seasons
-# samp_n - number of polygons from dat to plot. If NA, plot all. Otherwise, draw a 
-#    sample of samp_n from the rows of dat (after filtering by season)
+#' Produce a single-season leaflet density prediction map
+#'
+#' Filters \code{dat} and \code{segdata} to \code{season}, simplifies
+#' geometries, and builds a leaflet map with a filled-polygon density layer
+#' and proportional-circle estimated abundance layer.
+#'
+#' @param season Character string season label.
+#' @param dat \code{sf} prediction grid polygons with \code{Season} and
+#'   \code{Dens} columns.
+#' @param segdata \code{sf} segment data with \code{Season}, \code{LongStart},
+#'   \code{LatStart}, \code{estAbund}, and \code{rawCount} columns.
+#' @param modname Character string model name; used in legend.
+#' @param species Character string species code; used in legend.
+#' @param subset Character string platform subset label
+#'   (\code{"Combined"}, \code{"F"}, or \code{"W"}).
+#' @param samp_n Integer; if not \code{NA}, draw a random sample of this
+#'   many prediction polygons (for performance testing).
+#' @return A \code{leaflet} map object.
+#' @export
 do.pred.map <-
   function(season,
            dat,
@@ -1878,25 +2280,25 @@ do.pred.map <-
            species,
            subset,
            samp_n = NA) {
-    
-    
+
+
   message(sprintf("\t%s",season))
-  
+
   # Filter by season, and create log Density for potential mapping - not currently
   # used.
   dat <- dat %>%
     filter(Season == season) %>%
     st_transform(latlongproj) %>%
     mutate(lDens = case_when(Dens == 0 ~ 0,
-                             TRUE ~ log(Dens))) %>% 
-    select(Dens, geometry) %>% 
+                             TRUE ~ log(Dens))) %>%
+    select(Dens, geometry) %>%
     ms_simplify()
-  
-  segdata <- segdata %>% 
-    filter(Season == season) %>% 
-    get.combined.segdata() %>% 
-    st_transform(latlongproj) 
-  
+
+  segdata <- segdata %>%
+    filter(Season == season) %>%
+    get.combined.segdata() %>%
+    st_transform(latlongproj)
+
   # Plot only a sample of the polygons for efficiency? Typically used for
   # testing.
   if (!is.na(samp_n)) {
@@ -1909,10 +2311,10 @@ do.pred.map <-
   dat <- mutate(dat,
                 Dens = case_when(Dens > MAX_DENS_VALUE ~ NA,
                                  TRUE ~ Dens))
-  
+
   if ((n.na <- sum(is.na(dat$Dens))) > 0)
     message("Warning: ", n.na, " cells larger than ", MAX_DENS_VALUE, " were converted to NA")
-  
+
   groups <- c("est abund", "Pred Dens")
   m <-
     leaflet(
@@ -1923,7 +2325,7 @@ do.pred.map <-
     # if you want to save the map and reload in a subsequent R session - it won't
     # work.
     addTiles(options = tileOptions(updateWhenZooming = FALSE,
-                                 updateWhenIdle = FALSE)) %>% 
+                                 updateWhenIdle = FALSE)) %>%
     addMapPane("density", zIndex = 410) %>%
     addMapPane("abund", zIndex = 420) %>%
     # Predicted density
@@ -1974,22 +2376,29 @@ do.pred.map <-
     addLayersControl(overlayGroups = groups,
                      options = layersControlOptions(collapsed = FALSE)) %>%
     hideGroup(c("est abund"))
-  
+
   m
 }
 
-# Find the species grp that a species Alpha code belongs to. Used by
-# Extract_data.Rmd.
+#' Find which species group a species alpha code belongs to
+#'
+#' Searches the project global \code{spec.grps} list and returns the name of
+#' the group containing \code{species}.  Vectorised over \code{species}.
+#'
+#' @param species Character string (or vector) of species alpha codes.
+#' @return Character string group name, or \code{NA} if the species is not
+#'   found in any group.
+#' @export
 find.spec.grp <- Vectorize(function(species) {
   if (is.na(species))
     return(NA)
-  
+
   res <- names(spec.grps[grepl(species, spec.grps)])
-  
+
   # No match
   if (length(res) == 0)
     return(NA)
-  
+
   # Too many matches
   if (length(res) > 1)
     stop(sprintf(
@@ -1997,19 +2406,24 @@ find.spec.grp <- Vectorize(function(species) {
       species,
       paste(res, collapse = ", ")
     ))
-  
+
   res
 })
 
 
 
-# Take segdata that has copies for each platform and combine them by summing
-# estimated densities, abundances, counts, etc.
-#
-# Used by do.pred.map() and create.species.shapefiles()
-#
-# segdata - assumed to be in format returned by create.dsm.data
-#
+#' Collapse per-platform segdata copies into a single combined segdata
+#'
+#' Species-specific segdata contains multiple copies of each segment (one per
+#' ddftype).  This function strips the ddftype suffix from \code{Sample.Label}
+#' and sums \code{estDens}, \code{estAbund}, and \code{rawCount} across the
+#' copies, returning one row per original segment.
+#'
+#' @param segdata \code{sf} segment data frame in the format returned by
+#'   \code{\link{create.dsm.data}}, with \code{Sample.Label} suffixes.
+#' @return \code{sf} data frame with one row per segment and summed abundance
+#'   estimates.
+#' @export
 get.combined.segdata <- function(segdata){
   # Note that the species-specific segdata has multiple copies for each original
   # segment - currently up to 4 per aerial and 4 per ship-based segments: one
@@ -2035,66 +2449,78 @@ get.combined.segdata <- function(segdata){
       platform
     ) %>%
     # Remove Sample_Label suffix (_x_x)
-    mutate(Sample.Label = str_sub(Sample.Label, 1, nchar(Sample.Label) - 
+    mutate(Sample.Label = str_sub(Sample.Label, 1, nchar(Sample.Label) -
                                     nchar(ddftype_levels[1]) - 1)) %>%
     arrange(Sample.Label)
-  
+
   # There are now multiple consecutive rows for each segment.
 
   # Figure out how many copies of each segment there are. Complain if not all the
-  # same. This relies on having a fixed symmetric setup where, for example, 
-  # the aerial segments are copied the same number of times as the ship ones 
+  # same. This relies on having a fixed symmetric setup where, for example,
+  # the aerial segments are copied the same number of times as the ship ones
   # (ie once each for Water, Fly, and Strip)
   rl <- rle(segdata$Sample.Label)
   stopifnot(length(unique(rl$lengths)) == 1)
   ncopies <- rl$lengths[1]
-  
+
   # Keep every nth row, summing values within each group of ncopies segdata rows,
   # and make it a column in  new data frame containing only every nth segdata row
   # in order to get one row per segment. Note that rollapply() uses the full
   # segdata (before selecting every nth row)
-  
-  keep <- rep(c(TRUE, rep(FALSE, times = ncopies - 1)), 
+
+  keep <- rep(c(TRUE, rep(FALSE, times = ncopies - 1)),
               times = nrow(segdata) / ncopies)
   res <- segdata[keep,] %>%
     mutate(
       estDens = zoo::rollapply(segdata$estDens, ncopies, by = ncopies, sum),
       estAbund = zoo::rollapply(segdata$estAbund, ncopies, by = ncopies, sum),
       rawCount = zoo::rollapply(segdata$rawCount, ncopies, by = ncopies, sum)
-    ) %>% 
+    ) %>%
     select(-platform) # No longer makes any sense since it will have value of first row in group
- 
-  res 
+
+  res
 }
 
-# Sum fly and water detection-corrected segment densities for a given species in
-# each segment (optionally limited to only those sample labels in sample.labs)
-# and save as a set of seasonal shapefiles in folder. Called from Generic_2_dsm.Rmd
+#' Export seasonal segdata and distdata shapefiles for a species
+#'
+#' Collapses per-platform segdata copies with
+#' \code{\link{get.combined.segdata}}, optionally subsets to
+#' \code{sample.labs}, and writes one shapefile per season plus a single
+#' distdata shapefile.
+#'
+#' @param spec Character string species code.
+#' @param sample.labs Optional character vector of \code{Sample.Label} values
+#'   to restrict the output to.
+#' @param folder Directory path for output shapefiles.
+#' @param segdata \code{sf} segment data frame.
+#' @param distdata Data frame of observation data.
+#' @return \code{invisible(NULL)}, called for its side-effect (files written).
+#' @export
 create.species.shapefiles <-
   function(spec,
            sample.labs = NULL,
            folder,
            segdata,
            distdata) {
-    
+
     # Get segdata for spec with fly/water combined.
     segdata <- get.combined.segdata(segdata)
-    
+
     # Restrict to certain sample labels (useful for cropping to only those samples
     # in a certain spatial area)
     if (!is.null(sample.labs))
       segdata <- filter(segdata, Sample.Label %in% sample.labs)
-    
+
     # save as seasonal shapefiles if required
     for (seas in season.names) {
       layer <- paste(spec, seas, "segdata", sep = "_")
-      
+
       # if shapefile doesn't exist or recreateSpecSegShapefiles is TRUE then
       # save the shapefile
       if (!file.exists(paste0(folder, "/", layer, ".shp")) ||
           recreateSpecSegShapefiles) {
         message(sprintf("Creating segdata shapefile for %s %s", spec, seas))
-        
+
         filter(segdata, Season == seas) %>%
           st_write(
             dsn = folder,
@@ -2105,15 +2531,15 @@ create.species.shapefiles <-
       }
     }
 
-    #### Now do same for distdata. 
+    #### Now do same for distdata.
     # Distdata isn't seasonal b/c it is used in its entirety for the ddf (but
     # with season as covar if needed)
     layer <- paste(spec, "distdata", sep = "_")
-    
+
     if (!file.exists(paste0(folder, "/", layer, ".shp")) ||
         recreateDistdataShapefile) {
       message(sprintf("Creating distdata shapefile for %s", spec))
-      
+
       # Save distdata as a shapefile.
       distdata %>%
         # Needed since numeric ids can get too big for shapefile numbers
@@ -2132,10 +2558,17 @@ create.species.shapefiles <-
     }
   }
 
-# Return names of prediction raster file 
-# for a single species/season pair. Used by 03b_Save_chosen_model_predictions.Rmd
+#' Return the filename for the final model prediction raster
+#'
+#' Constructs the canonical filename for the GeoTIFF storing density
+#' predictions for \code{spec} and \code{season}.
+#'
+#' @param spec Character string species code.
+#' @param season Character string season label.
+#' @return Character string filename (without directory path).
+#' @export
 get.final.prediction.name <- function(spec, season){
-  
+
   # Get final model predictions raster filename
   modname <- final.dsm.models$dsm_final_name[final.dsm.models$species == spec]
   filename <- sprintf("%s.%s.%s.%d_sqkm.tif",
@@ -2146,11 +2579,17 @@ get.final.prediction.name <- function(spec, season){
   filename
 }
 
-# Return names of variance raster file 
-# for a single species/season pair. Used by 04.703b_Save_chosen_model_variance.Rmd
-# Should be combined with previous function.
+#' Return the filename for the final model CV raster
+#'
+#' Constructs the canonical filename for the GeoTIFF storing the coefficient
+#' of variation of predictions for \code{spec} and \code{season}.
+#'
+#' @param spec Character string species code.
+#' @param season Character string season label.
+#' @return Character string filename (without directory path).
+#' @export
 get.final.variance.name <- function(spec, season){
-  
+
   # Get final model variance raster filename
   modname <- final.dsm.models$dsm_final_name[final.dsm.models$species == spec]
   filename <- sprintf("%s.%s.%s.%d_sqkm_CV.tif",
@@ -2161,21 +2600,26 @@ get.final.variance.name <- function(spec, season){
   filename
 }
 
-#
-# Copy final model predictions html summary to a subfolder (ie
-# basename(predVersionDir)) of the species-specific "Prediction summary" folder.
-# Used by 03b_Save_chosen_model_predictions.Rmd. 
+#' Copy a species prediction HTML summary to the versioned predictions folder
+#'
+#' Copies the HTML report for the final model of \code{spec} into
+#' \code{predVersionDir} (project global) and also copies the accompanying
+#' \code{lib/} folder if needed.
+#'
+#' @param spec Character string species code.
+#' @return \code{invisible(NULL)}, called for its side-effect (file copied).
+#' @export
 copy.prediction.summary <- function(spec){
-  
-  
+
+
   modname <- final.dsm.models$dsm_final_name[final.dsm.models$species == spec]
   source_path <- file.path(ResultsDir, spec, "Prediction summaries")
   create.dir.if.needed(predVersionDir)
-  stopifnot(file.copy(file.path(source_path, paste0(modname, ".html")), 
+  stopifnot(file.copy(file.path(source_path, paste0(modname, ".html")),
                       file.path(predVersionDir, paste0(spec,"_",  modname, ".html")),
                       overwrite = TRUE,
                       copy.date = TRUE))
-  
+
   # Check if lib folder exists (contains needed .js files) and is not in
   # dest_path, and copy if needed.
   if (dir.exists(file.path(source_path, "lib")) &&
@@ -2188,7 +2632,12 @@ copy.prediction.summary <- function(spec){
     )
 }
 
-# undebug all debugged functions. This is tricky and sometimes doesn't work.
+#' Remove debug flags from all currently debugged functions
+#'
+#' @param where Character vector of search-path entries to scan; defaults to
+#'   the full \code{search()} path.
+#' @return \code{invisible(NULL)}.
+#' @export
 undebug.all <- function(where=search()) {
   aa <- all_debugged(where)
   lapply(aa$env,undebug)
@@ -2199,13 +2648,19 @@ undebug.all <- function(where=search()) {
 }
 
 
-# Create  2x2 table of maps - one panel for each season.
-# XXX Not currently used
+#' Arrange four seasonal leaflet maps in a 2x2 HTML table
+#'
+#' \strong{Note: not currently used.}
+#'
+#' @param maps Named list of exactly four leaflet map objects, with names
+#'   \code{"Spring"}, \code{"Summer"}, \code{"Fall"}, and \code{"Winter"}.
+#' @return An HTML \code{tagList} containing a 2x2 table of maps.
+#' @export
 create.annual.map.grid <- function(maps) {
   if(length(maps) != 4)
     stop(sprintf("create_annual_map_grids: maps argument does contains %d maps - should be 4."),
          length(maps))
-  
+
   res <-
     tagList(tags$table(
       style = "width:100%",
@@ -2214,12 +2669,20 @@ create.annual.map.grid <- function(maps) {
       tags$tr(tags$td(tagList(maps$Fall)),
               tags$td(tagList(maps$Winter)))
     ))
-  
+
   res
 }
 
-# Save a list of maps  (typically 4 seasonal prediction maps) from model
-# modname to a summary folder. Used by Generic_3_prediction.Rmd.
+#' Save a list of leaflet maps to a timestamped HTML file
+#'
+#' Synchronises the maps with \code{leafsync::sync()} and saves the result to
+#' \code{ResultsDir/<species>/Prediction summaries/} (project global).
+#'
+#' @param maps List of leaflet map objects (typically four seasonal maps).
+#' @param modname Character string model name; used in the filename.
+#' @param species Character string species code; used in the output path.
+#' @return \code{invisible(NULL)}, called for its side-effect (file written).
+#' @export
 save.map <- function(maps, modname, species) {
   dirname <- here(ResultsDir, species, "Prediction summaries")
   if (!dir.exists(dirname))
@@ -2233,32 +2696,54 @@ save.map <- function(maps, modname, species) {
     save_html(file = filename)
 }
 
-# Make quick and dirty prediction maps with ggplot. Called from
-# Generic_3_prediction.Rmd
+#' Produce a patchwork of four seasonal ggplot prediction maps
+#'
+#' Iterates over seasons, calls \code{do.pred.map.ggplot} for each, and
+#' combines the results with \code{patchwork::wrap_plots()}.
+#'
+#' @param dat \code{sf} prediction grid with \code{subset}, \code{Season},
+#'   and \code{Dens} columns.
+#' @param modname Character string model name; used in the plot title.
+#' @param species Character string species code; used in messages.
+#' @param subs Platform subset: \code{"Combined"} (default), \code{"F"}, or
+#'   \code{"W"}.
+#' @param ... Additional arguments passed to \code{do.pred.map.ggplot}.
+#' @return A \code{patchwork} ggplot object.
+#' @export
 do.pred.maps.ggplot <-
   function(dat,
            modname,
            species,
            subs = c("Combined", "F", "W"),
            ...) {
-    
-    
+
+
     # Get data subset
     subs <- match.arg(subs)
     dat <- filter(dat, subset == subs)
-    
+
     message(sprintf("%s, %s: Doing %s abundance prediction map for",
                     species, modname, subs))
-    
-    ret <- season.names %>% 
+
+    ret <- season.names %>%
       map(do.pred.map.ggplot, dat, modname, species, subs, ...)
-    
+
     ret <- wrap_plots(ret) + plot_annotation(title = modname)
     ret
   }
 
-# Plot a predicton ggplot for one model with 4 seasons. Called from
-# do.pred.maps.ggplot()
+#' Produce a single-season ggplot density prediction map
+#'
+#' @param season Character string season label.
+#' @param dat \code{sf} prediction grid with \code{Season} and \code{Dens}
+#'   columns.
+#' @param modname Character string model name; used in messages.
+#' @param species Character string species code; used in messages.
+#' @param subs Platform subset label.
+#' @param samp_n Integer; if not \code{NA}, plot a random sample of this many
+#'   polygons.
+#' @return A \code{ggplot} object.
+#' @export
 do.pred.map.ggplot <-
   function(season,
            dat,
@@ -2266,21 +2751,21 @@ do.pred.map.ggplot <-
            species,
            subs = c("Combined", "F", "W"),
            samp_n = NA) {
-    
+
     message(sprintf("\t%s",season))
     dat <- dat %>%
       filter(Season == season) %>%
-      select(Dens, geometry) %>% 
+      select(Dens, geometry) %>%
       ms_simplify()
-    
-    
+
+
     # Plot only a sample of the polygons for efficiency? Typically used for
     # testing.
     if (!is.na(samp_n)) {
       index <- sample(1:nrow(dat), size = samp_n)
       dat <- dat[index, ]
     }
-    
+
     # Remove ridiculously large densities b/c they mess up the legend and swamp
     # everything else
     dat <- mutate(dat,
@@ -2299,8 +2784,12 @@ do.pred.map.ggplot <-
   }
 
 
-# Quick and dirty leaflet map for watches. Used when doing debugging of watch
-# data in Extract_data.Rmd
+#' Quick leaflet map of watch start positions for debugging
+#'
+#' @param dat Data frame with \code{LongStart}, \code{LatStart}, and
+#'   \code{WatchID} columns.
+#' @return A \code{leaflet} map object.
+#' @export
 watch.map <- function(dat) {
   leaflet(dat) %>%
     addTiles() %>%
@@ -2312,46 +2801,65 @@ watch.map <- function(dat) {
     )
 }
 
-# Recursively create a pathname if it doesn't exist. Return pathname invisibly
-# so this function can be used in a pipeline.
+#' Create a directory recursively if it does not already exist
+#'
+#' Returns \code{pathname} invisibly so the function can be used in a
+#' pipeline.
+#'
+#' @param pathname Character string directory path to create.
+#' @return \code{pathname} (invisibly).
+#' @export
 create.dir.if.needed <- function(pathname){
   if (!dir.exists(pathname)){
     dir.create(pathname, recursive = TRUE)
     message(sprintf("Creating needed folder %s", pathname))
   }
   return(invisible(pathname))
-  
+
 }
 
 
-# Create an initial generic ddf model list for each species group, optionaly
-# writing it to dfModlistLoc (default false). Called from
-# Create_final_ddf_model_specs.Rmd and Generic_1_ddf_fitting.Rmd
+#' Initialise a default DDF model list structure for all species groups
+#'
+#' Creates one copy of \code{def.ddf.list} (project global) per entry in
+#' \code{spec.grps} and fills in platform-appropriate default values via
+#' \code{\link{set.def.df.spec.values}}.
+#'
+#' @param saveit If \code{TRUE}, save the list to \code{dfModlistLoc}
+#'   (project global).
+#' @return Named list of DDF spec lists, one per species group.
+#' @export
 init.df.mod.list <- function(saveit = FALSE) {
-  
+
   # Create one copy of the basic list for each species group
   df.mod.list <- rep(list(def.ddf.list), length(spec.grps))
   names(df.mod.list) <- names(spec.grps)
-  
+
   # Set default convert_units value based on whether survey is aerial or ship.
   # This may get updated dynamically by later processing.
   df.mod.list %<>%
     map( ~ imap(., set.def.df.spec.values))
-  
+
   # Sometimes we want to save it (ie if it didn't already exist) but other times
   # we're just called to return a initial structure that can be modified (eg in
   # 01.02_Create_final_ddf_model_specs.Rmd)
   if (saveit)
     save(df.mod.list, file = dfModlistLoc)
-  
+
   df.mod.list
 }
 
-# Take a dataframe that contains at least DistMeth and FlySwim and assign
-# the distance type (None, Perp., or Radial) by looking it up in lkpDistMeth
-# in ECSAS database.
-# 
-# Used by Extract_data.Rmd and create.survey.data()
+#' Assign distance type by looking up DistMeth in the ECSAS database
+#'
+#' Joins \code{dat} against the \code{lkpDistMeth} table from the ECSAS
+#' database and returns a factor of distance types (\code{"None"},
+#' \code{"Perp."}, or \code{"Radial"}) based on \code{FlySwim} and
+#' \code{DistMeth}.
+#'
+#' @param dat Data frame containing at minimum \code{DistMeth} and
+#'   \code{FlySwim} columns.
+#' @return Factor vector of distance types, the same length as \code{nrow(dat)}.
+#' @export
 assign.dist.type <- function(dat) {
   distmeth <- ECSAS.get.table(ecsas.path = ECSAS.Path, "lkpDistMeth")
   DistType <- left_join(dat, distmeth, by = c("DistMeth" = "DistMethCode")) %>%
@@ -2363,20 +2871,28 @@ assign.dist.type <- function(dat) {
       )
     )) %>%
     pull(DistType)
-  
+
   if (any(is.na(DistType)))
     warning("assign.dist.type: ",
             sum(is.na(DistType)),
             " rows could not be assigned a distance type",
             immediate. = TRUE)
-  
+
   DistType
 }
 
-# Generate the cononical model name given a key, formula and adj term.
-# 
-# Used by do.det.fcn().
-# 
+#' Generate the canonical detection function model name
+#'
+#' Combines the key function, formula, and adjustment term into the dot-
+#' separated label used for output filenames and model lookup.
+#'
+#' @param key Character string key function (e.g. \code{"hn"}).
+#' @param form Formula or character string formula; \code{~ 1} produces a
+#'   key-only or adjustment-only name.
+#' @param adj Character string adjustment term (\code{"cos"}, \code{"herm"},
+#'   or \code{"poly"}), or \code{NULL}.
+#' @return Character string model name.
+#' @export
 create.model.name <- function(key, form, adj) {
   # Was there a null formula?
   if (form == as.formula(~ 1)) {
@@ -2399,53 +2915,68 @@ create.model.name <- function(key, form, adj) {
 }
 
 
-## A few functions to make backing up and cleaning up DSM summaries easier
-
-# Make backup copy of current DSM summaries for species labeling them with their
-# modification date/time.
+#' Back up DSM summary RData files for one species
+#'
+#' Copies all \code{*.Rdata} files from
+#' \code{ResultsDir/<species>/DSM Summaries/} into
+#' \code{ResultsDir/Backups/<species>/DSM Summaries/}, appending the file
+#' modification timestamp to each filename.
+#'
+#' @param species Character string species code.
+#' @return \code{invisible(NULL)}, called for its side-effect (files copied).
+#' @export
 backup.dsm.summary <- function(species){
   folder <- here(ResultsDir, "Backups", species, "DSM Summaries")
   if (!dir.exists(folder))
     dir.create(folder, recursive = TRUE)
 
   message("Backing up ", species, " DSM summaries to ", folder)
-    
+
   # src files
   src <- list.files(path = here(ResultsDir, species, "DSM Summaries"),
                       pattern = "*.Rdata", full.names = T)
-  
+
   if (length(src) == 0){
     message("\tNo files to backup - quitting.")
     return
   }
-  
+
   ## create dst filenames
-  
+
   # add modification dates to files
-  mtimes <- str_replace_all(file.info(src)$mtime, " ", "_") %>% 
-    str_replace_all(":", "") %>% 
+  mtimes <- str_replace_all(file.info(src)$mtime, " ", "_") %>%
+    str_replace_all(":", "") %>%
     str_replace("\\..*$", "") # remove trailing milliseconds
   stopifnot(length(src) == length(mtimes))
-  dst <- src %>% 
-    basename() %>% 
-    tools::file_path_sans_ext() %>% 
-    here(folder, .) %>%  
+  dst <- src %>%
+    basename() %>%
+    tools::file_path_sans_ext() %>%
+    here(folder, .) %>%
     paste0("_", mtimes, ".", tools::file_ext(src))
-  
-  file.copy(src, dst, overwrite = TRUE, copy.date = TRUE) %>% 
+
+  file.copy(src, dst, overwrite = TRUE, copy.date = TRUE) %>%
     invisible
 }
 
-# Do DSM summaries backup for all species
+#' Back up DSM summary files for all species groups
+#'
+#' Calls \code{\link{backup.dsm.summary}} for every entry in the project
+#' global \code{spec.grps}.
+#'
+#' @return \code{invisible(NULL)}.
+#' @export
 backup.dsm.summaries <- function(){
-  names(spec.grps) %>% 
+  names(spec.grps) %>%
     walk(backup.dsm.summary)
 }
 
 
-# Remove all current DSM summaries for all species
+#' Delete all DSM summary RData files for all species groups
+#'
+#' @return \code{invisible(NULL)}, called for its side-effect (files deleted).
+#' @export
 remove.dsm.summaries <- function(){
-  names(spec.grps) %>% 
+  names(spec.grps) %>%
     walk(\(species){
       message("Removing DSM summaries for ", species)
       files <- list.files(path = here(ResultsDir, species, "DSM Summaries"),
@@ -2455,18 +2986,23 @@ remove.dsm.summaries <- function(){
 }
 
 
-# Get the dates of a dynamic env covariate given a variable name. Useful to see
-# what files we need to download.
-# Returns a dataframe with two columns: date, filename (typcially containing
-# 12 rows - 1 for each month)
+#' List dates available for a dynamic environmental covariate
+#'
+#' Scans the NetCDF files in \code{predLayerDir/NetCDF/<var.name>/} and
+#' returns a data frame of available dates and their source filenames.
+#'
+#' @param var.name Character string variable name (e.g. \code{"sst"}).
+#' @return Data frame with columns \code{date} (character) and
+#'   \code{filename}, typically with 12 rows (one per month).
+#' @export
 get.covar.netCDF.dates <- function(var.name){
   # list files in the folder here(predLayerDir, "NetCDF", var.name)
   # get dates associated with files, convert to char and return
-  # 
+  #
   files <- list.files(here(predLayerDir, "NetCDF", var.name),
                       ".*\\.nc$",
                       full.names = TRUE)
-  
+
   suppressWarnings(
     dates <- map_dfr(
       files,
@@ -2478,29 +3014,46 @@ get.covar.netCDF.dates <- function(var.name){
           filename = filenm
         )
   }))
-  
-  dups <- duplicated(dates$date) 
+
+  dups <- duplicated(dates$date)
   if(any(dups)) {
     warning(sprintf(c("get.covar.netCDF.dates: variable %s: the following dates",
                       " were found in multiple files: "), var.name), immediate. = TRUE)
     dates[dups,]
   }
-  
-  dates  
+
+  dates
 }
 
-# called once with each row of env_covars to get netcdf if needed, extract
-# data from it, reproject and clip, etc.
+#' Retrieve, reproject, and clip one environmental covariate
+#'
+#' Reads the covariate described by \code{env_covar_spec} from local NetCDF
+#' files, reprojects to \code{segProj} (project global), and clips to the
+#' study area.  For dynamic covariates, checks that all required dates are
+#' available and downloads missing ones if needed.
+#'
+#' Expects project globals \code{predLayerDir}, \code{segProj}, and
+#' \code{study.area}.
+#'
+#' @param env_covar_spec Single-row data frame from the project
+#'   \code{env_covar_spec} table with columns \code{var_name},
+#'   \code{var_type}, \code{ERDDAP_dataset_name}, \code{netcdf_vars}, and
+#'   \code{CRS}.
+#' @param dates.needed Character vector of date strings required for dynamic
+#'   covariates.
+#' @param verbose If \code{TRUE} (default), print progress messages.
+#' @return A \code{stars} object clipped to the study area.
+#' @export
 get.env.covar <- function(env_covar_spec,
                           dates.needed,
                           verbose = TRUE
 ) {
-  
-  
+
+
   var_name <- env_covar_spec$var_name
-  
+
   message("get.env.covar: getting covariate '", var_name, "'")
-  
+
   # Dynamic or static covar
   if (env_covar_spec$var_type == "static"){
     env_dat <- stars::read_ncdf(here(
@@ -2508,35 +3061,35 @@ get.env.covar <- function(env_covar_spec,
       "NetCDF",
       paste0(env_covar_spec$ERDDAP_dataset_name, ".nc")
     ), var = env_covar_spec$netcdf_vars)
-    
-    
+
+
   } else if (env_covar_spec$var_type == "dynamic") {
     # Dynamic involves making sure we have the dates we want.
     netcdf.dates.have  <- get.covar.netCDF.dates(var_name)
     dates.to.get <- setdiff(dates.needed, netcdf.dates.have$date)
-    
+
     if (length(dates.to.get) > 0) {
-      # Download needed files 
+      # Download needed files
       # XXXX TODO: need to use curl (or something ) to download the netcdf files
       # we need by constructing the correct URL.
-    } 
-    
+    }
+
     # Now we should have all files we need.
     # Figure out which files to read, just in case we have files we don't need
-    files <- filter(netcdf.dates.have, date %in% dates.needed) %>% 
-      pull(filename) %>% 
+    files <- filter(netcdf.dates.have, date %in% dates.needed) %>%
+      pull(filename) %>%
       unique()
-    
+
     # Read all needed netcdf files
-    # 
-    # # This approach didn't work. Something to do with fact that some of the 
+    #
+    # # This approach didn't work. Something to do with fact that some of the
     # .nc files have only one var in them ("sst") and some have both ("sst" and
     # "mask") due to different ways they were downloaded.
-    # 
+    #
     # res <- map(files, \(filenm) {
     #   stars::read_ncdf(filenm, var = var_name)
     # })
-    # 
+    #
     # # Collapse list of stars objects to single object with all dates combined.
     # env.dat <- Reduce(c, res)
     env_dat <- stars::read_stars(files, sub = var_name)
@@ -2547,31 +3100,44 @@ get.env.covar <- function(env_covar_spec,
          var_name,
          ": illegal var_type '",
          env_covar_spec$var_type, "'")
-  
+
   if (verbose)
     message("\tProjecting and clipping to study area...", appendLF = FALSE)
-  
-  # Re-project, clip, etc 
-  final <- st_transform(env_dat, segProj) %>% 
-    `[`(study.area) %>% 
+
+  # Re-project, clip, etc
+  final <- st_transform(env_dat, segProj) %>%
+    `[`(study.area) %>%
     setNames(var_name) # b/c previous processing steps loose the name
-  
+
   if (verbose)
     message("done.")
-  
+
   final
 }
 
 
 
-# called once with each row of env_covars to get netcdf if needed, extract
-# data from it, reproject and clip, etc.
-# 
+#' Process one environmental covariate for both segdata and prediction grid
+#'
+#' Similar to \code{\link{get.env.covar}} but handles separate date sets for
+#' the segment data and the prediction grid.
+#'
+#' Expects project globals \code{predLayerDir}, \code{segProj}, and
+#' \code{study.area}.
+#'
+#' @param env_covar_spec Single-row data frame from the project
+#'   \code{env_covar_spec} table.
+#' @param segdata.dates.needed Character vector of dates needed for segdata
+#'   extraction.
+#' @param predgrid.dates.needed Character vector of dates needed for the
+#'   prediction grid.
+#' @return A \code{stars} object clipped to the study area.
+#' @export
 do.env.covar <- function(env_covar_spec,
                          segdata.dates.needed,
                          predgrid.dates.needed) {
   var_name <- env_covar_spec$var_name
-  
+
   # Dynamic or static covar
   if (env_covar_spec$var_type == "static"){
     env.dat <- stars::read_ncdf(here(
@@ -2579,31 +3145,31 @@ do.env.covar <- function(env_covar_spec,
       "NetCDF",
       paste0(env_covar_spec$ERDDAP_dataset_name, ".nc")
     ), var = env_covar_spec$netcdf_vars)
-    
-    
+
+
   } else if (env_covar_spec$var_type == "dynamic") {
     # Dynamic involves making sure we have the dates we want.
     netcdf.dates.have  <- get.covar.netCDF.dates(var_name)
     all.dates.needed <- union(segdata.dates.needed, predgrid.dates.needed)
     dates.to.get <- setdiff(all.dates.needed, netcdf.dates.have)
-    
+
     if (length(dates.to.get) > 0) {
-      # Download needed files 
+      # Download needed files
       # XXXX TODO: need to use curl (or something ) to download the netcdf files
       # we need by constructing the correct URL.
-    } 
-    
+    }
+
     # Now we should have all files we need.
     # Figure out which files to read
-    files <- filter(netcdf.dates.have, date %in% all.dates.needed) %>% 
-      pull(filename) %>% 
+    files <- filter(netcdf.dates.have, date %in% all.dates.needed) %>%
+      pull(filename) %>%
       unique()
-    
+
     # Read all needed netcdf files
     res <- map(files, \(filenm) {
       stars::read_ncdf(filenm, var = var_name)
     })
-    
+
     # Collapse list of stars objects to single object with all dates combined.
     # xxx this doesn't work, returned object seems to only have "attr" as it's
     # values
@@ -2613,64 +3179,97 @@ do.env.covar <- function(env_covar_spec,
          var_name,
          ": illegal var_type '",
          env_covar_spec$var_type, "'")
-  
+
   # Re-project, clip, etc and save - xxx this line doesn't work
-  final <- st_transform(env.dat, segProj) %>% 
+  final <- st_transform(env.dat, segProj) %>%
     `[`(study.area)
 
   final
 }
 
 
-# Create subproject folders when a new subproject is added
+#' Create the standard folder structure for a new subproject
+#'
+#' Expects project globals \code{GenericRDataDir}, \code{GenericShapeDir},
+#' \code{predLayerDir}, \code{GISDir}, and \code{SubProject}.
+#'
+#' @param subproj Character string subproject identifier.
+#' @return \code{invisible(NULL)}, called for its side-effect (directories
+#'   created).
+#' @export
 create_subproject_folders <- function(subproj) {
-  create.dir.if.needed(file.path(GenericRDataDir, subproj)) 
-  create.dir.if.needed(file.path(GenericShapeDir, subproj)) 
+  create.dir.if.needed(file.path(GenericRDataDir, subproj))
+  create.dir.if.needed(file.path(GenericShapeDir, subproj))
   create.dir.if.needed(here("Results", subproj))
-  create.dir.if.needed(file.path(predLayerDir, "Study area resolution & extent", subproj)) 
-  create.dir.if.needed(file.path(GISDir, "Predictions", SubProject)) 
-  create.dir.if.needed(file.path(GISDir, "Rasters", SubProject)) 
-  
+  create.dir.if.needed(file.path(predLayerDir, "Study area resolution & extent", subproj))
+  create.dir.if.needed(file.path(GISDir, "Predictions", SubProject))
+  create.dir.if.needed(file.path(GISDir, "Rasters", SubProject))
+
 }
 
 
-# make a raster from an sf object
+#' Rasterize one variable from an sf object
+#'
+#' Creates a raster template from the extent of \code{sfobj} at resolution
+#' \code{predgridCellLength * 1000} metres (project global) and rasterizes
+#' \code{variable}.
+#'
+#' @param sfobj \code{sf} object containing the variable to rasterize.
+#' @param variable Character string name of the column to rasterize.
+#' @return A single-layer \code{SpatRaster}.
+#' @export
 make.raster <- function(sfobj, variable){
   # Convert sf to SpatVector
   v <- vect(sfobj)
-  
+
   # Create a raster template with the same extent and resolution. Assumes
   # predgridCellLength is in km and raster projection units are metres.
   r <- rast(v, resolution = predgridCellLength * 1000)
-  
+
   # Rasterize, using an attribute field (e.g., "ID")
   ret <- rasterize(v, r, field = variable)
-  
+
   ret
 }
 
-# Check if bam/gam model was fitted with discrete = TRUE
+#' Check whether a gam/bam was fitted with discrete = TRUE
+#'
+#' @param model A \code{gam} or \code{bam} object from \code{mgcv}.
+#' @return \code{TRUE} if the model was fitted with \code{discrete = TRUE},
+#'   otherwise \code{FALSE}.
+#' @export
 is_discrete_gam <- function(model) {
   # Ensure it's a gam/bam object
   if (!inherits(model, "gam")) {
     stop("Model must be a gam/bam object from mgcv")
   }
-  
+
   call_list <- as.list(model$call)
-  
+
   # If "discrete" not supplied, default is FALSE
   if (!"discrete" %in% names(call_list)) {
     return(FALSE)
   }
-  
+
   # Evaluate, in case it’s e.g. discrete = getOption("mgcv.discrete")
   isTRUE(eval(call_list$discrete, envir = parent.frame()))
 }
 
 
+#' Render a one-off RMarkdown file for a single species
+#'
+#' Sources \code{R/analysis settings.r} (project-specific path) then renders
+#' \code{rmdfile} with \code{species} as a parameter, timestamping the output
+#' filename.
+#'
+#' @param rmdfile Character string filename (not full path) of the RMarkdown
+#'   file to render, relative to \code{RDir}.
+#' @param species Character string species code passed as a render parameter.
+#' @return \code{invisible(NULL)}, called for its side-effect (HTML rendered).
+#' @export
 do_oneoff_render <- function(rmdfile, species) {
   source(here::here("R/analysis settings.r"), echo = T)
-  
+
   rmarkdown::render(
     here(RDir, rmdfile),
     params = list(species = species),
@@ -2691,23 +3290,28 @@ do_oneoff_render <- function(rmdfile, species) {
 # ============================================================================
 # This file contains utils for distance sampling. Dave Fifield 2014.
 
-# run a single ds model with specification given in dataframe mod
-# 
-#
-# This Function is used by do.ds() to run many candidate models and by do.det.fcn 
-# to re-run final model if needed.
-# 
-# Params:
-# mod - model specification with 4 cols: label, key, adj, form
-# data - the ovservation data
-# folder - folder to store results. If null, then just return results
-# logFileConn - destination for logging messsage. Will either be "" (i.e. stdout)
-#   or an open file connection. Note, in the latter case it will not work when 
-#   using parallel processing - logging output is lost.
-# verbose - provide extra debugging info
-# min_data_size_limit - minimum number of observations needed in order to attempt
-#   fitting a ddf. If nrow(data) < min_data_size_limit model fitting is not attempted
-#   and a failed model dummy file is created.
+#' Fit a single distance sampling model and save summary output
+#'
+#' Calls \code{\link[Distance]{ds}} with the specification in \code{mod},
+#' writes a plain-text summary and an \code{.RData} file named
+#' \code{AIC_<aic>_<label>} to \code{folder}, and returns the fitted model
+#' object.  If fewer than \code{min_data_size_limit} observations are present
+#' or fitting fails, a dummy \code{failed_model_*.txt} file is created and
+#' \code{NA} is returned.
+#'
+#' @param mod Single-row data frame with columns \code{label}, \code{key},
+#'   \code{adj}, and \code{form}.
+#' @param data Observation data frame passed to \code{\link[Distance]{ds}}.
+#' @param folder Directory path for output files; use \code{""} to skip
+#'   file output.
+#' @param logfileConn Log destination: \code{""} for stdout, or an open
+#'   write-mode file connection.
+#' @param verbose If \code{TRUE}, print extra debugging messages.
+#' @param min_data_size_limit Minimum number of observations required to
+#'   attempt model fitting.
+#' @param ... Additional arguments passed to \code{\link[Distance]{ds}}.
+#' @return Fitted \code{dsmodel} object, or \code{NA} on failure.
+#' @export
 run.ddf.model <-
   function(mod,
            data,
@@ -2716,17 +3320,17 @@ run.ddf.model <-
            verbose,
            min_data_size_limit = 20,
            ...) {
-    
+
   if (nrow(mod) > 1) stop("run.ddf.model: given more than 1 model to run!")
 
   cat(paste("Running", mod$label, "..."), file = logfileConn)
-  
+
   # set up for adjustments
   adj = NULL
   if (mod$adj != "")
     adj <- mod$adj
-  
-  # Make sure we haven't specified both covars and adjustment terms. Need to 
+
+  # Make sure we haven't specified both covars and adjustment terms. Need to
   # deal with case where formula is either a formula or a string.
   if (!is.null(adj) && mod$form != as.formula("~1") &&
       str_replace_all(mod$form, " ", "") != "~1") {
@@ -2734,7 +3338,7 @@ run.ddf.model <-
                     mod$label)
     stop(mess)
   }
-  
+
   monotonicity <- "none"
   if (mod$form == "~1")
     monotonicity <- "strict"
@@ -2753,7 +3357,7 @@ run.ddf.model <-
       env$adj <- adj
       env$monotonicity <- monotonicity
       env$dots <- list(...)
-      
+
       if (logfileConn == "")
         model <- with(env, {
           model <- do.call('ds',
@@ -2787,7 +3391,7 @@ run.ddf.model <-
         file = logfileConn)
     })
   }
-  
+
   # model fitting failed. Create dummy output file to stop model from being
   # attempted again.
   if (inherits(res, "try-error") || is.null(model)) {
@@ -2799,13 +3403,13 @@ run.ddf.model <-
 
   # send summary output to file named "AIC_XXX.XXX_`mod$label.txt`"
   if (folder != "") {
-    filename = paste(folder, paste0("AIC_", round(model$ddf$criterion, 3), "_", 
+    filename = paste(folder, paste0("AIC_", round(model$ddf$criterion, 3), "_",
                                     mod$label, ".txt"), sep = "/")
-    
+
     if (verbose)
       cat(paste0("Opening model output file '", filename, "' \n"), file = logfileConn)
     modOutFileConn <- file(filename, open = "wt")
-    
+
     # Create model output file
     if (exists("model")) {
       try.res <- try({
@@ -2836,28 +3440,38 @@ run.ddf.model <-
         }
         cat("\n", file = modOutFileConn)
         capture.output(summary(model), file = modOutFileConn)
-      })  
-      
+      })
+
       if (inherits(try.res, "try-error")) {
         cat("Creating model summary file failed.\n", file = logfileConn)
       }
-      
+
       # Now save the model object as an .RData file
       save(model, file = sub(".txt", ".RData", filename))
-      
+
     } else {
       cat("Model failed to fit.\n", file = logfileConn)
     }
     close(modOutFileConn)
   }
-  
+
   if (verbose) cat("Returning model object\n", file = logfileConn)
   model
 }
 
 
-# For a given key and vector of covars, generate all possible combinations of n
-# items from covars.
+#' Generate all n-way covariate combinations for a key function
+#'
+#' Produces a data frame of model specifications with all C(length(covars), n)
+#' covariate combinations for the given key function.
+#'
+#' @param n Integer number of covariates to include per model (\code{0} for
+#'   intercept-only).
+#' @param key Character string key function (e.g. \code{"hn"}).
+#' @param covars Character vector of candidate covariate names.
+#' @return Data frame with columns \code{form}, \code{label}, \code{key}, and
+#'   \code{adj}.
+#' @export
 gen.form.N <- function(n, key, covars){
   require(utils)
 
@@ -2882,29 +3496,38 @@ gen.form.N <- function(n, key, covars){
   )
 }
 
-# run a series of ds models using all combinations of covariates (including none).
-#
-# inputs:
-#   data - same as ds
-#   key - key function(s) to use
-#   covars - a character vector of covariate names
-#   runModels - for debugging. Should models actually be run or just return the dataframe with a list of what models would be run.
-#       Does not do logging.
-#   parallel - use parallel processing via doSNOW library to speed things up?
-#   nCores - number of cores to use in the parallel cluster
-#   folder - the name of a folder where summaries of each model will be written (one per file named
-#       modDat$label). This is especially useful for monitoring progress when parallel==TRUE,
-#       since the progress bar does not work. If summary files already exist in folder for some models,
-#       then these will not be re-run, unless rerun == TRUE.
-#   logfile - If provided all logging information will be sent to this file. Otherwise it goes to stdout, which will be lost if parallel == T.
-#        Note that all message directly from do.ds() (but not run.ddf.model()) are also sent to stdout.
-#   rerun - should models that have already been run and output saved in folder be run again.
-#     Only applies when folder == T
-#   verbose - enable extra output
-#   models - dataframe indicating the models to be run. Possibly created from a
-#     previous invocation of do.ds with runModels == F.
-#   incl.adj - If TRUE(default), include key+adjustment only models in model set.
-## Works by generating a dataframe of models to be run first and then running them.
+#' Fit all candidate distance sampling models
+#'
+#' Generates every combination of key function and covariates (up to
+#' \code{length(covars)} covariates per model), optionally including
+#' adjustment-term-only models, and fits each via
+#' \code{\link{run.ddf.model}}.  Models with existing result files in
+#' \code{folder} are skipped unless \code{rerun = TRUE}.
+#'
+#' @param data Observation data frame passed to \code{\link[Distance]{ds}}.
+#' @param key Character vector of key functions to use; default
+#'   \code{c("unif", "hn", "hr")}.
+#' @param covars Character vector of candidate covariate names; \code{NULL}
+#'   for no covariates.
+#' @param runModels If \code{FALSE}, return the model specification data frame
+#'   without fitting any models (useful for inspection).
+#' @param parallel If \code{TRUE}, use \code{doSNOW} parallel processing.
+#' @param nCores Number of parallel cluster nodes.
+#' @param folder Directory path for output files.
+#' @param logfile Path for a log file; use \code{""} to log to stdout.
+#' @param rerun If \code{TRUE}, re-fit models whose output files already exist
+#'   in \code{folder}.
+#' @param verbose If \code{TRUE}, print extra messages.
+#' @param models Optional data frame of pre-built model specifications
+#'   (overrides automatic generation).
+#' @param incl.adj If \code{TRUE} (default), prepend key+adjustment-only
+#'   models from \code{adj.models} (project global).
+#' @param cleanFolder If \code{TRUE}, delete all existing files from
+#'   \code{folder} before fitting.
+#' @param ... Additional arguments passed to \code{\link{run.ddf.model}}.
+#' @return When \code{runModels = TRUE}: named list of fitted model objects.
+#'   When \code{runModels = FALSE}: data frame of model specifications.
+#' @export
 do.ds <-
   function(data,
            key = c("unif", "hn", "hr"),
@@ -2920,7 +3543,7 @@ do.ds <-
            incl.adj = TRUE,
            cleanFolder = FALSE,
            ...) {
-    
+
   # Models pre-supplied?
   if (!is.null(dim(models)[1]))
     modDat <- models
@@ -2932,7 +3555,7 @@ do.ds <-
       else
         map_dfr(0:length(covars), gen.form.N, k, covars)
     }, covars = covars)
-  
+
 
   # append the adjustment only models
   if (incl.adj)
@@ -2969,13 +3592,13 @@ do.ds <-
       ))
       file.remove(fl)
     }
-    
-      
+
+
     # Get list of models that already have result files
     if (!rerun) {
-      fl <- sub(".txt", "", 
-                list.files(path = folder, 
-                           pattern = ".*\\.txt", 
+      fl <- sub(".txt", "",
+                list.files(path = folder,
+                           pattern = ".*\\.txt",
                            full.names = T), fixed = T)
       existMods <- unlist(lapply(strsplit(basename(fl), "_"), function(x) x[3]))
       cat(paste0(sum(modDat$label %in% existMods), " of ", nrow(modDat), " models have already been run.\n"), file = logfileConn)
@@ -2992,7 +3615,7 @@ do.ds <-
         cat(paste0("Using parallel processing with ", nCores, " cores.\n"), file = logfileConn)
         cl <- makeCluster(min(nCores, nrow(modDat)), type = "SOCK")
         registerDoSNOW(cl)
-        
+
         models <- plyr::dlply(
           modDat,
           plyr::.(label),
@@ -3010,7 +3633,7 @@ do.ds <-
           ...
         )
         stopCluster(cl)
-        
+
         # Tried but had problems with some things not defined...
         # future::plan(multisession, workers = nCores)
         # models <- modDat %>%
@@ -3035,7 +3658,7 @@ do.ds <-
             .progress = "Detection Function Progress",
             ...
           )
-        
+
         # models <- plyr::dlply(modDat, .(label), .progress = progress_win(title = "Detection Function Progress"), run.ddf.model, data = data,
         #                       folder = folder,logfileConn = logfileConn, verbose = verbose, ...)
       }
@@ -3058,20 +3681,36 @@ do.ds <-
 }
 
 
-# stole this from
-# https://github.com/gsk3/taRifx/blob/master/R/Rfunctions.R#L1161. I'm using it
-# to turn NA's into "" so as.numeric wont issue warning about NA's introduced by
-# coercion
+#' Strip non-numeric characters and coerce to numeric
+#'
+#' Removes all characters not in \code{keep} and converts to numeric, without
+#' generating the usual \code{NA}-coercion warning.
+#'
+#' @param x Character vector to convert.
+#' @param keep Regular expression character class of characters to retain;
+#'   default keeps digits, decimal point, and sign characters.
+#' @return Numeric vector.
+#' @export
 destring <- function(x,keep="0-9.e+-") {
   return( as.numeric(gsub(paste("[^",keep,"]+",sep = ""),"",x)) )
 }
 
-# Check a ddf. Returns original distdata augmented with det. probs and adjSize
+#' Validate a fitted detection function and augment distdata
+#'
+#' Prints a model summary, plots the detection function, runs GOF tests, and
+#' augments the distdata with \code{detProb} and \code{adjSize} columns.
+#'
+#' @param model Fitted \code{dsmodel} or \code{fake_ddf} object.
+#' @param species Character string species code; used in plot titles.
+#' @param modname Character string model name; used in plot titles.
+#' @return Distdata data frame augmented with \code{detProb} and
+#'   \code{adjSize} columns.
+#' @export
 check.det.fcn <-
   function(model = NULL,
            species = NULL,
            modname = NULL) {
-    
+
   message("Running check.det.fcn...\n")
   print(summary(model))
 
@@ -3080,18 +3719,18 @@ check.det.fcn <-
   form <- mod.dat$form
   key <- mod.dat$key
   aic <- mod.dat$aic
-  
+
   if (nrow(distdata) > 0) {
     # Note that fitted is in the right order since df.get.data uses:
-    # fitted(dfobject$ddf)[as.character(distdata$object)] so we don't need to 
+    # fitted(dfobject$ddf)[as.character(distdata$object)] so we don't need to
     # do that here.
     distdata$detProb <- mod.dat$fitted
     distdata$adjSize <- distdata$size / distdata$detProb
-    
+
     # make sure nothing went wrong
     if (any(is.na(distdata$detProb)))
       warning("Some detection probabilities are NA!", immediate. = T)
-    
+
     cat("\n")
     cat(sprintf("Detection prob range: %s\n", paste(round(
       range(distdata$detProb), 4
@@ -3103,14 +3742,14 @@ check.det.fcn <-
     cat(sprintf("range of adjusted size: %s\n", paste(round(
       range(distdata$adjSize), 2
     ), collapse = " - ")))
-    
+
     # plot hist of det probs
     p <- ggplot(data = distdata, aes(x = detProb))
     p <- p + geom_histogram(binwidth = 0.1)
     p <- p + scale_x_continuous(breaks = seq(0, 1, .1))
     print(p)
   }
-  
+
   # GOF testing
   message("GOF testing")
   if (!("fake_ddf" %in% class(model))){
@@ -3134,10 +3773,16 @@ check.det.fcn <-
   distdata
 }
 
-# XXXX Might be useful but needs to be updated to use current ddftype column
-# implementation instead of "det.fcn.type" left over from subArctic analysis
-# 
-# find segments with observations with more than one df type
+#' Find segments with observations from more than one detection function type
+#'
+#' \strong{Note: needs updating} to use the current \code{ddftype} column
+#' (currently references the legacy \code{det.fcn.type} column from the
+#' subArctic analysis).
+#'
+#' @param distdata Observation data frame with a \code{det.fcn.type} column.
+#' @param segdata Segment data frame with a \code{Sample.Label} column.
+#' @return Data frame of segments with mixed detection function types.
+#' @export
 get.trouble <- function(distdata, segdata) {
   distdata %>%
     group_by(Sample.Label) %>%
@@ -3150,10 +3795,17 @@ get.trouble <- function(distdata, segdata) {
 }
 
 
-# Extract distance sampling data from a detection function model
+#' Extract distdata, formula, key, AIC, and fitted values from a DDF object
+#'
+#' Handles \code{dsmodel} objects and \code{fake_ddf} strip-transect objects.
+#'
+#' @param dfobject A \code{dsmodel} or \code{fake_ddf} object.
+#' @return Named list with elements \code{distdata}, \code{form},
+#'   \code{key}, \code{aic}, and \code{fitted}.
+#' @export
 df.get.data <- function(dfobject) {
-  
-  
+
+
   if ("dsmodel" %in% class(dfobject)) {
     distdata <- dfobject$ddf$data
     list(
@@ -3176,23 +3828,34 @@ df.get.data <- function(dfobject) {
     dfobject$distdata
     stop("df.get.data: Don't know how to extract form, key, or aic from this object")
   }
-  
-  
+
+
   # distdata <- df.get.data(model)
   # form <- as.character(model$ddf$call$dsmodel[[2]]$formula)[2]
   # key <- model$ddf$call$dsmodel[[2]]$key
   # aic <- model$ddf$criterion
-  
+
 }
 
-# XXXX Could be useful but needs some arg changes - behav probably needs removing??
-# and args to check.det.fcn need to be updated.
-# 
-# check top model for given species, behav, and model det fcn type (e.g.
-# "normal"). If list.only is TRUE, just print out the filename of the top model.
+#' Load and check the top-ranked detection function model from a folder
+#'
+#' Reads the \code{.RData} file with the lowest AIC from \code{fold} and
+#' calls \code{\link{check.det.fcn}} on it.  If \code{list.only = TRUE},
+#' only prints the filename.
+#'
+#' \strong{Note: may need argument changes} — \code{behav} parameter may be
+#' obsolete and \code{check.det.fcn} arguments may need updating.
+#'
+#' @param fold Directory path containing candidate model \code{.RData} files.
+#' @param species Character string species code.
+#' @param behav Character string behaviour label used in messages.
+#' @param list.only If \code{TRUE}, only print the top model filename without
+#'   loading or checking it.
+#' @return \code{invisible(NULL)}.
+#' @export
 check.top.model <- function(fold, species, behav, list.only = FALSE) {
   files <- list.files(fold, ".+\\.RData$", full.names = TRUE)
-  
+
   if (list.only) {
     message(sprintf(
       "Top model for %s %s %s is %s",
@@ -3203,7 +3866,7 @@ check.top.model <- function(fold, species, behav, list.only = FALSE) {
     ))
     return()
   }
-  
+
   if (files[1] == "") {
     message(sprintf(
       "There were no model results for %s %s %s to load",
@@ -3213,15 +3876,21 @@ check.top.model <- function(fold, species, behav, list.only = FALSE) {
     ))
     return()
   }
-  
+
   message(sprintf("Loading model results from %s", files[1]))
   load(files[1])
   try(check.det.fcn(model = model, paste(species, behav)))
 }
 
-# Check all top models for given species and behav
-# XXXX Could be useful but needs some arg changes - 
-# folder naming and layout has changed....
+#' Check all top detection function models for a species and behaviour
+#'
+#' \strong{Note: may need updating} — folder naming convention has changed.
+#'
+#' @param species Character string species code.
+#' @param behav Character string behaviour label (\code{"F"} or \code{"W"}).
+#' @param ... Additional arguments passed to \code{\link{check.top.model}}.
+#' @return \code{invisible(NULL)}.
+#' @export
 check.top.models <- function(species, behav, ...){
   folder <- here("R", species, "DF Summaries", behav)
 
@@ -3235,10 +3904,16 @@ check.top.models <- function(species, behav, ...){
 }
 
 
-# function to summarize a dsm model
+#' Produce a one-row summary data frame for a DSM model
+#'
+#' @param model A fitted \code{dsm} object, or a \code{try-error} if model
+#'   fitting failed.
+#' @return Single-row data frame with columns \code{response}, \code{terms},
+#'   \code{AIC}, \code{REML}, \code{OverDisp}, and \code{Deviance_explained}.
+#' @export
 summarize.dsm <- function(model){
 
-  # Check if model had error when it ran  
+  # Check if model had error when it ran
   if (inherits(model, "try-error")) {
     data.frame(
       response = "Error",
@@ -3250,7 +3925,7 @@ summarize.dsm <- function(model){
     )
   } else {
     summ <- summary(model)
-    
+
     data.frame(
       response = model$family$family,
       terms    = paste(c(
@@ -3266,33 +3941,40 @@ summarize.dsm <- function(model){
 
 
 
-# call function func (either dsm.var.gam or predict) and return either the
-# predictions (for predict) or a list containing the pred.var and pred
-# (dsm.var.gam). Is predict even necessary if I'm getting the prediction from
-# dsm.var.gam anyway?
-# Need to make off.set either a single value, vector of values, or character
-# name of field in dat to get off.set from
+#' Apply dsm_var_gam to one chunk of prediction data
+#'
+#' Calls \code{\link[dsm]{dsm_var_gam}} on \code{dat} using the offset stored
+#' in \code{dat$.my.off.set}.  Used internally by \code{\link{get.per.cell.var}}.
+#'
+#' @param dat Data frame (single prediction grid chunk) with a
+#'   \code{.my.off.set} column.
+#' @param this.dsm Fitted \code{dsm} object.
+#' @return Named list with elements \code{pred.var} (per-cell variance) and
+#'   \code{pred} (numeric prediction vector).
+#' @export
 apply.dsm.var <- function(dat, this.dsm){
   res <- dsm_var_gam(this.dsm, dat, map(dat, ".my.off.set"))
-  
+
   list(pred.var = res$pred.var, pred = unlist(res$pred))
 }
 
-# break a predgrid into chunks and apply func in parallel (if nchunks > 1)
-#
-# this.dsm - the dsm_final
-# df - the predgrid
-# nchunks - number of chunks to break df up into. This applies even if not 
-#    doing parallel. Useful b/c doing dsm_var_gam on entire large predgrid
-#    fails trying to allocate many GB of RAM whereas doing it in chunks (even
-#    if not in parallel) will succed.
-# off.set = the offset for the gam (normally predgrid cell area). Can be:
-#   - single value in which case it is used for all cells
-#   - a vector the same length as nrow(df), in which case it will need to be 
-#     split into chucks same as df 
-# parallel = do chunks in parallel?
-# nodes = number of cluster nodes for parallel processing
-
+#' Compute per-cell variance for a DSM in memory-safe chunks
+#'
+#' Splits the prediction grid into \code{nchunks} pieces, applies
+#' \code{\link{apply.dsm.var}} to each chunk (optionally in parallel), and
+#' returns the results.  Chunking avoids the out-of-memory errors that arise
+#' when \code{dsm_var_gam} is called on a very large prediction grid.
+#'
+#' @param this.dsm Fitted \code{dsm} object.
+#' @param df Prediction grid data frame.
+#' @param nchunks Integer number of chunks to split \code{df} into.
+#' @param off.set Numeric offset (cell area): either a scalar or a vector the
+#'   same length as \code{nrow(df)}.
+#' @param parallel If \code{TRUE}, process chunks in parallel with
+#'   \code{parLapply}.
+#' @param nodes Integer number of cluster nodes for parallel processing.
+#' @return List of per-chunk results from \code{\link{apply.dsm.var}}.
+#' @export
 get.per.cell.var <- function(this.dsm,
                                df,
                                nchunks,
@@ -3305,9 +3987,9 @@ get.per.cell.var <- function(this.dsm,
   if (length(off.set) > 1 && length(off.set) != nrow(df)) {
     stop("get.per.cell.var: off.set vector is not same length as df")
   }
-  
+
   df$.my.off.set <- off.set
-  
+
   # split data into chunks for processing
   if (nchunks > 1) {
     dat.split <- split(df, cut(1:nrow(df), nchunks, FALSE))
@@ -3321,17 +4003,17 @@ get.per.cell.var <- function(this.dsm,
   dat.split <- map(dat.split, ~ split(.x, 1:nrow(.x)))
 
   if (parallel) {
-    
+
     cl <- makeCluster(nodes)
-    
+
     # Could just execute the things we need instead.
     # clusterEvalQ(cl, source(here::here("R/analysis settings.R")))
     clusterEvalQ(cl, {
       library(dsm)
       library(purrr)
     })
-    
-    # Need envir arg or else it won't find data objects when being rendered. 
+
+    # Need envir arg or else it won't find data objects when being rendered.
     # takes about 1 min
     clusterExport(
       cl,
@@ -3351,7 +4033,7 @@ get.per.cell.var <- function(this.dsm,
       this.dsm = this.dsm
       )
     )
-    
+
     stopCluster(cl)
   } else {  # non-parallel version
     # apply the function to the chunks serially with map
@@ -3363,16 +4045,21 @@ get.per.cell.var <- function(this.dsm,
       )
     ))
   }
-  
+
   res
 }
 
 
-# XXX Not currently used
-# Given a DSM and a dataframe to predict to, produce a density estimate with
-# measures of uncertainty. Previously Used dsm.var.gam to get an ABUNDANCE
-# estimate and then turn that into density estimate. Now just gets density
-# estimate directly bu supplying 1 as the off.set
+#' Compute a density estimate with uncertainty from a DSM
+#'
+#' \strong{Note: not currently used.}
+#'
+#' @param dsm_final Fitted \code{dsm} object.
+#' @param predgrid Prediction grid data frame.
+#' @return Named list with elements \code{pred.est}, \code{CV}, \code{SE},
+#'   and \code{CI} (a three-element vector giving the 5%, mean, and 95%
+#'   lognormal confidence interval).
+#' @export
 get.dens.est <- function(dsm_final, predgrid) {
 
   # use dsm.var.gam to get estimated abundance params
@@ -3390,8 +4077,13 @@ get.dens.est <- function(dsm_final, predgrid) {
                                                                              "Mean" = densEst$pred.est, "95%" = densEst$pred.est * asymp.ci.c.term))
 }
 
-# XXX not currently used
-# pretty-print the output from get.dens.est
+#' Pretty-print the output of get.dens.est
+#'
+#' \strong{Note: not currently used.}
+#'
+#' @param densEst Named list as returned by \code{\link{get.dens.est}}.
+#' @return \code{invisible(NULL)}, called for its side-effect (printed output).
+#' @export
 print.dens.est <- function(densEst){
   cat("Density estimate:\n\n")
 
@@ -3405,21 +4097,26 @@ print.dens.est <- function(densEst){
 }
 
 
-# Render one of the Generic_x_xxx.Rmd files passing species as a param
-# and save resulting knitted output.
-# 
-# Eg. do.generic.render("ATPU", "Generic_2_dsm.Rmd")
-#
-#
-# We may be called from in parallel with other ongoing renders(), this could
-# cause problems overwriting intermediate files, so we create a separate folder
-# for each render.
+#' Render a Generic analysis RMarkdown file for one species
+#'
+#' Knits one of the \code{Generic_x_xxx.Rmd} pipeline files with
+#' \code{species} as a parameter and writes the HTML output to
+#' \code{ResultsDir/<species>/}.  Intermediate files are written to
+#' \code{tempdir()} to allow concurrent renders.
+#'
+#' Expects project globals \code{ResultsDir} and \code{RDir}.
+#'
+#' @param species Character string species code.
+#' @param file Character string filename of the RMarkdown file (not full
+#'   path), relative to \code{RDir} (e.g. \code{"Generic_2_dsm.Rmd"}).
+#' @return Character string \code{species}, invisibly.
+#' @export
 do.generic.render <- function(species, file){
-  
+
   suffix <- str_replace(file, "^Generic", "") %>%
     str_replace("Rmd$", "html")
   out.file <- file.path(ResultsDir, species, paste0(species, suffix))
-  
+
   # Make sure output dir exists
   if (!dir.exists(dirname(out.file)))
     dir.create(dirname(out.file), recursive = TRUE)
@@ -3434,7 +4131,7 @@ do.generic.render <- function(species, file){
   )
 
   return(species)
-  
+
   callr::r(function(file, species, out.file) {
     rmarkdown::render(
       file,
@@ -3451,7 +4148,14 @@ do.generic.render <- function(species, file){
 }
 
 
-# Render the extrapolation analysis Rmd for one dataset
+#' Render the extrapolation analysis report for one dataset
+#'
+#' @param spill Character string spill/project identifier used in the output
+#'   filename.
+#' @param dataset Character string dataset name passed as a render parameter.
+#' @param debug If \code{TRUE}, drop into \code{browser()} at the start.
+#' @return \code{invisible(NULL)}, called for its side-effect (HTML rendered).
+#' @export
 do.extrapolation <- function(spill, dataset, debug = FALSE){
   browser(expr = debug)
 
@@ -3463,7 +4167,24 @@ do.extrapolation <- function(spill, dataset, debug = FALSE){
 }
 
 
-# fitted dsm model checking
+#' Comprehensive diagnostics for a fitted DSM
+#'
+#' Runs a full suite of checks including smooth plots, gratia appraise,
+#' mgcv \code{\link[mgcv]{gam.check}}, DHARMa residual tests, spatial
+#' autocorrelation tests, observed vs expected plots, and (optionally)
+#' concurvity checks and variograms.
+#'
+#' @param dsm_final Fitted \code{dsm} object.
+#' @param modname Character string model name; used in messages and titles.
+#' @param segdata Segment data frame (used for spatial autocorrelation tests
+#'   and residual-vs-term plots).
+#' @param smoother.plots If \code{TRUE}, produce \code{gratia::draw()} smoother
+#'   plots.
+#' @param brief If \code{TRUE} (default), skip the more expensive diagnostics
+#'   (concurvity, autocorrelogram, variograms).
+#' @return \code{invisible(NULL)}, called for its side-effects (plots and
+#'   printed output).
+#' @export
 check.dsm <- function(dsm_final,
                       modname,
                       segdata,
@@ -3473,7 +4194,7 @@ check.dsm <- function(dsm_final,
   # accessing columns with segdata[, termlab] below doesn't work with tbls or
   # sf objects.
   segdata <- as.data.frame(segdata)
-  
+
   # Several dsm-package functions do partial matching so turn off and re-enable
   # at end.
   options(warnPartialMatchDollar = FALSE)
@@ -3486,29 +4207,29 @@ check.dsm <- function(dsm_final,
     # Smoother plots
     message("Smoother plots")
     par(mfrow = c(1,1))
-    # XXXX Residual plotting in gratia is not working b/c of some mess-up with the name of the 
+    # XXXX Residual plotting in gratia is not working b/c of some mess-up with the name of the
     # offset column in dsm. need to debug some more
-    # gratia::draw(dsm_final, wrap = FALSE, residuals = dsm.options$do.dsm.residuals) %>% 
-    gratia::draw(dsm_final, wrap = FALSE) %>% 
+    # gratia::draw(dsm_final, wrap = FALSE, residuals = dsm.options$do.dsm.residuals) %>%
+    gratia::draw(dsm_final, wrap = FALSE) %>%
       print
   }
-  
+
   if (any(grepl("s(x.sc, y.sc", as.character(dsm_final$formula), fixed = T))) {
     vis.gam(dsm_final,  view = c("x.sc","y.sc"), main = "s(x.sc,y.sc) (response scale)",
             type = "response", asp = 1, plot.type = "contour")
     vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 0, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
-    
+
     vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 60, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
-    
+
     vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = -60, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
   }
-  
+
   # Shouldn't these be seasonal?
   if (any(grepl("s(x, y", as.character(dsm_final$formula), fixed = T))) {
     vis.gam(dsm_final,  view = c("x","y"), main = "s(x, y) (response scale)",
@@ -3516,28 +4237,28 @@ check.dsm <- function(dsm_final,
     vis.gam(dsm_final,  view = c("x","y"), theta = 0, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
-    
+
     vis.gam(dsm_final,  view = c("x","y"), theta = 60, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
-    
+
     vis.gam(dsm_final,  view = c("x","y"), theta = -60, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
   }
-  
-  
+
+
   # Sometimes whines about S3 methods.
   message("Gratia checks")
   suppressWarnings(gratia::appraise(dsm_final))
-  
+
   # Gam checks from MGCV
   par(mfrow = c(1,1))
   message("MGCV checks")
   try(my.gam.check(dsm_final))
   message("rqgam_check():")
   rqgam_check(dsm_final)
-  
+
   # Remove "dsm" class to make DHARMa happy
   message("DHARMa checks")
   simmod <- dsm_final
@@ -3548,21 +4269,21 @@ check.dsm <- function(dsm_final,
   testZeroInflation(sims)
   # May fail if x,y locations are not unique
   res <- try(testSpatialAutocorrelation(sims, segdata$x, segdata$y))
-  
+
   # If more than one resid at a given location.
-  # Note still use try() since this may fail to allocate enough memory if 
+  # Note still use try() since this may fail to allocate enough memory if
   # size of data is too big.
   # if(inherits(res, "try-error")) {
   #   message("testSpatialAUtocorrelation failed: aggregating resids spatially")
-  #   
+  #
     # This always fails trying to allocate more than 256GB (the RAM I have so
     # let's not bother)
     # segdata$loc <- paste(as.character(segdata$x), as.character(segdata$y), sep = "_")
     # recal <- recalculateResiduals(sims, group = segdata$loc)
-    # locs <- segdata %>% 
+    # locs <- segdata %>%
     #   distinct(loc, .keep_all = TRUE)
     # try(testSpatialAutocorrelation(recal, locs$x, locs$y))
-    # 
+    #
     # # May fail due to not enough memory for big jobs
     # if(inherits(res, "try-error")) {
     #   message("Spatial autocorrecation test failed for aggregated data. Garbage collecting...")
@@ -3588,9 +4309,9 @@ check.dsm <- function(dsm_final,
     message("Plot is non-symmetric, showing how terms on y-axis depend on terms on the x-axis")
     try(vis_concurvity(dsm_final))
   }
-  
+
   par(mfrow = c(1,1))
-  # check observed vs expected. See Miller et al 2021 pg 11 (of 18) for 
+  # check observed vs expected. See Miller et al 2021 pg 11 (of 18) for
   # reccommendation to use the "platform" variable to aggregate
   # by.
   message("Observed vs expected plot")
@@ -3614,7 +4335,7 @@ check.dsm <- function(dsm_final,
       y = segdata$y / 1000
     )
   coordinates(mydata) <- ~ x + y
-  
+
   print(bubble(
     mydata,
     "E",
@@ -3623,7 +4344,7 @@ check.dsm <- function(dsm_final,
     xlab = "X-coords",
     ylab = "y-coords"
   ))
-  
+
   if (!brief) {
     # check autocorellogram
     # create transect label as cruiseid & date & flyswim in order to avoid
@@ -3648,7 +4369,7 @@ check.dsm <- function(dsm_final,
       Segment.Label = "seg.lab",
       max.lag = 20
     )
-    
+
     message("Doing variograms")
     V <- (gstat::variogram(E ~ 1, mydata))
     plot(
@@ -3659,7 +4380,7 @@ check.dsm <- function(dsm_final,
       pch = 16,
       cex = 2 * V$np / max(V$np)
     )
-    
+
     V <- (gstat::variogram(E ~ 1, mydata, cutoff = 100))
     plot(
       x = V$dist,
@@ -3669,8 +4390,8 @@ check.dsm <- function(dsm_final,
       pch = 16,
       cex = 2 * V$np / max(V$np)
     )
-    
-    
+
+
     V <- (gstat::variogram(E ~ 1, mydata, cutoff = 10))
     plot(
       x = V$dist,
@@ -3680,7 +4401,7 @@ check.dsm <- function(dsm_final,
       pch = 16,
       cex = 2 * V$np / max(V$np)
     )
-    
+
     V <- (gstat::variogram(E ~ 1, mydata, cutoff = 5))
     plot(
       x = V$dist,
@@ -3690,7 +4411,7 @@ check.dsm <- function(dsm_final,
       pch = 16,
       cex = 2 * V$np / max(V$np)
     )
-    
+
     V <- (gstat::variogram(E ~ 1, mydata, cutoff = 2))
     plot(
       x = V$dist,
@@ -3707,25 +4428,24 @@ check.dsm <- function(dsm_final,
 
 
 
-# Augment segdata with summed counts of observations and create zeros for
-# segments where there were no observations of the species of interest.
-#
-# Also add fields for rawCount, density-corrected estAbund, and estDens from a
-# given set of observation distdata. These are used to check if my computed
-# response is equal to that from dsm, after adjusting for one-sided transects
-# with convert.units. This is used in run.dsm.model() to ensure that we are
-# building segdata properly, and that convert.units is doing what we think it
-# is.
-#
-# Note that if you want to restrict the analysis to a specific species/group,
-# then distdata should already have been filtered for the species of interest
-# before calling this function so that this code will fill in the zeros
-# properly. This happens in Generic_2_dsm.Rmd in the usual case.
+#' Add observation counts and estimated abundance to segment data
+#'
+#' Joins detection-probability-corrected observation counts from
+#' \code{distdata} onto \code{segdata}, filling segments with no observations
+#' with zeros, and adds \code{rawCount}, \code{estAbund}, and \code{estDens}
+#' columns.
+#'
+#' @param segdata \code{sf} segment data frame.
+#' @param distdata Observation data frame already filtered to the species of
+#'   interest and augmented with \code{adjSize}.
+#' @return \code{segdata} augmented with \code{rawCount}, \code{estAbund},
+#'   and \code{estDens} columns.
+#' @export
 augment.segdata <- function(segdata, distdata) {
   newsegdata <- distdata %>%
     group_by(Sample.Label) %>%
     summarize(estAbund = sum(adjSize), rawCount = sum(size)) %>%
-    right_join(segdata, by = "Sample.Label") %>% 
+    right_join(segdata, by = "Sample.Label") %>%
     st_as_sf
   newsegdata$estAbund[is.na(newsegdata$estAbund)] <- 0
   newsegdata$rawCount[is.na(newsegdata$rawCount)] <- 0
@@ -3734,15 +4454,20 @@ augment.segdata <- function(segdata, distdata) {
 }
 
 
-# add 'k =  xxx' modifier to smooth terms for year or yday if there are less
-# than k (default 10) unique values of that variable in segdata.
-#
-# if the resulting k would be < 2 then just remove the term
-#
-# XXX This should be made generic to go through all model terms. For each term
-# just convert the formula to character and use string functions to grep and
-# replace the term as needed instead of trying to use update().
-#
+#' Adjust smooth k for temporal covariates when data are sparse
+#'
+#' Inspects \code{form} for \code{s(year, ...)} and \code{s(yday, ...)}
+#' terms.  If the number of unique values in \code{segdata} is less than
+#' \code{k}, the term is either removed (fewer than 2 unique values) or
+#' replaced with a version using a reduced \code{k}.
+#'
+#' @param form A model formula.
+#' @param segdata Segment data frame containing \code{year} and/or
+#'   \code{yday} columns.
+#' @param k Default basis dimension; smooth terms with fewer than \code{k}
+#'   unique values are adjusted.
+#' @return Updated formula.
+#' @export
 adjust.time.covars <- function(form, segdata, k = 10) {
   # check if form contains year or yday
   # check unique number of values for each
@@ -3785,14 +4510,31 @@ adjust.time.covars <- function(form, segdata, k = 10) {
   form
 }
 
-# Run a dsm model.
-#
-# mod.def = dataframe with elements modname, formula, and family (the latter is a list columns).
-# folder = path to folder to save results in.
-# ddf.obj = is the list of ddfs in the correct order
-# rerun.dsms = If TRUE (default) then rerun dsm() for mod.def, otherwise
-# if .Rdata file exists from previous run of this model then load results from 
-# that file.
+#' Fit or reload a single DSM model
+#'
+#' Calls \code{\link[dsm]{dsm}} with the specification in \code{mod.def} and
+#' saves the result to \code{folder/<modname>.Rdata}.  If
+#' \code{rerun.dsms = FALSE} and the file already exists, the saved result is
+#' loaded instead.
+#'
+#' @param mod.def Single-row data frame with list columns \code{formula} and
+#'   \code{family} and a character column \code{modname}.
+#' @param ddf.obj List of detection function objects in the order expected by
+#'   \code{\link[dsm]{dsm}}.
+#' @param segment.data \code{sf} or data frame of segment data.
+#' @param observation.data Data frame of observation data.
+#' @param method Smoothing parameter estimation method; default
+#'   \code{"REML"}.
+#' @param convert.units Numeric conversion factor passed to
+#'   \code{\link[dsm]{dsm}}.
+#' @param control List of control options passed to \code{\link[dsm]{dsm}};
+#'   default keeps data with \code{keepData = TRUE}.
+#' @param folder Directory path for saving the model \code{.Rdata} file.
+#' @param rerun.dsms If \code{TRUE} (default), always refit; if \code{FALSE},
+#'   load a previously saved result when available.
+#' @param ... Additional arguments passed to \code{\link[dsm]{dsm}}.
+#' @return Fitted \code{dsm} object, or a \code{try-error} on failure.
+#' @export
 run.dsm.model <- function(mod.def,
                           ddf.obj,
                           segment.data,
@@ -3805,14 +4547,14 @@ run.dsm.model <- function(mod.def,
                           ...) {
   # logfileConn <- file(description = paste0("E:/test_", Sys.getpid(), ".txt"), open = "at")
   # source(here::here("R/analysis settings.R"))
-  # logfileConn <- file(here::here(ResultsDir,  
+  # logfileConn <- file(here::here(ResultsDir,
   #                         paste0("dsm_logfile_", Sys.getpid(), ".txt")), "at")
-  # 
+  #
   # needed if being called from future_map() on a worker process. If not,
-  # it messes up trying to access any sf object (segment.data) when using 
+  # it messes up trying to access any sf object (segment.data) when using
   # the s2 spherical geometry package.
-  sf::sf_use_s2(FALSE) 
-  
+  sf::sf_use_s2(FALSE)
+
   filename <- file.path(folder, paste0(mod.def$modname, ".Rdata"))
   # Rerun dsm?
   if (rerun.dsms == FALSE && file.exists(filename)) {
@@ -3825,7 +4567,7 @@ run.dsm.model <- function(mod.def,
   } else {
     # Rerun the dsm
     message("Running dsm model ", mod.def$modname)
-    
+
     # Adjust formula
     form <- adjust.time.covars(mod.def$formula[[1]], segment.data)
 
@@ -3847,8 +4589,8 @@ run.dsm.model <- function(mod.def,
     ),
     outFile = stdout())))
     options(warnPartialMatchDollar = TRUE)
-    
-    
+
+
     if(!inherits(model, "try-error")){
       # if we used "bam" then the data is not kept even if keepData == TRUE, so
       # add it back in
@@ -3862,12 +4604,12 @@ run.dsm.model <- function(mod.def,
             ddfobject = ddf.obj,
             family = mod.def$family[[1]],
             group = FALSE,
-            convert.units = 1, 
+            convert.units = 1,
             availability = 1,
             segment.area = segment.data$segment.area
           )
       }
-  
+
       # check if my computed response is equal to that from dsm, just to make sure
       # we understand how response is being computed. Note the "as.data.frame"
       # is used to remove the atribs from segment.data b/c it's an sf object.
@@ -3879,90 +4621,78 @@ run.dsm.model <- function(mod.def,
       )
     } else { # Model failed to fit. Give message and then continue on to save.
       message("run.dsm.model: dsm() failed: ", model)
-    } 
-    
+    }
+
     message(sprintf("Saving model result to %s", filename))
     save(model, file = filename, compress = FALSE)
   } # End rerun dsm
-  
+
   model
 }
 
 
-# Calculate predictions for a dsm model
-#
-# modname = name of model to extract from mod.res and predict for
-# mod.res = list of dsm model objects
-# species = name of species this is for
-# predgrid = prediction grid containing one row per cell (polygons) in each of 4 
-#     seasons. Must contain all predictors used in the model indicated by modname 
-#     (excluding offset which is calculated internally by predict.)
-#
-# Initially predgrid contains 400240 rows, with one copy of the cells for 
-# each combination of season and flyswim (The spatial extent of the study area 
-# contains 50030 cells):
-# 
-#
-#               F     W
-#     Fall   50030 50030
-#     Spring 50030 50030
-#     Summer 50030 50030
-#     Winter 50030 50030
-#
-# Value: predgrid augmented with NHat and Density
-# 
-# At the end ret will contain:
-#   - predictions for fly (200120 rows - one for each spatial cell in each season)
-#   - predictions for swim (200120 rows - one for each spatial cell in each season)
-#   - predictions for combined (swim+fly) (200120 rows - one for each spatial cell in each season)
-#   
-# 
-# NOTE NOTE NOTE if you do not supply newdata arg (ie. predgrid) but rather just
-# predict to the same data that was used to fit the model then the "...order of
-# the results will not necessarily be the same as the segdata (segment data)
-# data.frame that was supplied (it will be sorted by the Segment.Label field)."
-# (From predict.dsm manual)
+#' Generate density predictions from a DSM model
+#'
+#' Calls \code{predict} on the model named \code{modname} from \code{mod.res}
+#' for all rows of \code{predgrid} (all seasons × platform levels), computes
+#' a \code{"Combined"} subset by summing across platform levels, writes a
+#' combined shapefile, and saves four-season rasters as GeoTIFFs.
+#'
+#' Expects project globals \code{ShapeDir}, \code{predDir}, \code{season.names},
+#' and \code{predgridCellArea}.
+#'
+#' @param modname Character string model name; used to look up the model in
+#'   \code{mod.res}.
+#' @param species Character string species code; used in output filenames.
+#' @param mod.res Named list of fitted \code{dsm} objects.
+#' @param predgrid \code{sf} prediction grid with one row per
+#'   (cell × season × platform) combination and all model predictors present.
+#'   The \code{area} column is used as the prediction offset.
+#' @return \code{predgrid} augmented with \code{NHat}, \code{Dens}, and
+#'   \code{subset} columns, with rows for each platform level plus a
+#'   \code{"Combined"} set.
+#' @export
 dsm.pred <-
   function(modname,
            species,
            mod.res,
            predgrid) {
-    
-  message(sprintf("Predicting %s for dsm model %s", species, 
+
+  message(sprintf("Predicting %s for dsm model %s", species,
                   modname))
 
-  # Extract model and create a subset column in predgrid from platform   
+  # Extract model and create a subset column in predgrid from platform
   # Might have been just able to use platform.
   model <- mod.res[[modname]]
-  ret <- predgrid %>% 
+  ret <- predgrid %>%
     mutate(subset = platform)
-  
+
   # Predict from model for all seasons and values of platform, which
   # may or may not be a factor in the given model. So, in a no_factor model
   # we will end up with n identical copies of predictions: 1 for each value
   # of platform. In a factor model these predictions for each level of platform
   # are different.
-  ret <- ret %>% 
+  ret <- ret %>%
     mutate(NHat = predict(model, newdata=ret, off.set=ret$area),
            Dens = NHat/area)
-  
+
   # Create summed (ie Combined Nhat) across all levels of platform.
-  ret <- ret %>% 
+  ret <- ret %>%
     # Peel off one copy of all seasons predgrid template. ie nrow(ret) divided
     # by the number of platforms.
-    head(nrow(.) / length(unique(.$platform))) %>% 
+    head(nrow(.) / length(unique(.$platform))) %>%
     # Sum NHats across platforms splitting the dataframe into a list with one
     # element per platform, extracting the NHat columns and summing with reduce
     mutate(subset = "Combined",
-           NHat =  split(ret, ~ platform) %>% 
+           NHat =  split(ret, ~ platform) %>%
              map(~ .x$NHat) %>%
              reduce(`+`),
            Dens = NHat/area,
-           platform = NA) %>% 
+           platform = NA) %>%
     rbind(ret)   # tack on original rows for each platform level
-  
-  
-  
+
+
+
   # if (do.plots) {
   #   # Plot combined result
   #   combined_plot <- ggplot() +
@@ -3976,7 +4706,7 @@ dsm.pred <-
   #     scale_colour_viridis_c(option = "E") +
   #     scale_fill_viridis_c(option = "E")
   #   print(combined_plot)
-  #   
+  #
   #   # Plot individual fly and swim results
   #   ind_plot <- ggplot() +
   #     geom_sf(
@@ -3989,33 +4719,33 @@ dsm.pred <-
   #     scale_colour_viridis_c(option = "E") +
   #     scale_fill_viridis_c(option = "E")
   #   print(ind_plot)
-  # }  
-  
+  # }
+
   # Save as a shapefile
-  ret %>% 
-    filter(subset == "Combined") %>% 
+  ret %>%
+    filter(subset == "Combined") %>%
     st_write(
       dsn = ShapeDir,
       layer = paste(species, modname, "predictions", sep = "_"),
       driver = "ESRI Shapefile",
       delete_layer = TRUE
     )
-  
 
-    
+
+
   # create 4-lyr seasonal raster of combined values for plotting and
   # saving
   message("Creating and saving seasonal rasters.")
   pp_raster <- season.names %>%
     map(make.season.raster,
         obj = filter(ret, subset == "Combined"),
-        variable = "Dens") %>% 
+        variable = "Dens") %>%
     rast
   names(pp_raster) <- season.names
-  
+
   # produce 4 panel plot. Not necessary since this is done at end of Generic_3_prediction.rmd
   # plot(pp_raster, main = paste(season.names, paste(species, modname, sep = "_")))
-  
+
   # Save as a raster
   writeRaster(pp_raster,
               file.path(
@@ -4035,7 +4765,18 @@ dsm.pred <-
 
 
 
-# render ddf 
+#' Render the DDF fitting RMarkdown report for one species
+#'
+#' @param species Character string species code.
+#' @param do.final If \code{TRUE}, render the final DDF report; otherwise
+#'   render the candidate DDF report.
+#' @param rerun If \code{TRUE}, re-fit models even when saved results exist.
+#' @param parallel If \code{TRUE}, use parallel processing.
+#' @param nCores Number of cores for parallel processing.
+#' @param do.eda If \code{TRUE}, produce EDA plots during rendering.
+#' @param cleanFolder If \code{TRUE}, clean the results folder before fitting.
+#' @return \code{invisible(NULL)}, called for its side-effect (HTML rendered).
+#' @export
 do.det.fcn.render <- function(species,
                               do.final,
                               rerun,
@@ -4043,20 +4784,20 @@ do.det.fcn.render <- function(species,
                               nCores,
                               do.eda,
                               cleanFolder) {
-  
-  
+
+
   if (do.final)
     suffix <- "01_final_ddf.html"
   else
     suffix <- "01_candidate_ddf.html"
-  
+
   out.file <- file.path(ResultsDir, species, paste(species, suffix, sep = "_"))
   message(sprintf("Rendering generic ddf fitting for %s to %s", species, out.file))
-  
+
   # Make sure output dir exists
   if (!dir.exists(dirname(out.file)))
     dir.create(dirname(out.file), recursive = TRUE)
-  
+
   render(
     file.path(here("R"), "Generic_1_ddf_fitting.rmd"),
     params = list(
@@ -4072,23 +4813,38 @@ do.det.fcn.render <- function(species,
   )
 }
 
-# produce a summary table of candidate det. fcns in one folder
+#' Produce a summary table of candidate detection functions for one DDF spec
+#'
+#' @param df.spec.name Character string DDF spec name (used to locate the
+#'   results folder and label the output).
+#' @param species Character string species code.
+#' @return Data frame of candidate model statistics sorted by AIC.
+#' @export
 candidate.detfcn.summary <- function(df.spec.name, species) {
-  
+
   folder <- file.path(ResultsDir, species, paste("DF Summaries", df.spec.name, sep = "_"))
   do.ds.det.fcn.checks(folder, species = species, dsetname = df.spec.name)
-  
+
   get.ds.res(folder) %>%
     mutate(dataset = df.spec.name, species = species) %>%
     relocate(species, dataset, Model, Key, Formula, DetProb, AIC, deltaAIC, )
 }
 
 
-# Check all .txt files in folder for DS summary and return a dataframe with
-# model name and summary items.
+#' Collect detection function results from summary text files
+#'
+#' Reads all \code{AIC*.txt} files in \code{folder} with
+#' \code{\link{get.stats.file}} and returns a data frame sorted by AIC with a
+#' \code{deltaAIC} column.
+#'
+#' @param folder Directory path containing \code{AIC_*.txt} summary files.
+#' @return Data frame with one row per fitted model and columns \code{Model},
+#'   \code{Key}, \code{Formula}, \code{AIC}, \code{deltaAIC}, and several
+#'   GOF statistics.
+#' @export
 get.ds.res <- function(folder) {
   fl <- list.files(path = folder, pattern = "AIC.*\\.txt", full.names = T)
-  
+
   # If all ddf failed there will be no results so we can't use "order"
   # to sort by aic, so just return the empty dataframe
   if (length(fl) == 0) {
@@ -4116,28 +4872,48 @@ get.ds.res <- function(folder) {
   }
 }
 
-#Load each detfcn model in folder in turn and plot it
+#' Load and plot each fitted detection function in a results folder
+#'
+#' Iterates over all \code{AIC*.RData} files in \code{folder} and calls
+#' \code{\link{check.det.fcn}} on each loaded model.
+#'
+#' @param folder Directory path containing \code{AIC_*.RData} model files.
+#' @param species Character string species code; passed to
+#'   \code{\link{check.det.fcn}}.
+#' @param dsetname Character string dataset name; used in plot titles.
+#' @return \code{invisible(NULL)}, called for its side-effects (diagnostic
+#'   plots).
+#' @export
 do.ds.det.fcn.checks <- function(folder, species, dsetname) {
   fl <- list.files(path = folder, pattern = "AIC.*\\.RData", full.names = T)
-  
+
   walk(fl, function(filename) {
     message(sprintf("Checking detection function: %s", filename))
     load(filename)
-    check.det.fcn(model, 
-                  species = species, 
+    check.det.fcn(model,
+                  species = species,
                   str_replace(basename(folder), fixed("DF Summaries_"), ""))
   })
 }
 
 
-# Get various values from a file containing a dsmodel object summary.
-#folder <- "C:/Users/fifieldd/Documents/Offline/R/DS Utils/Test Output"
-#path <- paste(folder, "hn.size 19-Jan-2016_145149.txt", sep = "/")
+#' Parse a detection-function summary text file into a one-row data frame
+#'
+#' Reads the plain-text summary file written by \code{\link{do.ds}} and
+#' extracts model name, key function, formula, AIC, chi-square GOF statistics,
+#' detection probability, and abundance estimates.
+#'
+#' @param path Full path to a \code{.txt} summary file.
+#' @return One-row data frame with columns \code{Model}, \code{Key},
+#'   \code{Formula}, \code{AIC}, \code{ChiScores}, \code{ChisquareP},
+#'   \code{DetProb}, \code{DetSE}, \code{DetCV}, \code{NObs}, \code{NCov},
+#'   \code{NCovSE}, \code{NCovCV}.
+#' @export
 get.stats.file <- function(path) {
   message("Getting stats file ", path)
-  
+
   lines <- readLines(path)
-  
+
   getStat <- function(lines, string){
     if (length(line <- grep(string, lines)) == 0) {
       warning(path, ": No line containing ", string, "!", immediate. = T)
@@ -4145,7 +4921,7 @@ get.stats.file <- function(path) {
     }
     strsplit(lines[line], string)[[1]][2]
   }
-  
+
   res <- data.frame(Model = getStat(lines, "^Model name: "),
     Key  = getStat(lines, "Key: "),
     Formula  = getStat(lines, "Formula: "),
@@ -4164,33 +4940,49 @@ get.stats.file <- function(path) {
 }
 
 
-# Takes a ddf spec and adds to $fitted.distdata the following:
-# 1) ddftype as a suffix to the Sample.Labels in fitted.distdata.
-# 2) ddfobj.orig as an integer version of the ddftype factor.
-# 
-# Used by create.dsm.data to make Sample.Labels unique in each segdata copy, and
-# to assign the initial ddfobj needed by dsm(). Note the final ddfobj value must
-# be sequential with no missing values and will be assigned in create.dsm.data()
-# once we know which ddfs are included in the dsm (ie. ones with no obs are not
-# included).
+#' Add ddftype suffix and ddfobj.orig to fitted.distdata in a DDF spec
+#'
+#' Appends the \code{ddftype} value as a suffix to \code{Sample.Label} in
+#' \code{df.mod.spec$fitted.distdata} and adds an integer \code{ddfobj.orig}
+#' column derived from the \code{ddftype} factor.  Used by
+#' \code{\link{create.dsm.data}} to ensure unique \code{Sample.Label} values
+#' across the combined \code{segdata} and to record each observation's original
+#' detection-function index before sequential renumbering.
+#'
+#' @param df.mod.spec Single element of a DDF model spec list, as created by
+#'   \code{\link{do.det.fcn.spec}}.
+#' @return \code{df.mod.spec} with \code{fitted.distdata} augmented by a
+#'   \code{ddftype}-suffixed \code{Sample.Label} and an integer
+#'   \code{ddfobj.orig} column.
+#' @export
 augment.distdata <- function(df.mod.spec) {
   df.mod.spec$fitted.distdata <- df.mod.spec$fitted.distdata %>%
     mutate(Sample.Label = paste(Sample.Label, df.mod.spec$ddftype, sep = "_"),
            ddfobj.orig = as.integer(df.mod.spec$ddftype))
   df.mod.spec
-}  
+}
 
 
-# Create a copy of the appropriate segdata (according to surveytype - either
-# aerial or ship) for a df.mod.spec. Set the Sample.Label suffix and platform
-# accordingly. If I decide to compact the ddftypes down to a smaller number of
-# platforms then ddftype_to_platform allows for this. 
+#' Create a platform-specific segdata copy for one DDF spec
+#'
+#' Filters \code{init_segdata} to the survey type (ship or aerial) implied by
+#' \code{df.mod.spec$ddftype}, appends the ddftype as a \code{Sample.Label}
+#' suffix, and adds \code{ddftype_orig} and \code{platform} columns.  The
+#' \code{platform} column is derived via the \code{ddftype_to_platform} lookup
+#' vector which must exist in the calling environment.
+#'
+#' @param df.mod.spec Single element of a DDF model spec list; must have a
+#'   scalar \code{ddftype} field.
+#' @param init_segdata Segment data frame containing a \code{SurveyType}
+#'   column with values \code{"Ship"} and \code{"Aerial"}.
+#' @return Filtered and augmented segment data frame for the given ddftype.
+#' @export
 create.segdata.copy <- function(df.mod.spec, init_segdata) {
-  
+
   # This all only works if df.mod.spec$ddftype is a single value (which it
   # should be), but I'm paranoid.
   stopifnot(length(unique(df.mod.spec$ddftype)) == 1)
-  
+
   segdata <- switch(
     substr(df.mod.spec$ddftype, 1, 1),
     S = filter(init_segdata, SurveyType == "Ship"),
@@ -4206,109 +4998,48 @@ create.segdata.copy <- function(df.mod.spec, init_segdata) {
   segdata
 }
 
-# Nov 15 2024
-#   - ddfobj may have less than the full number of values (currently 4) if some
-#     ddfs have no obs
-#   - nonetheless, there will be segdata copies for each unique ddftype, 6 in 
-#     this case as below. so need to create a factor variable in segdata to 
-#     hold this info.
-#     
-# May 2, 2025:
-#   - noted difference bewteen number of levels of ddfobj (SW, SF, SS, AW, AF, AS)
-#   which applies to distdata (6 - one for each ddf that we fitted including
-#   dummies), and requires 6 copies of segdata, with platform which applies to
-#   the dsm model term "platform" (4 in the case of the _factor models - one for
-#   each level SW, SF, AW, SF).
-#     
-#
-# Function to create distdata, segdata, and ddfs for a given species to pass to
-# dsm().
-#
-# Segdata needs to contain (even if there are no observations in some of these
-# classes):
-#
-# 1. ship segdata for water birds (SW) with perp distances - ddf.obj == 1 
-# 2. ship segdata for flying birds (SF) with perp distances - ddf.obj == 2 
-# 3. aerial segdata for water birds (AW) with perp distances - ddf.obj == 3 
-# 4. aerial segdata for flying birds (AF) with perp distances - ddf.obj == 4 
-# 5. water (ship or aerial) segdata for birds with NO perp distances - ddf.obj == 5 
-# 6. flying (ship or aerial) segdata for birds with NO perp distances - ddf.obj == 6
-#
-# Instead of hardcoding the number and nature of these, I should probably do it
-# dynamically based on df.mod.specs.
-#
-# We need to explicitly calculate the segment.area for each segment b/c aerial
-# segs are (usually) two sided and ship ones are not. Normally, this is handled
-# by the convert_units= arg to dsm, but it only takes a single scalar value
-# whereas we need a different one for each type of segment (aerial vs ship).
-# With this setup there is no need for a convert_units= arg to dsm anymore. Note
-# that under normal circumstances it would be fine to just divide the ship-based
-# effort by 2 and let dsm:::make.data() do the calc of segment.area but it isn't
-# that simple when one of the ddfs has no observations. In that case,
-# there is currently no way to make a dummy_ddf with no obs and so you have to
-# arbitrarily assign a ddf.obj to the segments in that ddftype. I just chose
-# ddfobj == 1 for this. If the transect geometry differs between these two then
-# make.data() cannot properly calculate the segment.area. So I do it here by
-# hand and pass the segment.area to dsm(). Note that this calculation can't be
-# done in Create_seg_data.Rmd b/c we don't have the ddf info at that point.
-# 
-# Note that perhaps the "right" solution would be for dsm to work properly with
-# to dummy_ddfs that have no observations.
-#
-# Segment area is:
-#
-# For two-sided transects: Effort * (width - left) * 2 
-# - for one-sided transects: Effort * (width - left)
-#
-# Width is taken from the meta-data for the ddf.
-#
-# Arguments: 
-# species - char string. Needed to chose the correct season for each
-#  segment b/c seasons can be species specific. 
-# df.mod.specs - list of detection function specifications - 
-# init_segdata - the initial segdata computed by Create_seg_data.Rmd. This is
-#  subdivided into aerial and ship.
-#
-# Value: 
-#  Returns a list of 3 elements: 
-#  
-#  list(distdata, segdata, ddfs) 
-#  
-# distdata will be augmented with ddfobj, and have appropriate suffix added to
-#   Sample.Label (see segdata below)
-#
-# segdata will consist of multiple copies of the appropriate (aerial or ship) 
-#   segdata (one for each ddftype aka observation process) augmented with 
-#   variables for:
-#   segment.area: 
-#   ddfobj - tells dsm:::make_data() which det prob to use to modify the
-#     response, this is original ddftype re-numbered sequentially from 1 to number
-#     of ddfs with data
-#   ddfobj.orig - the original ddftype before renumbering. 1-6 as above table 
-#   Season
-# Sample.Label will have  _AW, _AF, _AS, _SW, _SF, or _SS added to it.
-#
-# ddfs - a list containing up to n detection functions (eg, Ship_fly, ship_swim,
-# aerial_fly, aerial_swim, ship_strip, aerial_strip) excluding any for which
-# there were no obs.
+#' Assemble distdata, segdata, and DDF list for DSM fitting
+#'
+#' Builds the three data structures required by \code{\link[dsm]{dsm}} for a
+#' given species: (1) combined observation data (\code{distdata}) with
+#' sequentially renumbered \code{ddfobj} values; (2) replicated segment data
+#' (\code{segdata}) — one copy per \code{ddftype} — augmented with
+#' \code{Season}, \code{segment.area}, \code{platform}, and \code{ddfobj}; and
+#' (3) the list of fitted detection-function objects (\code{ddfs}), with any
+#' ddftype that had no observations excluded.
+#'
+#' Expects project globals \code{seasons}, \code{ddftype_levels},
+#' \code{def.ddf.list}, and \code{ddftype_to_platform} in the calling
+#' environment.
+#'
+#' @param species Character string species code; used to select season
+#'   definitions from \code{seasons[[species]]}.
+#' @param df.mod.specs List of DDF model spec objects, as returned by
+#'   \code{\link{do.det.fcn.specs}}.
+#' @param init_segdata Segment data frame with a \code{SurveyType} column
+#'   (\code{"Ship"} or \code{"Aerial"}), as produced by
+#'   \code{\link{create.segdata}}.
+#' @return Named list with elements \code{distdata}, \code{segdata}, and
+#'   \code{ddfs}.
+#' @export
 create.dsm.data <- function(species, df.mod.specs, init_segdata) {
-  
+
   #### Create distdata ---------------------
-    
+
   # Create the observation data that will be passed to dsm(). Note that some of
   # these distdata components specified by df.mod.specs may have no obs and will
   # thus not be included
-  distdata <- df.mod.specs %>% 
-    map(augment.distdata) %>% 
+  distdata <- df.mod.specs %>%
+    map(augment.distdata) %>%
     # Extract list of fitted.distdatas
-    map("fitted.distdata") %>% 
+    map("fitted.distdata") %>%
     # Remove datasets with no obs - note use of base R Filter()
     Filter(function(x) nrow(x) > 0, .) %>%
     map_dfr( ~ .) %>%  # Convert list to single dataframe
     mutate(
       # Need to renumber the ddfobj values sequentially from 1 to the number
       # of ddfs, whereas they may currently have gaps in the numeric sequence.
-      # For example, if there were no obs in aerial_F_D (ddfobj.orig == 4) or 
+      # For example, if there were no obs in aerial_F_D (ddfobj.orig == 4) or
       # aerial_F_N (ddfobj.orig == 8) then the
       # ddfobj.orig would be numbered 1, 2, 3, 5, 6, 7 but should be renumbered
       # as 1:6.
@@ -4318,19 +5049,19 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   # Make sure we still have some obs in distdata and all rows  are assigned a
   # ddfobj.
   stopifnot(nrow(distdata) > 0)
-  stopifnot(sum(table(distdata$ddfobj)) == nrow(distdata))  
+  stopifnot(sum(table(distdata$ddfobj)) == nrow(distdata))
 
   #### Create segdata --------------------
 
   # Deal with ddfobj numbering when there are ddfs that had no observations
   # Create a conversion vector, conv, which will be used to set the ddfobj variable
   # below. There are two cases:
-  # 
+  #
   # 1) for segdata copies whose corresponding ddf actually had observations, the
   # original ddfobj number (set from ddftype) may not be right if there were any
   # preceding ddfs in df.mod.specs with no obs. Thus, we set the ddfobj to the
   # matching renumbered ddfobj created in distdata processing above
-  # 
+  #
   # 2) for segdata copies whose corresponding ddf had no observations, we need
   # to change the ddfobj. Otherwise, dsm will get upset when it tries to find
   # the observations forthese segments whose ddfobj points to a ddf (dummy or
@@ -4342,15 +5073,15 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   # in these segments (as computed by dsm:::make.data()) will still be 0 since
   # none of the Sample.Labels in the fitted.distdata for that substituted ddfobj
   # will match the Sample.Label in these segments (ie in this copy of segdata).
-  # (XXXX Does having all these 0's bias the gam???? See Notes.docx May 23, 2025). 
-  # 
+  # (XXXX Does having all these 0's bias the gam???? See Notes.docx May 23, 2025).
+  #
   # Note it might be better just to these segdata copies with no obs altogether
   # but I'm not sure this is valied (nor am I sure keeping them is valid). Also,
   # that would mean that the number of init.segdata copies in the final segdata
   # would vary dynamically and this would need to be kept track of so that
   # downstream code (ie. in prediction step) would know how to parse out the
   # rows properly. Not sure what would be best
-  # 
+  #
   # conv can then be indexed by the original ddftype  to get the correct ddfobj
   # for each segment.
   nddfs <- length(def.ddf.list)
@@ -4359,16 +5090,16 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   conv <- rep(NA, nddfs)
   conv[origddfs] <- newddfs
   conv[is.na(conv)] <- min(newddfs)
-    
+
   # Cylce through the list of ddf model specs adding a copy of segdata for each.
-  segdata <- df.mod.specs %>% 
+  segdata <- df.mod.specs %>%
     # Insert a copy of the right segdata (ship vs aerial) for each ddf spec.
     # regardless of whether there were any obs in that ddf. If there weren't
-    # then all segments for this ddf spec will end up with zero obs in the 
+    # then all segments for this ddf spec will end up with zero obs in the
     # response variable created by dsm:::make_data()
-    map(create.segdata.copy, init_segdata = init_segdata) %>% 
+    map(create.segdata.copy, init_segdata = init_segdata) %>%
     map_dfr(~ .) %>% # Convert to one large dataframe
-    assign.season(seasons[[species]], datefield = "Date") %>% 
+    assign.season(seasons[[species]], datefield = "Date") %>%
     select(
       SurveyType,
       Sample.Label,
@@ -4411,30 +5142,30 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
     # calculate the gam response internally. Calculate it here so I can check it's
     # done right and I understand what's going on internally in dsm().
     augment.segdata(distdata)
-  
-  ##### Make sure assignment of ddfobj went properly 
-  # of each segdata copy (either aerial of ship) and making sure 
-  # get ddfs with no obs 
+
+  ##### Make sure assignment of ddfobj went properly
+  # of each segdata copy (either aerial of ship) and making sure
+  # get ddfs with no obs
   mingood <- min(newddfs)
   conv[mingood] <- NA # ignore the actuall good ddf that the others point to
   no_obs_ddfs <- which(conv == mingood)
-  
+
   # get aerial and ship initial segdata sizes and name them "A" and "S"
-  sizes <- table(init_segdata$SurveyType) %>% 
+  sizes <- table(init_segdata$SurveyType) %>%
     setNames(names(.) %>% substr(1,1))
-  
+
   # Get survey type of each ddf, and then get the number of segemnts that had a
-  # ddf with no obs that have used min(newddfs) as their ddfobj. 
-  # This requires that the order of ddftype_levels and def.ddf.list have the 
+  # ddf with no obs that have used min(newddfs) as their ddfobj.
+  # This requires that the order of ddftype_levels and def.ddf.list have the
   # same order.
   survey_type_index <- substr(ddftype_levels, 1,1)
   tot_no_obs_ddf_segs<- sum(sizes[survey_type_index[no_obs_ddfs]])
-  
+
   # The number of segments with ddfobj equal to mingodd should equal the number
   # it would normally have had if no others from no_obs ddfs pointed to it
   # plus the number no_obs_ddf segments that are pointing to it. If not, something
   # went wrong.
-  if (table(segdata$ddfobj)[mingood] != 
+  if (table(segdata$ddfobj)[mingood] !=
               sizes[survey_type_index[mingood]] + tot_no_obs_ddf_segs) {
     message(
       "Something went wrong assigning ddfobjs. Number of segments with ",
@@ -4446,28 +5177,37 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
     )
     stop()
   }
-  
+
   ### Create ddfs ----------------------------------------
-  
+
   # Extract ddfs from df.mod.specs and drop any which don't have any observations
   # or else dsm() will get upset. Note we use the original ddfobj numbering
   # before it was recoded since this extracts the correct ddfs.
-  ddfs <- map(df.mod.specs, "fitted.model") %>% 
+  ddfs <- map(df.mod.specs, "fitted.model") %>%
     magrittr::extract(unique(distdata$ddfobj.orig))
 
   ### TODO: need to deal with segments where WhatCount was something funky
   ### like only counting gannets. In that case, if we are doing a different species
-  ### then these segments will be zeros but should not be included at all. For 
-  ### now I think this NOGA exception is the only case. 
-  
+  ### then these segments will be zeros but should not be included at all. For
+  ### now I think this NOGA exception is the only case.
+
   list(distdata = distdata, segdata = segdata, ddfs = ddfs)
 }
 
 
-# Get a dataframe listing all ddf models that currently have no results files
-# in folder. List of models is constructed from all candidate keys, adjustment 
-# terms and covars. Useful for figuring out what ddf model fitting went off into
-# la-la land...
+#' List detection function models with no results file in a folder
+#'
+#' Calls \code{\link{do.ds}} with \code{runModels = FALSE} to enumerate all
+#' candidate model combinations, then returns the subset that has no
+#' corresponding results file in \code{folder}.  Useful for diagnosing stalled
+#' or hung model runs.
+#'
+#' @param folder Directory path to search for existing results files.
+#' @param covars Character vector of covariate names for model enumeration;
+#'   defaults to the project global \code{dfCovars}.
+#' @return Data frame of unfinished models (same structure as the model table
+#'   produced by \code{\link{do.ds}}).
+#' @export
 list.unfinished.ddfs <- function(folder, covars = dfCovars){
   do.ds(
     data = NULL,
@@ -4477,9 +5217,18 @@ list.unfinished.ddfs <- function(folder, covars = dfCovars){
   )
 }
 
-# Creates a failed ddf model file in the given folder for model specified by mod.
-# Useful when a given ddf never finishes running and needs to be marked as failed
-# by hand.
+#' Create a sentinel file marking a detection function model as failed
+#'
+#' Writes an empty \code{failed_model_<label>.txt} file into \code{folder} so
+#' that downstream code treats this model as having failed without waiting for
+#' it to finish.  Use when a model run hangs and must be marked failed by hand.
+#'
+#' @param mod Model descriptor with a \code{label} field used to construct the
+#'   filename.
+#' @param folder Directory path in which to create the sentinel file.
+#' @return \code{TRUE} (invisibly) on success, as returned by
+#'   \code{\link[base]{file.create}}.
+#' @export
 create.failed.ddf.file <- function(mod, folder) {
     file.create(file.path(folder, paste0("failed_model_", mod$label, ".txt")))
 }
