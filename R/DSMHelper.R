@@ -33,12 +33,12 @@ check.distdata.cols <- function(data) {
   if (!is.null(data$distance) && !is.null(data$distbegin) && !is.null(data$distend)) {
     if (all(is.na(data$distbegin)) && all(is.na(data$distend))) {
       message("check.distdata.cols: removing distbegin and distend columns that are all NA from data")
-      data <- select(data, -distbegin, -distend)
+      data <- dplyr::select(data, -distbegin, -distend)
     } else if (all.equal(data$distance, (data$distbegin + data$distend) / 2)) {
       message(
         "check.distdata.cols: removing distance column because data has distbegin and distend columns"
       )
-      data <- select(data, -distance)
+      data <- dplyr::select(data, -distance)
     } else {
       stop(
         paste0(
@@ -82,8 +82,8 @@ check.problem.data = function(alldat,
                               ...) {
 
   # Look for watches with problematic watches
-  probs <- ECSAS.find.suspicious.posn(alldat, leave = leave, ...) %>%
-    mutate(prev_fixed = WatchID %in% fixed_db)
+  probs <- ECSASconnect::ECSAS.find.suspicious.posn(alldat, leave = leave, ...) %>%
+    dplyr::mutate(prev_fixed = WatchID %in% fixed_db)
 
   if (nrow(probs) > 1) {
     message (sprintf("%d problem watches found. %d of these were flagged as previously fixed in db",
@@ -94,17 +94,17 @@ check.problem.data = function(alldat,
       print(probs$WatchID)
 
       message("Problem watchIDs that were flagged as previously fixed in db:")
-      print(filter(probs, prev_fixed == TRUE)$WatchID)
+      print(dplyr::filter(probs, prev_fixed == TRUE)$WatchID)
 
       hist(probs$dist_diff_km)
       hist(probs$pct_diff)
     }
 
     probs %>%
-      select(CruiseID, WatchID, ObserverName, PlatformName, Date, StartTime, EndTime,
+      dplyr::select(CruiseID, WatchID, ObserverName, PlatformName, Date, StartTime, EndTime,
              LatStart, LongStart, LatEnd, LongEnd, WatchLenKm, PlatformSpeed, CalcDurMin,
              prev_fixed, dist_dr_km, dist_geo_km, dist_diff_km, pct_diff) %T>%
-      write_csv(file = here(rel.folder, filename))
+      readr::write_csv(file = here::here(rel.folder, filename))
   } else {
     probs <- NULL
 
@@ -112,7 +112,7 @@ check.problem.data = function(alldat,
     message("No problem watches found.")
 
     # create empty file or truncate if it exists
-    file.create(file.path(here(rel.folder, filename)))
+    file.create(file.path(here::here(rel.folder, filename)))
 
     #remove shapefile
     # file.remove(list.files(ShapeDir, pattern = paste0(filename, "\\..*"), full.names = T))
@@ -161,13 +161,13 @@ create.survey.data <- function(raw.dat = NULL,
 
 
   coll = makeAssertCollection()
-  assert_data_frame(raw.dat, add = coll)
+  checkmate::assert_data_frame(raw.dat, add = coll)
   assert(
-    check_class(study.area, "sf"),
+    checkmate::check_class(study.area, "sf"),
     add = coll
   )
   assert(
-    check_string(file.prefix),
+    checkmate::check_string(file.prefix),
     add = coll
   )
   reportAssertions(coll)
@@ -185,65 +185,65 @@ create.survey.data <- function(raw.dat = NULL,
     keep_cols <- c(keep_cols, c("PlatformDir", "PlatformName", "PlatformSpeed"))
 
   watches <- raw.dat %>%
-    select(all_of(keep_cols)) %>%
-    mutate(Sample.Label = WatchID,
+    dplyr::select(dplyr::all_of(keep_cols)) %>%
+    dplyr::mutate(Sample.Label = WatchID,
            TransectSides = 1) %>%
-    distinct() %>%
-    arrange(CruiseID, ObserverName, Date, StartTime)
+    dplyr::distinct() %>%
+    dplyr::arrange(CruiseID, ObserverName, Date, StartTime)
 
   # SOMEC data has multiple observers in the same watch (which I guess is ok)
   if (dataset == "SOMEC") {
     watches <- watches %>%
-      select(-ObserverName) %>%
-      distinct()
+      dplyr::select(-ObserverName) %>%
+      dplyr::distinct()
   }
 
   # make sure all data for a watch is consistent. Find rows with duplicate watchIDs
   # and remove these watches
   dups <- watches %>%
-    group_by(WatchID) %>%
-    summarise(nrows = n()) %>%
-    filter(nrows > 1) %>%
-    pull("WatchID")
+    dplyr::group_by(WatchID) %>%
+    dplyr::summarise(nrows = dplyr::n()) %>%
+    dplyr::filter(nrows > 1) %>%
+    dplyr::pull("WatchID")
 
   # Remove watches with inconsistent watch info
   if (length(dups) > 0) {
     warning(paste0(sprintf("Removing %d watches due to inconsistent watch info between rows: ", length(dups)),
                    paste(dups, collapse = ", ")), immediate. = TRUE)
-    watches <- filter(watches, !(WatchID %in% dups))
+    watches <- dplyr::filter(watches, !(WatchID %in% dups))
   }
 
   # clip to study area
   watches <- watches %>%
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>%
-    st_transform(st_crs(4326)) %>% # for ms_clip below
-    select(WatchID) %>% # just keep WatchID
-    ms_clip(study.area %>% st_transform(st_crs(4326))) %>%   # do the clipping -
-    left_join(watches, by = "WatchID") %>%  # add other cols back in
-    st_transform(outproj)
+    sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
+    sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
+    dplyr::select(WatchID) %>% # just keep WatchID
+    rmapshaper::ms_clip(study.area %>% sf::st_transform(sf::st_crs(4326))) %>%   # do the clipping -
+    dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
+    sf::st_transform(outproj)
 
 
   # Create transects: combine watches on on same day, same ship, same observer
   # and same direction into transects.
   if (create_transects) {
     message("Creating transects...")
-    transects <- ECSAS.create.transects(st_drop_geometry(watches)) %>%
+    transects <- ECSAS.create.transects(sf::st_drop_geometry(watches)) %>%
       sf::st_as_sf()
 
     # Modify watches and set the Sample.Label for each watch
-    watches %<>% ECSAS.add.sample.label(st_drop_geometry(transects))
+    watches %<>% ECSAS.add.sample.label(sf::st_drop_geometry(transects))
 
     # Cconvert Watches list column in transects object into vector of watchID's
     # contained in each transect since st_write (and other downstream code?)
     # can't deal with list cols
     transects %<>%
-      mutate(wtchs = unname(unlist(
-        split(., .$Sample.Label) %>% map( ~ unlist(.x$Watches) %>%
+      dplyr::mutate(wtchs = unname(unlist(
+        split(., .$Sample.Label) %>% purrr::map( ~ unlist(.x$Watches) %>%
                                             paste(collapse = ", "))
       )),
       length = sf::st_length(.)) %>%
-      select(-Watches) %>%
-      rename(Watches = wtchs)
+      dplyr::select(-Watches) %>%
+      dplyr::rename(Watches = wtchs)
 
 
     if (saveshp) {
@@ -256,7 +256,7 @@ create.survey.data <- function(raw.dat = NULL,
       ))
 
       suppressWarnings(
-        st_write(
+        sf::st_write(
           transects,
           dsn = ShapeDir,
           layer = layer.name,
@@ -279,7 +279,7 @@ create.survey.data <- function(raw.dat = NULL,
     ))
 
     suppressWarnings(
-      st_write(
+      sf::st_write(
         watches,
         dsn = ShapeDir,
         layer = layer.name,
@@ -290,7 +290,7 @@ create.survey.data <- function(raw.dat = NULL,
   }
 
   # no longer remember why this was desirable
-  watches <- mutate(watches,
+  watches <- dplyr::mutate(watches,
                     StartTime = as.character(StartTime),
                     EndTime = as.character(EndTime))
 
@@ -302,14 +302,14 @@ create.survey.data <- function(raw.dat = NULL,
   message("Creating observations...")
 
   obs <- raw.dat %>%
-    mutate(
+    dplyr::mutate(
       Region.Label = 1,
-      InTransect = case_when(InTransect == -1 ~ TRUE,
+      InTransect = dplyr::case_when(InTransect == -1 ~ TRUE,
                              InTransect == 0 ~ FALSE,
                              TRUE ~ NA),
       Distance = Distance / 1000
     ) %>%
-    filter(
+    dplyr::filter(
       if (isTRUE(intransect.only))
         InTransect == TRUE
       else
@@ -324,14 +324,14 @@ create.survey.data <- function(raw.dat = NULL,
     ) %>%
     # Assign DistType (Need to do after filtering FlySwim for W or F),
     # and add FlockID if there isn't one
-    mutate(DistType = assign.dist.type(.),
-           FlockID = case_when(all(is.na(FlockID)) ~ 1:nrow(.),
+    dplyr::mutate(DistType = assign.dist.type(.),
+           FlockID = dplyr::case_when(all(is.na(FlockID)) ~ 1:nrow(.),
                                TRUE ~ FlockID)) %>%
-    left_join(watches[, c("WatchID", "Sample.Label")], by = "WatchID") %>%
-    rename(object = FlockID,
+    dplyr::left_join(watches[, c("WatchID", "Sample.Label")], by = "WatchID") %>%
+    dplyr::rename(object = FlockID,
            size = Count,
            distance = Distance) %>%
-    select(
+    dplyr::select(
       SurveyType,
       object,
       Sample.Label,
@@ -369,19 +369,19 @@ create.survey.data <- function(raw.dat = NULL,
       Sex,
       DistanceCode
     ) %>%
-    mutate(
-      Windspeed = case_when(
+    dplyr::mutate(
+      Windspeed = dplyr::case_when(
         is.na(Windspeed) &
-          !is.na(Windforce) ~ left_join(., beaufort_conversion,
+          !is.na(Windforce) ~ dplyr::left_join(., beaufort_conversion,
                                         by = c("Windforce" = "beaufort"))$speed.kts,
         TRUE ~ Windspeed
       ),
-      weights = case_when(
+      weights = dplyr::case_when(
         DistanceCode %in% c("A", "B") ~ 2,
         DistanceCode %in% c("C", "D") ~ 1,
         TRUE ~ 0
       ),
-      Visibility = case_when(Visibility > 20 ~ 20,
+      Visibility = dplyr::case_when(Visibility > 20 ~ 20,
                              TRUE ~ Visibility),
       FlySwim = as.factor(FlySwim),
       distbegin = NA_integer_,
@@ -395,12 +395,12 @@ create.survey.data <- function(raw.dat = NULL,
 
   # Clip to study area
   obs <- obs %>%
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = st_crs(inproj)) %>%
-    st_transform(st_crs(4326)) %>% # for ms_clip below
-    select(object) %>% # just keep WatchID
-    ms_clip(study.area %>% st_transform(st_crs(4326))) %>%   # do the clipping -
-    left_join(obs, by = "object") %>%  # add other cols back in
-    st_transform(outproj)
+    sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
+    sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
+    dplyr::select(object) %>% # just keep WatchID
+    rmapshaper::ms_clip(study.area %>% sf::st_transform(sf::st_crs(4326))) %>%   # do the clipping -
+    dplyr::left_join(obs, by = "object") %>%  # add other cols back in
+    sf::st_transform(outproj)
 
   # Save as shapefile
   if (saveshp) {
@@ -413,7 +413,7 @@ create.survey.data <- function(raw.dat = NULL,
     ))
 
     suppressWarnings(
-      st_write(
+      sf::st_write(
         obs,
         dsn = ShapeDir,
         layer = layer.name,
@@ -430,7 +430,7 @@ create.survey.data <- function(raw.dat = NULL,
   #observations of a given species.
   message("Creating distdata....")
   distdata <- obs %>%
-    st_drop_geometry() %>%
+    sf::st_drop_geometry() %>%
     droplevels
 
   # Set dataset attribute
@@ -439,12 +439,12 @@ create.survey.data <- function(raw.dat = NULL,
   the.data <-
     if (create_transects) {
       list(distdata = distdata,
-           watches = st_drop_geometry(watches),
+           watches = sf::st_drop_geometry(watches),
            transects = transects)
     } else {
       list(
         distdata = distdata,
-        watches = st_drop_geometry(watches))
+        watches = sf::st_drop_geometry(watches))
     }
 
   message("\nDone\n")
@@ -514,7 +514,7 @@ my.gam.check <- function(b, old.style = FALSE, type = c("deviance", "pearson",
     qqnorm(resid, ...)
   } else {
     message("qq.gam: ")
-    qq.gam(b, rep = rep, level = level, type = type, rl.col = rl.col,
+    mgcv::qq.gam(b, rep = rep, level = level, type = type, rl.col = rl.col,
     rep.col = rep.col, ...)
   }
   plot(linpred, resid, main = "Resids vs. linear pred.", xlab = "linear predictor",
@@ -536,7 +536,7 @@ my.gam.check <- function(b, old.style = FALSE, type = c("deviance", "pearson",
     cat("\nChecks based on working residuals may be misleading.")
   }
   cat("\n")
-  kchck <- k.check(b, subsample = k.sample, n.rep = k.rep)
+  kchck <- mgcv::k.check(b, subsample = k.sample, n.rep = k.rep)
   if (!is.null(kchck)) {
     cat("Basis dimension (k) checking results. Low p-value (k-index<1) may\n")
     cat("indicate that k is too low, especially if edf is close to k'.\n\n")
@@ -617,7 +617,7 @@ do.full.prelim <- function(species){
   message(sprintf("Rendering full prelim %s to %s",
                   species,
                   out.file))
-  render(
+  rmarkdown::render(
     file.path(RDir, "Generic_full_test.Rmd"),
     params = list(species = species),
     output_file = out.file
@@ -645,13 +645,13 @@ set.def.df.spec.values <- function(ddf.def, nm) {
   # Note that the convert_units won't actually get used because we
   # only use ds() to compute the detection function and not
   # abundance.
-  if(str_detect(nm, "Ship")) {
+  if(stringr::str_detect(nm, "Ship")) {
     # ECSAS and SOMEC Ship surveys have set cutpoints whereas aerial uses distbegin
     # and distend columns computed in 00.01_Extract_data.Rmd.
     ddf.def$convert_units = ecsas.ship.convert.units
     ddf.def$cutpoints = ecsas.ship.ctpoints
     ddf.def$distance.centers = ecsas.ship.distance.centers
-  } else if (str_detect(nm, "Aerial")) {
+  } else if (stringr::str_detect(nm, "Aerial")) {
     ddf.def$convert_units = ecsas.air.convert.units
     ddf.def$distance.centers = ecsas.air.distance.centers
   } else
@@ -669,7 +669,7 @@ set.def.df.spec.values <- function(ddf.def, nm) {
 #'   \code{behav}, and \code{dist_type}.
 #' @export
 parse.df.name <- function(nm){
-  res <- str_split_1(nm, fixed("_"))
+  res <- stringr::str_split_1(nm, stringr::fixed("_"))
   list(dataset = res[1], platform_class = res[2], behav = res[3], dist_type = res[4])
 }
 
@@ -743,7 +743,7 @@ do.det.fcn.specs <-
            ...) {
 
   ret <- df.specs %>%
-    imap(
+    purrr::imap(
       do.det.fcn.spec,
       species = species,
       distdata = distdata,
@@ -845,7 +845,7 @@ do.det.fcn.spec <- function(df.spec,
   # distances, or a normal one. Record this fact in distdata for use by
   # create.dsm.data).
   if (dist_type == "N") {
-    distdata <- filter(
+    distdata <- dplyr::filter(
       distdata,
       dataset == dataset,
       SurveyType == platform_class,
@@ -860,7 +860,7 @@ do.det.fcn.spec <- function(df.spec,
   } else if (dist_type == "D"){
     # Normal ddf
     # Filter perp distances for this species, behav, platform_class, dataset
-    distdata <- filter(
+    distdata <- dplyr::filter(
       distdata,
       dataset == dataset,
       SurveyType == platform_class,
@@ -878,7 +878,7 @@ do.det.fcn.spec <- function(df.spec,
 
   # # XXXX should make dynamic instead of relying on a static list.
   if (isTRUE(df.spec$remove.fishing))
-    distdata %<>% filter(!(CruiseID %in% fishingCruises))
+    distdata %<>% dplyr::filter(!(CruiseID %in% fishingCruises))
 
   # EDA
   message("\nDistribution of distances:")
@@ -965,7 +965,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
       # distance if there are obs and it isn't really 0 if there are no obs.
       df_final <- dummy_ddf(
         distdata$object %>%
-          str_replace("[a-zA-Z_]+", "") %>%
+          stringr::str_replace("[a-zA-Z_]+", "") %>%
           as.numeric(),
         distdata$size,
         left = ifelse(nrow(distdata) == 0, 0, min(distdata$distbegin)),
@@ -982,7 +982,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
       # For ECSAS ship we have defined cutpoints and no left trunc
       df_final <- dummy_ddf(
         distdata$object %>%
-          str_replace("[a-zA-Z_]+", "") %>%
+          stringr::str_replace("[a-zA-Z_]+", "") %>%
           as.numeric(),
         distdata$size,
         width = max(ecsas.ship.ctpoints)
@@ -1091,7 +1091,7 @@ do.det.fcn <- function(distdata,
           dplyr::select(object, size, distbegin, distend, distance, Season,
                         SurveyType, FlySwim, Sample.Label, WatchID, Alpha, Dataset,
                         LatStart, LongStart,
-                        all_of(all.vars(df.model$final.formula))) %>%
+                        dplyr::all_of(all.vars(df.model$final.formula))) %>%
           check.distdata.cols()
 
         ###### use do.ds machinery to re-fit final model
@@ -1122,7 +1122,7 @@ do.det.fcn <- function(distdata,
         ) %>%
           # Note df_final will be a list with one element and we need to peel it
           # off.
-          pluck(1)
+          purrr::pluck(1)
 
       } else { # rerun = FALSE
         # Look for file with results of running this model already
@@ -1205,7 +1205,7 @@ ds.eda <-
   }
 
   # plot individual covars
-    walk(
+    purrr::walk(
       vars,
       plot.covar,
       distdata = distdata,
@@ -1239,27 +1239,27 @@ plot.covar <-
 {
   title <- paste(species, suffix, sep = " ")
   if (covar == "size") {
-    p <- ggplot(data = as.data.frame(distdata), aes(cut(distance, df.spec$cutpoints, right = FALSE), size))
-    p <- p + geom_boxplot(varwidth = TRUE)
-    p <- p + labs(x = "Distance Category", y = "Size", title = title)
+    p <- ggplot2::ggplot(data = as.data.frame(distdata), ggplot2::aes(cut(distance, df.spec$cutpoints, right = FALSE), size))
+    p <- p + ggplot2::geom_boxplot(varwidth = TRUE)
+    p <- p + ggplot2::labs(x = "Distance Category", y = "Size", title = title)
     print(p)
   } else if (is.factor(distdata[, covar][[1]])) {
-    p <- ggplot(data = as.data.frame(distdata), aes(get(covar), distance))
-    p <- p + geom_violin(draw_quantiles = c(.25, .5, .75), scale = "count")
-    p <- p + scale_y_continuous(labels = as.character(df.spec$distance.centers),
+    p <- ggplot2::ggplot(data = as.data.frame(distdata), ggplot2::aes(get(covar), distance))
+    p <- p + ggplot2::geom_violin(draw_quantiles = c(.25, .5, .75), scale = "count")
+    p <- p + ggplot2::scale_y_continuous(labels = as.character(df.spec$distance.centers),
                                 breaks = df.spec$distance.centers)
-    p <- p + labs(y = "Distance Category", x = covar, title = title)
+    p <- p + ggplot2::labs(y = "Distance Category", x = covar, title = title)
     print(p)
   } else {
-    p <- ggplot(data = as.data.frame(distdata), aes(get(covar), distance))
-    p <- p + geom_point()
-    p <- p + geom_smooth(method = "lm")
+    p <- ggplot2::ggplot(data = as.data.frame(distdata), ggplot2::aes(get(covar), distance))
+    p <- p + ggplot2::geom_point()
+    p <- p + ggplot2::geom_smooth(method = "lm")
     p <-
-      p + scale_y_continuous(
+      p + ggplot2::scale_y_continuous(
         labels = as.character(df.spec$distance.centers),
         breaks = df.spec$distance.centers
       )
-    p <- p + labs(y = "Distance Category", x = covar, title = title)
+    p <- p + ggplot2::labs(y = "Distance Category", x = covar, title = title)
     print(p)
   }
 }
@@ -1270,7 +1270,7 @@ plot.covar <-
 #' @return An \code{sfg} linestring object.
 #' @export
 make.line <- function(xy2){
-  st_linestring(matrix(xy2, nrow=2, byrow=TRUE))
+  sf::st_linestring(matrix(xy2, nrow=2, byrow=TRUE))
 }
 
 #' Convert endpoint coordinate columns to an sfc linestring geometry
@@ -1285,7 +1285,7 @@ make.line <- function(xy2){
 make.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd"), crs){
   m = as.matrix(df[,names])
   lines = apply(m, 1, make.line, simplify=FALSE)
-  st_sfc(lines, crs = crs)
+  sf::st_sfc(lines, crs = crs)
 }
 
 #' Convert a data frame of endpoint coordinates to an sf linestring object
@@ -1298,7 +1298,7 @@ make.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd"), c
 #' @export
 sf.pts.to.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd"), crs){
   geom = make.lines(df, names, crs)
-  df = st_sf(df, geometry=geom)
+  df = sf::st_sf(df, geometry=geom)
   df
 }
 
@@ -1331,8 +1331,8 @@ assign.season <- function(dat, season.def, datefield = "Date"){
   season.index <- rep(NA, nrow(dat))
 
   # convert dates to my format
-  dates <- pull(dat, datefield)
-  dat$monthday <- month(dates) * 100 + day(dates)
+  dates <- dplyr::pull(dat, datefield)
+  dat$monthday <- lubridate::month(dates) * 100 + lubridate::day(dates)
 
   # step through each season with cheesy for loop
   for (i in seq_along(season.def)) {
@@ -1345,7 +1345,7 @@ assign.season <- function(dat, season.def, datefield = "Date"){
         dat$monthday <= season.def[[i]]["to"]
     } else {
       criteria <-
-        between(dat$monthday, season.def[[i]]["from"], season.def[[i]]["to"])
+        dplyr::between(dat$monthday, season.def[[i]]["from"], season.def[[i]]["to"])
     }
 
     # assign the current season to the index of matching rows
@@ -1378,17 +1378,17 @@ assign.season <- function(dat, season.def, datefield = "Date"){
 #' @export
 df.to.shapefile <- function(df,
                             coords = c("LongStart", "LatStart"),
-                            crs = st_crs(4326),
+                            crs = sf::st_crs(4326),
                             out.proj,
                             dsn = ShapeDir,
                             layer)
 {
-  st_as_sf(df,
+  sf::st_as_sf(df,
            coords = coords,
            crs = crs,
            remove = FALSE) %>%
-    st_transform(out.proj) %>%
-    st_write(
+    sf::st_transform(out.proj) %>%
+    sf::st_write(
       dsn = dsn,
       layer = layer,
       driver = "ESRI Shapefile",
@@ -1431,8 +1431,8 @@ add.dist.sd <- function(watch) {
 #' @export
 get.gps.length <- function(watch, posns) {
   # get positions in this watch
-  posns <- filter(posns,
-                  between(posns$datetime, watch$WatchStartTime, watch$WatchEndTime))
+  posns <- dplyr::filter(posns,
+                  dplyr::between(posns$datetime, watch$WatchStartTime, watch$WatchEndTime))
 
   # sum distances between the points. Note that the units of val will
   # depend on the projection of the coords in posns, but we assume here
@@ -1463,16 +1463,16 @@ get.gps.length <- function(watch, posns) {
 #' @return A \code{SpatRaster} layer for the given season.
 #' @export
 make.season.raster <- function(season, obj, variable) {
-  v <- filter(obj, Season == season) %>%
+  v <- dplyr::filter(obj, Season == season) %>%
     # Convert sf to SpatVector
-    vect()
+    terra::vect()
 
   # Create a raster template with the same extent and resolution. Assumes
   # predgridCellLength is in km and raster projection units are metres.
-  r <- rast(v, resolution = predgridCellLength * 1000)
+  r <- terra::rast(v, resolution = predgridCellLength * 1000)
 
   # Rasterize, using an attribute field (e.g., "ID")
-  ret <- rasterize(v, r, field = variable)
+  ret <- terra::rasterize(v, r, field = variable)
 
   ret
 }
@@ -1522,16 +1522,16 @@ create.segdata <- function(the.data,
   # create initial segdata and reproject
   if (verbose) message("Creating initial segdata from watches")
   segdata <- the.data$watches %>%
-    rename(Effort = WatchLenKm) %>%
-    mutate(TransectID = as.character(TransectID),
+    dplyr::rename(Effort = WatchLenKm) %>%
+    dplyr::mutate(TransectID = as.character(TransectID),
            year = lubridate::year(Date),
            yday = lubridate::yday(Date),
            MonthYear = format(Date, "%Y-%m"),
            segment.area = Effort * TotalWidthKm) %>%
-    st_as_sf(coords = c("LongStart", "LatStart"), crs = inproj, remove = FALSE) %>%
-    st_transform(outproj) %>%
-    cbind(st_coordinates(.)) %>%
-    rename(x = X, y = Y)
+    sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = inproj, remove = FALSE) %>%
+    sf::st_transform(outproj) %>%
+    cbind(sf::st_coordinates(.)) %>%
+    dplyr::rename(x = X, y = Y)
 
   ###---------------------------------------------------------------------------
   #### Load rasters
@@ -1541,25 +1541,25 @@ create.segdata <- function(the.data,
   # the needed files into a big SpatRaster
   dates.needed <- segdata$Date %>%
     as.character %>%
-    str_sub(end = -4) %>%
+    stringr::str_sub(end = -4) %>%
     paste0("-16") %>%
     unique %>%
     str_sort
 
   ### Depth and other static rasters
   # Depth
-  depth <- rast(file.path(predLayerStudyAreaDir, "depth.img"))
+  depth <- terra::rast(file.path(predLayerStudyAreaDir, "depth.img"))
 
   # Depth gradient
-  depth.g <- rast(file.path(predLayerStudyAreaDir, "depth.g.img"))
+  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, "depth.g.img"))
 
   # SST
   files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.", dates.needed, ".img"))
-  sst <- rast(files)
+  sst <- terra::rast(files)
 
   # SST gradient
   files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.g.", dates.needed, ".img"))
-  sst.g <- rast(files)
+  sst.g <- terra::rast(files)
 
   ###---------------------------------------------------------------------------
   ### Extract raster values at segdata locations
@@ -1569,7 +1569,7 @@ create.segdata <- function(the.data,
   segdata <-
     terra::extract(
       depth,
-      vect(segdata),
+      terra::vect(segdata),
       bind = TRUE
     ) %>%
     st_as_sf
@@ -1579,7 +1579,7 @@ create.segdata <- function(the.data,
   segdata <-
     terra::extract(
       depth.g,
-      vect(segdata),
+      terra::vect(segdata),
       bind = TRUE
     ) %>%
     st_as_sf
@@ -1590,13 +1590,13 @@ create.segdata <- function(the.data,
   segdata <-
     terra::extract(
       sst,
-      vect(segdata),
+      terra::vect(segdata),
       layer = needed.layers,
       bind = TRUE
     ) %>%
     st_as_sf %>%
-    rename(sst = value) %>%
-    select(-layer) # Note that layer is off by one even though the sst values is correct
+    dplyr::rename(sst = value) %>%
+    dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
 
   ### Extract SST gradient values
   if (verbose) message("Extracting sst gradient at watch locations")
@@ -1604,20 +1604,20 @@ create.segdata <- function(the.data,
   segdata <-
     terra::extract(
       sst.g,
-      vect(segdata),
+      terra::vect(segdata),
       layer = needed.layers,
       bind = TRUE
     ) %>%
     st_as_sf %>%
-    rename(sst.g = value) %>%
-    select(-layer) # Note that layer is off by one even though the sst values is correct
+    dplyr::rename(sst.g = value) %>%
+    dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
 
   ###---------------------------------------------------------------------------
   ## Add scaled versions of all preds.
   if (verbose) message("Scaling covars")
 
   segdata %<>%
-    mutate(depth.sc = (depth - scale.factors$depth_mean)/scale.factors$depth_sd,
+    dplyr::mutate(depth.sc = (depth - scale.factors$depth_mean)/scale.factors$depth_sd,
            depth.g.sc = (depth.g - scale.factors$depth.g_mean)/scale.factors$depth.g_sd,
            x.sc = (x - scale.factors$x_mean)/scale.factors$x_sd,
            y.sc = (y - scale.factors$y_mean)/scale.factors$y_sd,
@@ -1630,7 +1630,7 @@ create.segdata <- function(the.data,
   if (verbose) message("Saving results")
   save(segdata, file = segdatloc)
 
-  st_write(
+  sf::st_write(
     segdata,
     dsn = ShapeDir,
     layer = "segdata.shp",
@@ -1686,7 +1686,7 @@ rxtractogon.rast <-
   }
 
   dat <-
-    rxtractogon(
+    rerddapXtracto::rxtractogon(
       rerddap::info(dataset),
       parameter =  parameter,
       xcoord = xcoord,
@@ -1694,7 +1694,7 @@ rxtractogon.rast <-
       tcoord = tcoord
     )
   layername <- names(dat)[1]
-  dat <- pluck(dat, 1) # use 1 since it is always 1st element, but not always called same as value of parameter
+  dat <- purrr::pluck(dat, 1) # use 1 since it is always 1st element, but not always called same as value of parameter
   if (length(dim(dat)) > 2) # remove useless third dimension
     dat <- dat[,,1]
 
@@ -1722,7 +1722,7 @@ rxtractogon.rast <-
     message("Saving downloaded ERDDAP raster to ", filename)
     if (!dir.exists(folder))
       dir.create(folder, recursive = TRUE)
-    writeRaster(rast, filename = filename, format = "HFA", overwrite = TRUE)
+    terra::writeRaster(rast, filename = filename, format = "HFA", overwrite = TRUE)
   }
 
   rast
@@ -1741,17 +1741,17 @@ rxtractogon.rast <-
 multi.focal <- function(x, w = matrix(1, nrow = 3, ncol = 3), ...) {
 
   if (is.character(x)) {
-    x <- brick(x)
+    x <- raster::brick(x)
   }
   # The function to be applied to each individual layer
   fun <- function(ind, x, w, ...){
-    focal(x[[ind]], w = w, ...)
+    terra::focal(x[[ind]], w = w, ...)
   }
 
-  n <- seq(nlayers(x))
+  n <- seq(raster::nlayers(x))
   list <- lapply(X = n, FUN = fun, x = x, w = w, ...)
 
-  out <- stack(list)
+  out <- raster::stack(list)
   return(out)
 }
 
@@ -1768,10 +1768,10 @@ multi.focal <- function(x, w = matrix(1, nrow = 3, ncol = 3), ...) {
 #' @export
 recreate.sst.mnth.from.files <- function(folder, pattern){
   files <- list.files(folder, pattern = pattern, full.names = T)
-  r <- map(files, raster) %>%
+  r <- purrr::map(files, raster) %>%
     stack
   names(r) <- basename(files) %>%
-    str_replace(fixed(".img"), "")
+    stringr::str_replace(stringr::fixed(".img"), "")
   r
 }
 
@@ -1838,7 +1838,7 @@ create.ncdf.rast <-
       warning("create.ncdf.rast: both 'outproj' and 'to' are provided, ignoring outproj",
               immediate. = TRUE)
 
-    res <- terra::project(res, rast(to), threads = TRUE) %>%
+    res <- terra::project(res, terra::rast(to), threads = TRUE) %>%
       terra::mask(study.area)
   } else if (!is.null(outproj))
     res <- terra::project(res, outproj, threads = TRUE) %>%
@@ -1890,13 +1890,13 @@ ncdf.to.raster <- function(filename,
     dates <-
       ncdf4::ncvar_get(x, "time")  %>%  # returns seconds since 01/01/1970
       `/`(86400) %>%  # convert to days since 01/01/1970
-      as_date(origin = lubridate::origin)
+      lubridate::as_date(origin = lubridate::origin)
   else
     dates <- ""
 
   # get rasters for each date
   res <-
-    map2(
+    purrr::map2(
       dates,
       seq_along(dates),
       create.ncdf.rast,
@@ -1912,7 +1912,7 @@ ncdf.to.raster <- function(filename,
   # If there was more than one date then stack 'em.
   # Otherwise, just peel off the single raster
   if(length(res) > 1){
-    res <- rast(res)
+    res <- terra::rast(res)
     names(res) <- paste(dataset, dates, sep = ".")
   } else {
     res <- res[[1]]
@@ -1948,7 +1948,7 @@ import.netCDF <-
   } else {
     # reading one or more
     res <-
-      map(
+      purrr::map(
         files,
         ncdf.to.raster,
         dataset = variable,
@@ -1962,7 +1962,7 @@ import.netCDF <-
     # then the single element of res can still be a rasterbrick, but thats ok. I
     # just want to avoid returning a brick when a rasterlayer is expected.
     if (length(files) > 1) {
-      res <- rast(res)
+      res <- terra::rast(res)
     } else
       res <- res[[1]]
 
@@ -1986,9 +1986,9 @@ import.netCDF <-
 rast.monthly.mean <- function(mnth, r){
   message("Getting monthly means for month ", mnth)
   r.mnths <- names(r) %>%
-    str_split_fixed(fixed("."), n = Inf) %>%
+    stringr::str_split_fixed(stringr::fixed("."), n = Inf) %>%
     extract(, 2) %>%
-    str_split_fixed(fixed("-"), n = Inf) %>%
+    stringr::str_split_fixed(stringr::fixed("-"), n = Inf) %>%
     extract(, 2) %>%
     as.integer
 
@@ -2030,10 +2030,10 @@ get.seas.mean.var <- function(var, dat, start, end) {
   var.names <- paste(var, start:end, sep = ".")
   var.names.sc <- paste0(var.names, "_sc")
   ret = list(dat %>%
-               select(all_of(var.names)) %>%
+               dplyr::select(dplyr::all_of(var.names)) %>%
                rowMeans,
              dat %>%
-               select(all_of(var.names.sc)) %>%
+               dplyr::select(dplyr::all_of(var.names.sc)) %>%
                rowMeans)
   names(ret) <- c(var, paste0(var, "_sc"))
   ret
@@ -2059,8 +2059,8 @@ get.seas.mean.var <- function(var, dat, start, end) {
 get.seas.mean <- function(seas, season.spec, dat, dyn.vars) {
   start <- season.spec[[seas]]["from"] %/% 100
   end <- season.spec[[seas]]["to"] %/% 100
-  dat <- filter(dat, as.character(Season) == seas)
-  new.cols <- map(dyn.vars, get.seas.mean.var, dat = dat, start = start, end = end)
+  dat <- dplyr::filter(dat, as.character(Season) == seas)
+  new.cols <- purrr::map(dyn.vars, get.seas.mean.var, dat = dat, start = start, end = end)
   cbind(dat, new.cols)
 }
 
@@ -2079,7 +2079,7 @@ save.prediction.htmls <- function(folder) {
     dir.create(folder, recursive = TRUE)
 
   names(spec.grps) %>%
-    map(function(species) {
+    purrr::map(function(species) {
       filename <- file.path(ResultsDir, species, paste0(species, "_3_prediction.html"))
       message(sprintf("Copying '%' in '%s'", filename, folder))
       file.copy(filename, folder)
@@ -2110,7 +2110,7 @@ reclassify.project.save <- function(r, class.arg, to, filename){
     dir.create(outdir, recursive = TRUE )
 
   r %>%
-    classify(rcl = class.arg) %>%
+    terra::classify(rcl = class.arg) %>%
     terra::project(y = to,
                    method = "bilinear",
                    threads = TRUE) %>%
@@ -2128,7 +2128,7 @@ reclassify.project.save <- function(r, class.arg, to, filename){
 #' @return Character vector of dynamic covariate names.
 #' @export
 dynamic.env.covar.names <- function(){
-  dyn_vars <- filter(env_covar_spec, var_type == "dynamic")
+  dyn_vars <- dplyr::filter(env_covar_spec, var_type == "dynamic")
   grads <- dyn_vars$var_name[dyn_vars$do_gradient]
   if (length(grads) > 0)
     c(dyn_vars$var_name, paste0(grads, ".g"))
@@ -2159,21 +2159,21 @@ create.seasonal.predgrid <- function(species, predgrid) {
   season.spec <- seasons[[species]]
   ret <-
     rbind(predgrid, predgrid, predgrid, predgrid) %>%
-    mutate(Season = as.factor(rep(season.names, each = nrow(predgrid))))
+    dplyr::mutate(Season = as.factor(rep(season.names, each = nrow(predgrid))))
 
   # Get seasonal means for dynamic variables
   match.re <- c("[0-9]$", "[0-9]_sc$")
-  p.geom <- st_geometry(ret) # save geometry
+  p.geom <- sf::st_geometry(ret) # save geometry
   ret <- season.names %>%
-    map_dfr(
+    purrr::map_dfr(
       get.seas.mean,
       season.spec = season.spec,
-      dat = st_drop_geometry(ret),
+      dat = sf::st_drop_geometry(ret),
       dyn.vars = dynamic.env.covar.names()
     ) %>%
     # Remove monthly values from predgrid to make it smaller now that we have
     # seasonal means computed, add area, and make back into sf object.
-    select(!matches(match.re)) %>%
+    dplyr::select(!dplyr::matches(match.re)) %>%
     cbind(p.geom) %>% # add geometry back in
     st_sf
 
@@ -2185,7 +2185,7 @@ create.seasonal.predgrid <- function(species, predgrid) {
   # Save the seasonal prediction grid for GIS mapping. When doing multiple
   # species, there will be a separate predgrid for each species since it's
   # possible for the season boundaries to be species specific.
-  st_write(ret,
+  sf::st_write(ret,
              dsn = ShapeDir,
              layer = paste0(species, "_predgrid.shp"),
              driver = "ESRI Shapefile",
@@ -2197,7 +2197,7 @@ create.seasonal.predgrid <- function(species, predgrid) {
   # correctly for nofactor model).
   ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
     setNames(unique(ddftype_to_platform)) %>%
-    list_rbind(names_to = "platform") %>%
+    purrr::list_rbind(names_to = "platform") %>%
     st_sf
 
 
@@ -2238,7 +2238,7 @@ do.pred.maps <-
 
   # Get data subset
   subs <- match.arg(subs)
-  dat <- filter(dat, subset == subs)
+  dat <- dplyr::filter(dat, subset == subs)
   segdata <- model$data %>%
     st_as_sf
 
@@ -2247,7 +2247,7 @@ do.pred.maps <-
 
 
   ret <- season.names %>%
-    map(do.pred.map, dat, segdata, modname, species, subs, ...)
+    purrr::map(do.pred.map, dat, segdata, modname, species, subs, ...)
 
   names(ret) <- season.names
   ret
@@ -2287,17 +2287,17 @@ do.pred.map <-
   # Filter by season, and create log Density for potential mapping - not currently
   # used.
   dat <- dat %>%
-    filter(Season == season) %>%
-    st_transform(latlongproj) %>%
-    mutate(lDens = case_when(Dens == 0 ~ 0,
+    dplyr::filter(Season == season) %>%
+    sf::st_transform(latlongproj) %>%
+    dplyr::mutate(lDens = dplyr::case_when(Dens == 0 ~ 0,
                              TRUE ~ log(Dens))) %>%
-    select(Dens, geometry) %>%
-    ms_simplify()
+    dplyr::select(Dens, geometry) %>%
+    rmapshaper::ms_simplify()
 
   segdata <- segdata %>%
-    filter(Season == season) %>%
+    dplyr::filter(Season == season) %>%
     get.combined.segdata() %>%
-    st_transform(latlongproj)
+    sf::st_transform(latlongproj)
 
   # Plot only a sample of the polygons for efficiency? Typically used for
   # testing.
@@ -2308,8 +2308,8 @@ do.pred.map <-
 
   # Remove ridiculously large densities b/c they mess up the legend and swamp
   # everything else
-  dat <- mutate(dat,
-                Dens = case_when(Dens > MAX_DENS_VALUE ~ NA,
+  dat <- dplyr::mutate(dat,
+                Dens = dplyr::case_when(Dens > MAX_DENS_VALUE ~ NA,
                                  TRUE ~ Dens))
 
   if ((n.na <- sum(is.na(dat$Dens))) > 0)
@@ -2317,43 +2317,43 @@ do.pred.map <-
 
   groups <- c("est abund", "Pred Dens")
   m <-
-    leaflet(
+    leaflet::leaflet(
       data = dat,
       options = leafletOptions(preferCanvas = TRUE)
     ) %>%
     # Options help to speed up rendering. NOTE - dont't use addProviderTiles
     # if you want to save the map and reload in a subsequent R session - it won't
     # work.
-    addTiles(options = tileOptions(updateWhenZooming = FALSE,
+    leaflet::addTiles(options = leaflet::tileOptions(updateWhenZooming = FALSE,
                                  updateWhenIdle = FALSE)) %>%
     addMapPane("density", zIndex = 410) %>%
     addMapPane("abund", zIndex = 420) %>%
     # Predicted density
-    addPolygons(
+    leaflet::addPolygons(
       fillColor = ~ pal_pred(Dens),
       color = ~ pal_pred(Dens),
       fillOpacity = 1.0,
       opacity = 1.0,
       weight = 1,
       group = "Pred Dens",
-      options = pathOptions(pane = "density")
+      options = leaflet::pathOptions(pane = "density")
     ) %>%
     # 0 Abund
-    addCircles(
+    leaflet::addCircles(
       lng = ~ LongStart,
       lat = ~ LatStart,
       stroke = FALSE,
-      radius = rep(1000, times = nrow(filter(segdata, estAbund == 0))),
+      radius = rep(1000, times = nrow(dplyr::filter(segdata, estAbund == 0))),
       color = "white",
       fillColor = "white",
       fillOpacity = 0.1,
       opacity = 0.9,
       group = "est abund",
-      data = filter(segdata, estAbund == 0),
-      options = pathOptions(pane = "abund")
+      data = dplyr::filter(segdata, estAbund == 0),
+      options = leaflet::pathOptions(pane = "abund")
     ) %>%
     # Est Abund
-    addCircles(
+    leaflet::addCircles(
       lng = ~ LongStart,
       lat = ~ LatStart,
       radius = ~ estAbund * (max.circ.radius/max(estAbund)),#  scale so largest is 100km
@@ -2361,10 +2361,10 @@ do.pred.map <-
       weight = 1,
       popup = ~ htmlEscape(paste0("Abund ", round(estAbund, 3), ", raw ", round(rawCount, 3))),
       group = "est abund",
-      data = filter(segdata, estAbund != 0),
-      options = pathOptions(pane = "abund")
+      data = dplyr::filter(segdata, estAbund != 0),
+      options = leaflet::pathOptions(pane = "abund")
     ) %>%
-    addLegend(
+    leaflet::addLegend(
       pal = pal_pred,
       opacity = 1,
       values = ~ Dens,
@@ -2372,10 +2372,10 @@ do.pred.map <-
       title = paste(species, season)
     ) %>%
     addMouseCoordinates() %>%
-    addScaleBar(position = "bottomright", options = scaleBarOptions(imperial = FALSE)) %>%
-    addLayersControl(overlayGroups = groups,
-                     options = layersControlOptions(collapsed = FALSE)) %>%
-    hideGroup(c("est abund"))
+    leaflet::addScaleBar(position = "bottomright", options = scaleBarOptions(imperial = FALSE)) %>%
+    leaflet::addLayersControl(overlayGroups = groups,
+                     options = leaflet::layersControlOptions(collapsed = FALSE)) %>%
+    leaflet::hideGroup(c("est abund"))
 
   m
 }
@@ -2432,7 +2432,7 @@ get.combined.segdata <- function(segdata){
   # ddftype_levels defined in analysis_settings.R, so we first need to chop these
   # suffixes to do the filter and then sum the estDen[sities].
   segdata <-
-    select(
+    dplyr::select(
       segdata,
       Sample.Label,
       estDens,
@@ -2449,9 +2449,9 @@ get.combined.segdata <- function(segdata){
       platform
     ) %>%
     # Remove Sample_Label suffix (_x_x)
-    mutate(Sample.Label = str_sub(Sample.Label, 1, nchar(Sample.Label) -
+    dplyr::mutate(Sample.Label = stringr::str_sub(Sample.Label, 1, nchar(Sample.Label) -
                                     nchar(ddftype_levels[1]) - 1)) %>%
-    arrange(Sample.Label)
+    dplyr::arrange(Sample.Label)
 
   # There are now multiple consecutive rows for each segment.
 
@@ -2471,12 +2471,12 @@ get.combined.segdata <- function(segdata){
   keep <- rep(c(TRUE, rep(FALSE, times = ncopies - 1)),
               times = nrow(segdata) / ncopies)
   res <- segdata[keep,] %>%
-    mutate(
+    dplyr::mutate(
       estDens = zoo::rollapply(segdata$estDens, ncopies, by = ncopies, sum),
       estAbund = zoo::rollapply(segdata$estAbund, ncopies, by = ncopies, sum),
       rawCount = zoo::rollapply(segdata$rawCount, ncopies, by = ncopies, sum)
     ) %>%
-    select(-platform) # No longer makes any sense since it will have value of first row in group
+    dplyr::select(-platform) # No longer makes any sense since it will have value of first row in group
 
   res
 }
@@ -2509,7 +2509,7 @@ create.species.shapefiles <-
     # Restrict to certain sample labels (useful for cropping to only those samples
     # in a certain spatial area)
     if (!is.null(sample.labs))
-      segdata <- filter(segdata, Sample.Label %in% sample.labs)
+      segdata <- dplyr::filter(segdata, Sample.Label %in% sample.labs)
 
     # save as seasonal shapefiles if required
     for (seas in season.names) {
@@ -2521,8 +2521,8 @@ create.species.shapefiles <-
           recreateSpecSegShapefiles) {
         message(sprintf("Creating segdata shapefile for %s %s", spec, seas))
 
-        filter(segdata, Season == seas) %>%
-          st_write(
+        dplyr::filter(segdata, Season == seas) %>%
+          sf::st_write(
             dsn = folder,
             layer = layer,
             driver = "ESRI Shapefile",
@@ -2543,13 +2543,13 @@ create.species.shapefiles <-
       # Save distdata as a shapefile.
       distdata %>%
         # Needed since numeric ids can get too big for shapefile numbers
-        mutate(object = as.character(object)) %>%
-        st_as_sf(
+        dplyr::mutate(object = as.character(object)) %>%
+        sf::st_as_sf(
           coords = c("LongStart", "LatStart"),
-          crs = st_crs(4326),
+          crs = sf::st_crs(4326),
           remove = FALSE
         ) %>%
-        st_write(
+        sf::st_write(
           dsn = ShapeDir,
           layer = layer,
           driver = "ESRI Shapefile",
@@ -2662,12 +2662,12 @@ create.annual.map.grid <- function(maps) {
          length(maps))
 
   res <-
-    tagList(tags$table(
+    htmltools::tagList(tags$table(
       style = "width:100%",
-      tags$tr(tags$td(tagList(maps$Spring)),
-              tags$td(tagList(maps$Summer))),
-      tags$tr(tags$td(tagList(maps$Fall)),
-              tags$td(tagList(maps$Winter)))
+      tags$tr(tags$td(htmltools::tagList(maps$Spring)),
+              tags$td(htmltools::tagList(maps$Summer))),
+      tags$tr(tags$td(htmltools::tagList(maps$Fall)),
+              tags$td(htmltools::tagList(maps$Winter)))
     ))
 
   res
@@ -2684,11 +2684,11 @@ create.annual.map.grid <- function(maps) {
 #' @return \code{invisible(NULL)}, called for its side-effect (file written).
 #' @export
 save.map <- function(maps, modname, species) {
-  dirname <- here(ResultsDir, species, "Prediction summaries")
+  dirname <- here::here(ResultsDir, species, "Prediction summaries")
   if (!dir.exists(dirname))
     dir.create(dirname, recursive = TRUE)
   timestr <- format(Sys.time(), "%Y%m%d_%H%M%S")
-  filename <- here(dirname, paste0(modname, "_", timestr, ".html"))
+  filename <- here::here(dirname, paste0(modname, "_", timestr, ".html"))
   message(sprintf("%s, %s: Saving map in %s.", species, modname, filename))
   list(h2(paste0(species, "_", modname, "_", timestr)),
        leafsync::sync(maps)) %>%
@@ -2720,13 +2720,13 @@ do.pred.maps.ggplot <-
 
     # Get data subset
     subs <- match.arg(subs)
-    dat <- filter(dat, subset == subs)
+    dat <- dplyr::filter(dat, subset == subs)
 
     message(sprintf("%s, %s: Doing %s abundance prediction map for",
                     species, modname, subs))
 
     ret <- season.names %>%
-      map(do.pred.map.ggplot, dat, modname, species, subs, ...)
+      purrr::map(do.pred.map.ggplot, dat, modname, species, subs, ...)
 
     ret <- wrap_plots(ret) + plot_annotation(title = modname)
     ret
@@ -2754,9 +2754,9 @@ do.pred.map.ggplot <-
 
     message(sprintf("\t%s",season))
     dat <- dat %>%
-      filter(Season == season) %>%
-      select(Dens, geometry) %>%
-      ms_simplify()
+      dplyr::filter(Season == season) %>%
+      dplyr::select(Dens, geometry) %>%
+      rmapshaper::ms_simplify()
 
 
     # Plot only a sample of the polygons for efficiency? Typically used for
@@ -2768,18 +2768,18 @@ do.pred.map.ggplot <-
 
     # Remove ridiculously large densities b/c they mess up the legend and swamp
     # everything else
-    dat <- mutate(dat,
-                  Dens = case_when(Dens > MAX_DENS_VALUE ~ NA,
+    dat <- dplyr::mutate(dat,
+                  Dens = dplyr::case_when(Dens > MAX_DENS_VALUE ~ NA,
                                    TRUE ~ Dens))
 
-    ret <- ggplot(dat = dat) +
-      geom_sf(aes(fill = Dens), color = NA)  +
+    ret <- ggplot2::ggplot(dat = dat) +
+      ggplot2::geom_sf(ggplot2::aes(fill = Dens), color = NA)  +
       scale_fill_continuous(
         type = "viridis"
         # breaks = class_intervals$brks,
         # labels = round(class_intervals$brks, 4)
       ) +
-      ggtitle(season)
+      ggplot2::ggtitle(season)
     ret
   }
 
@@ -2791,9 +2791,9 @@ do.pred.map.ggplot <-
 #' @return A \code{leaflet} map object.
 #' @export
 watch.map <- function(dat) {
-  leaflet(dat) %>%
-    addTiles() %>%
-    addCircles(
+  leaflet::leaflet(dat) %>%
+    leaflet::addTiles() %>%
+    leaflet::addCircles(
       lng = ~ LongStart,
       lat = ~ LatStart,
       radius = 1,
@@ -2838,7 +2838,7 @@ init.df.mod.list <- function(saveit = FALSE) {
   # Set default convert_units value based on whether survey is aerial or ship.
   # This may get updated dynamically by later processing.
   df.mod.list %<>%
-    map( ~ imap(., set.def.df.spec.values))
+    purrr::map( ~ purrr::imap(., set.def.df.spec.values))
 
   # Sometimes we want to save it (ie if it didn't already exist) but other times
   # we're just called to return a initial structure that can be modified (eg in
@@ -2862,15 +2862,15 @@ init.df.mod.list <- function(saveit = FALSE) {
 #' @export
 assign.dist.type <- function(dat) {
   distmeth <- ECSAS.get.table(ecsas.path = ECSAS.Path, "lkpDistMeth")
-  DistType <- left_join(dat, distmeth, by = c("DistMeth" = "DistMethCode")) %>%
-    mutate(DistType = as.factor(
-      case_when(
+  DistType <- dplyr::left_join(dat, distmeth, by = c("DistMeth" = "DistMethCode")) %>%
+    dplyr::mutate(DistType = as.factor(
+      dplyr::case_when(
         FlySwim == "F" ~ DistMethFlyHow,
         FlySwim == "W" ~ DistMethWaterHow,
         TRUE ~ NA_character_
       )
     )) %>%
-    pull(DistType)
+    dplyr::pull(DistType)
 
   if (any(is.na(DistType)))
     warning("assign.dist.type: ",
@@ -2907,7 +2907,7 @@ create.model.name <- function(key, form, adj) {
   } else {
     # Convert formula to dotted notation
     form <-
-      str_replace(as.character(form)[2], fixed(" + "), ".")
+      stringr::str_replace(as.character(form)[2], stringr::fixed(" + "), ".")
   }
   # Deal with adjustment that might be NULL with ifelse()
   nam <- paste0(key, ifelse(is.null(form), "", paste0(".", form)))
@@ -2926,14 +2926,14 @@ create.model.name <- function(key, form, adj) {
 #' @return \code{invisible(NULL)}, called for its side-effect (files copied).
 #' @export
 backup.dsm.summary <- function(species){
-  folder <- here(ResultsDir, "Backups", species, "DSM Summaries")
+  folder <- here::here(ResultsDir, "Backups", species, "DSM Summaries")
   if (!dir.exists(folder))
     dir.create(folder, recursive = TRUE)
 
   message("Backing up ", species, " DSM summaries to ", folder)
 
   # src files
-  src <- list.files(path = here(ResultsDir, species, "DSM Summaries"),
+  src <- list.files(path = here::here(ResultsDir, species, "DSM Summaries"),
                       pattern = "*.Rdata", full.names = T)
 
   if (length(src) == 0){
@@ -2944,14 +2944,14 @@ backup.dsm.summary <- function(species){
   ## create dst filenames
 
   # add modification dates to files
-  mtimes <- str_replace_all(file.info(src)$mtime, " ", "_") %>%
-    str_replace_all(":", "") %>%
-    str_replace("\\..*$", "") # remove trailing milliseconds
+  mtimes <- stringr::str_replace_all(file.info(src)$mtime, " ", "_") %>%
+    stringr::str_replace_all(":", "") %>%
+    stringr::str_replace("\\..*$", "") # remove trailing milliseconds
   stopifnot(length(src) == length(mtimes))
   dst <- src %>%
     basename() %>%
     tools::file_path_sans_ext() %>%
-    here(folder, .) %>%
+    here::here(folder, .) %>%
     paste0("_", mtimes, ".", tools::file_ext(src))
 
   file.copy(src, dst, overwrite = TRUE, copy.date = TRUE) %>%
@@ -2967,7 +2967,7 @@ backup.dsm.summary <- function(species){
 #' @export
 backup.dsm.summaries <- function(){
   names(spec.grps) %>%
-    walk(backup.dsm.summary)
+    purrr::walk(backup.dsm.summary)
 }
 
 
@@ -2977,9 +2977,9 @@ backup.dsm.summaries <- function(){
 #' @export
 remove.dsm.summaries <- function(){
   names(spec.grps) %>%
-    walk(\(species){
+    purrr::walk(\(species){
       message("Removing DSM summaries for ", species)
-      files <- list.files(path = here(ResultsDir, species, "DSM Summaries"),
+      files <- list.files(path = here::here(ResultsDir, species, "DSM Summaries"),
                  pattern = "*.Rdata", full.names = T)
       file.remove(files)
       })
@@ -2999,18 +2999,18 @@ get.covar.netCDF.dates <- function(var.name){
   # list files in the folder here(predLayerDir, "NetCDF", var.name)
   # get dates associated with files, convert to char and return
   #
-  files <- list.files(here(predLayerDir, "NetCDF", var.name),
+  files <- list.files(here::here(predLayerDir, "NetCDF", var.name),
                       ".*\\.nc$",
                       full.names = TRUE)
 
   suppressWarnings(
-    dates <- map_dfr(
+    dates <- purrr::map_dfr(
       files,
       \(filenm) {
         data.frame(
           date = stars::read_ncdf(filenm, var = "time", proxy = TRUE) %>%
             stars::st_get_dimension_values("time") %>%
-            str_replace(" UTC", ""),
+            stringr::str_replace(" UTC", ""),
           filename = filenm
         )
   }))
@@ -3056,7 +3056,7 @@ get.env.covar <- function(env_covar_spec,
 
   # Dynamic or static covar
   if (env_covar_spec$var_type == "static"){
-    env_dat <- stars::read_ncdf(here(
+    env_dat <- stars::read_ncdf(here::here(
       predLayerDir,
       "NetCDF",
       paste0(env_covar_spec$ERDDAP_dataset_name, ".nc")
@@ -3076,8 +3076,8 @@ get.env.covar <- function(env_covar_spec,
 
     # Now we should have all files we need.
     # Figure out which files to read, just in case we have files we don't need
-    files <- filter(netcdf.dates.have, date %in% dates.needed) %>%
-      pull(filename) %>%
+    files <- dplyr::filter(netcdf.dates.have, date %in% dates.needed) %>%
+      dplyr::pull(filename) %>%
       unique()
 
     # Read all needed netcdf files
@@ -3093,8 +3093,8 @@ get.env.covar <- function(env_covar_spec,
     # # Collapse list of stars objects to single object with all dates combined.
     # env.dat <- Reduce(c, res)
     env_dat <- stars::read_stars(files, sub = var_name)
-    if(is.na(st_crs(env_dat)))
-      st_crs(env_dat) <- env_covar_spec$CRS
+    if(is.na(sf::st_crs(env_dat)))
+      sf::st_crs(env_dat) <- env_covar_spec$CRS
   } else
     stop("get.env.covar: variable ",
          var_name,
@@ -3105,7 +3105,7 @@ get.env.covar <- function(env_covar_spec,
     message("\tProjecting and clipping to study area...", appendLF = FALSE)
 
   # Re-project, clip, etc
-  final <- st_transform(env_dat, segProj) %>%
+  final <- sf::st_transform(env_dat, segProj) %>%
     `[`(study.area) %>%
     setNames(var_name) # b/c previous processing steps loose the name
 
@@ -3140,7 +3140,7 @@ do.env.covar <- function(env_covar_spec,
 
   # Dynamic or static covar
   if (env_covar_spec$var_type == "static"){
-    env.dat <- stars::read_ncdf(here(
+    env.dat <- stars::read_ncdf(here::here(
       predLayerDir,
       "NetCDF",
       paste0(env_covar_spec$ERDDAP_dataset_name, ".nc")
@@ -3161,12 +3161,12 @@ do.env.covar <- function(env_covar_spec,
 
     # Now we should have all files we need.
     # Figure out which files to read
-    files <- filter(netcdf.dates.have, date %in% all.dates.needed) %>%
-      pull(filename) %>%
+    files <- dplyr::filter(netcdf.dates.have, date %in% all.dates.needed) %>%
+      dplyr::pull(filename) %>%
       unique()
 
     # Read all needed netcdf files
-    res <- map(files, \(filenm) {
+    res <- purrr::map(files, \(filenm) {
       stars::read_ncdf(filenm, var = var_name)
     })
 
@@ -3181,7 +3181,7 @@ do.env.covar <- function(env_covar_spec,
          env_covar_spec$var_type, "'")
 
   # Re-project, clip, etc and save - xxx this line doesn't work
-  final <- st_transform(env.dat, segProj) %>%
+  final <- sf::st_transform(env.dat, segProj) %>%
     `[`(study.area)
 
   final
@@ -3200,7 +3200,7 @@ do.env.covar <- function(env_covar_spec,
 create_subproject_folders <- function(subproj) {
   create.dir.if.needed(file.path(GenericRDataDir, subproj))
   create.dir.if.needed(file.path(GenericShapeDir, subproj))
-  create.dir.if.needed(here("Results", subproj))
+  create.dir.if.needed(here::here("Results", subproj))
   create.dir.if.needed(file.path(predLayerDir, "Study area resolution & extent", subproj))
   create.dir.if.needed(file.path(GISDir, "Predictions", SubProject))
   create.dir.if.needed(file.path(GISDir, "Rasters", SubProject))
@@ -3220,14 +3220,14 @@ create_subproject_folders <- function(subproj) {
 #' @export
 make.raster <- function(sfobj, variable){
   # Convert sf to SpatVector
-  v <- vect(sfobj)
+  v <- terra::vect(sfobj)
 
   # Create a raster template with the same extent and resolution. Assumes
   # predgridCellLength is in km and raster projection units are metres.
-  r <- rast(v, resolution = predgridCellLength * 1000)
+  r <- terra::rast(v, resolution = predgridCellLength * 1000)
 
   # Rasterize, using an attribute field (e.g., "ID")
-  ret <- rasterize(v, r, field = variable)
+  ret <- terra::rasterize(v, r, field = variable)
 
   ret
 }
@@ -3271,9 +3271,9 @@ do_oneoff_render <- function(rmdfile, species) {
   source(here::here("R/analysis settings.r"), echo = T)
 
   rmarkdown::render(
-    here(RDir, rmdfile),
+    here::here(RDir, rmdfile),
     params = list(species = species),
-    output_file = here(
+    output_file = here::here(
       ResultsDir,
       paste0(
         tools::file_path_sans_ext(rmdfile),
@@ -3333,7 +3333,7 @@ run.ddf.model <-
   # Make sure we haven't specified both covars and adjustment terms. Need to
   # deal with case where formula is either a formula or a string.
   if (!is.null(adj) && mod$form != as.formula("~1") &&
-      str_replace_all(mod$form, " ", "") != "~1") {
+      stringr::str_replace_all(mod$form, " ", "") != "~1") {
     mess <- sprintf("run.ddf.model: model (%s) has both covars and adjustment terms!",
                     mod$label)
     stop(mess)
@@ -3549,17 +3549,17 @@ do.ds <-
     modDat <- models
   else
     # generate models but don't add covars to "unif" key
-    modDat <- map_dfr(key, function(k, covars) {
+    modDat <- purrr::map_dfr(key, function(k, covars) {
       if (k == "unif")
         gen.form.N(0, k, NULL)
       else
-        map_dfr(0:length(covars), gen.form.N, k, covars)
+        purrr::map_dfr(0:length(covars), gen.form.N, k, covars)
     }, covars = covars)
 
 
   # append the adjustment only models
   if (incl.adj)
-    modDat <- bind_rows(adj.models, modDat)
+    modDat <- dplyr::bind_rows(adj.models, modDat)
 
   # setup logfile connection. If it's "" (the default) then logfileConn will be
   # "", which corresponds to stdout.
@@ -3614,7 +3614,7 @@ do.ds <-
       if (parallel) {
         cat(paste0("Using parallel processing with ", nCores, " cores.\n"), file = logfileConn)
         cl <- makeCluster(min(nCores, nrow(modDat)), type = "SOCK")
-        registerDoSNOW(cl)
+        doSNOW::registerDoSNOW(cl)
 
         models <- plyr::dlply(
           modDat,
@@ -3649,7 +3649,7 @@ do.ds <-
       } else { # parallel == FALSE
         models <- modDat %>%
           split(1:nrow(.)) %>%
-          map(
+          purrr::map(
             run.ddf.model,
             data = data,
             folder = folder,
@@ -3735,7 +3735,7 @@ check.det.fcn <-
     cat(sprintf("Detection prob range: %s\n", paste(round(
       range(distdata$detProb), 4
     ), collapse = " - ")))
-    cat(sprintf("Number of detection probs < 0.15: %d\n", nrow(filter(
+    cat(sprintf("Number of detection probs < 0.15: %d\n", nrow(dplyr::filter(
       distdata, detProb < .15
     ))))
     cat(sprintf("range of size: %s\n", paste(range(distdata$size), collapse = " - ")))
@@ -3744,9 +3744,9 @@ check.det.fcn <-
     ), collapse = " - ")))
 
     # plot hist of det probs
-    p <- ggplot(data = distdata, aes(x = detProb))
-    p <- p + geom_histogram(binwidth = 0.1)
-    p <- p + scale_x_continuous(breaks = seq(0, 1, .1))
+    p <- ggplot2::ggplot(data = distdata, ggplot2::aes(x = detProb))
+    p <- p + ggplot2::geom_histogram(binwidth = 0.1)
+    p <- p + ggplot2::scale_x_continuous(breaks = seq(0, 1, .1))
     print(p)
   }
 
@@ -3785,12 +3785,12 @@ check.det.fcn <-
 #' @export
 get.trouble <- function(distdata, segdata) {
   distdata %>%
-    group_by(Sample.Label) %>%
-    summarize(ndet = n_distinct(det.fcn.type)) %>%
-    filter(ndet > 1) %>%
-    left_join(segdata, by = "Sample.Label") %>%
-    left_join(distdata, by = "Sample.Label") %>%
-    select(Sample.Label, ndet, det.fcn.type, df.type, distance, size, TransectType, Observer, object) %>%
+    dplyr::group_by(Sample.Label) %>%
+    dplyr::summarize(ndet = dplyr::n_distinct(det.fcn.type)) %>%
+    dplyr::filter(ndet > 1) %>%
+    dplyr::left_join(segdata, by = "Sample.Label") %>%
+    dplyr::left_join(distdata, by = "Sample.Label") %>%
+    dplyr::select(Sample.Label, ndet, det.fcn.type, df.type, distance, size, TransectType, Observer, object) %>%
     as.data.frame()
 }
 
@@ -3892,7 +3892,7 @@ check.top.model <- function(fold, species, behav, list.only = FALSE) {
 #' @return \code{invisible(NULL)}.
 #' @export
 check.top.models <- function(species, behav, ...){
-  folder <- here("R", species, "DF Summaries", behav)
+  folder <- here::here("R", species, "DF Summaries", behav)
 
   if (!dir.exists(folder)) {
     message(sprintf("Folder %s does not exist!", folder))
@@ -3900,7 +3900,7 @@ check.top.models <- function(species, behav, ...){
   }
 
   dirs <- list.dirs(folder, recursive = FALSE)
-  walk(dirs, check.top.model, species, behav, ...)
+  purrr::walk(dirs, check.top.model, species, behav, ...)
 }
 
 
@@ -3953,7 +3953,7 @@ summarize.dsm <- function(model){
 #'   \code{pred} (numeric prediction vector).
 #' @export
 apply.dsm.var <- function(dat, this.dsm){
-  res <- dsm_var_gam(this.dsm, dat, map(dat, ".my.off.set"))
+  res <- dsm::dsm_var_gam(this.dsm, dat, purrr::map(dat, ".my.off.set"))
 
   list(pred.var = res$pred.var, pred = unlist(res$pred))
 }
@@ -4000,7 +4000,7 @@ get.per.cell.var <- function(this.dsm,
   }
 
   # split each chunk in dat.split into sublists with 1 cell per element.
-  dat.split <- map(dat.split, ~ split(.x, 1:nrow(.x)))
+  dat.split <- purrr::map(dat.split, ~ split(.x, 1:nrow(.x)))
 
   if (parallel) {
 
@@ -4038,7 +4038,7 @@ get.per.cell.var <- function(this.dsm,
   } else {  # non-parallel version
     # apply the function to the chunks serially with map
     print(system.time(
-      res <- map(dat.split, \(chunk) {
+      res <- purrr::map(dat.split, \(chunk) {
         apply.dsm.var(chunk, this.dsm)
         gc()
       }
@@ -4063,12 +4063,12 @@ get.per.cell.var <- function(this.dsm,
 get.dens.est <- function(dsm_final, predgrid) {
 
   # use dsm.var.gam to get estimated abundance params
-  densEst <- summary(dsm.var.gam(dsm_final, predgrid, off.set = predgridCellArea))
+  densEst <- summary(dsm::dsm.var.gam(dsm_final, predgrid, off.set = predgridCellArea))
 
   # The estimates in dsm.var.gam are summed for the entire predgrid study area
   # so we need to divide by the number of predgrid cells * cellarea.
   densEst %<>%
-    map_at(c("pred.est", "se"), ~ .x/(predgridCellArea * nrow(predgrid)))
+    purrr::map_at(c("pred.est", "se"), ~ .x/(predgridCellArea * nrow(predgrid)))
 
   #calculate a lognormal CI for the density est.
   cv.square <- densEst$cv^2
@@ -4113,8 +4113,8 @@ print.dens.est <- function(densEst){
 #' @export
 do.generic.render <- function(species, file){
 
-  suffix <- str_replace(file, "^Generic", "") %>%
-    str_replace("Rmd$", "html")
+  suffix <- stringr::str_replace(file, "^Generic", "") %>%
+    stringr::str_replace("Rmd$", "html")
   out.file <- file.path(ResultsDir, species, paste0(species, suffix))
 
   # Make sure output dir exists
@@ -4159,9 +4159,9 @@ do.generic.render <- function(species, file){
 do.extrapolation <- function(spill, dataset, debug = FALSE){
   browser(expr = debug)
 
-  out.file <- file.path(here(), paste(spill, dataset, "0_extrapolation.html", sep = "_"))
+  out.file <- file.path(here::here(), paste(spill, dataset, "0_extrapolation.html", sep = "_"))
   message(sprintf("Rendering generic extrapolation  for %s to %s", dataset, out.file))
-  render(file.path(here(), "Generic_0_extrapolation.Rmd"),
+  rmarkdown::render(file.path(here::here(), "Generic_0_extrapolation.Rmd"),
                   params = list(spill = spill, dataset = dataset),
                   output_file = out.file)
 }
@@ -4215,34 +4215,34 @@ check.dsm <- function(dsm_final,
   }
 
   if (any(grepl("s(x.sc, y.sc", as.character(dsm_final$formula), fixed = T))) {
-    vis.gam(dsm_final,  view = c("x.sc","y.sc"), main = "s(x.sc,y.sc) (response scale)",
+    mgcv::vis.gam(dsm_final,  view = c("x.sc","y.sc"), main = "s(x.sc,y.sc) (response scale)",
             type = "response", asp = 1, plot.type = "contour")
-    vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 0, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 0, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
 
-    vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 60, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = 60, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
 
-    vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = -60, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x.sc","y.sc"), theta = -60, phi = 45,
             main = "s(x.sc,y.sc) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
   }
 
   # Shouldn't these be seasonal?
   if (any(grepl("s(x, y", as.character(dsm_final$formula), fixed = T))) {
-    vis.gam(dsm_final,  view = c("x","y"), main = "s(x, y) (response scale)",
+    mgcv::vis.gam(dsm_final,  view = c("x","y"), main = "s(x, y) (response scale)",
             type = "response", asp = 1, plot.type = "contour")
-    vis.gam(dsm_final,  view = c("x","y"), theta = 0, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x","y"), theta = 0, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
 
-    vis.gam(dsm_final,  view = c("x","y"), theta = 60, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x","y"), theta = 60, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
 
-    vis.gam(dsm_final,  view = c("x","y"), theta = -60, phi = 45,
+    mgcv::vis.gam(dsm_final,  view = c("x","y"), theta = -60, phi = 45,
             main = "s(x,y) (response scale)", type = "response",
             asp = 1, ticktype = "detailed")
   }
@@ -4263,12 +4263,12 @@ check.dsm <- function(dsm_final,
   message("DHARMa checks")
   simmod <- dsm_final
   class(simmod) <- class(simmod)[-1] # Simulate residuals doesn't like dsm class
-  sims <- simulateResiduals(fittedModel = simmod)
+  sims <- DHARMa::simulateResiduals(fittedModel = simmod)
   plot(sims)
   testResiduals(sims)
-  testZeroInflation(sims)
+  DHARMa::testZeroInflation(sims)
   # May fail if x,y locations are not unique
-  res <- try(testSpatialAutocorrelation(sims, segdata$x, segdata$y))
+  res <- try(DHARMa::testSpatialAutocorrelation(sims, segdata$x, segdata$y))
 
   # If more than one resid at a given location.
   # Note still use try() since this may fail to allocate enough memory if
@@ -4294,18 +4294,18 @@ check.dsm <- function(dsm_final,
   message("Doing resids vs model terms")
   # plot resids vs each term in model
   try(attr(terms(simmod), "term.labels") %>%
-    walk(function(termlab, sims, segdata) {
-      plotResiduals(sims, segdata[, termlab], xlab = termlab)
+    purrr::walk(function(termlab, sims, segdata) {
+      DHARMa::plotResiduals(sims, segdata[, termlab], xlab = termlab)
     }, sims = sims, segdata = segdata))
 
   if (!brief) {
     # Concurvity
     message("Concurvity checks\nEach term with whole of rest of model")
-    try(print(concurvity(dsm_final) %>% round(digits = 3)))
+    try(print(mgcv::concurvity(dsm_final) %>% round(digits = 3)))
     message(
       "Concurvity of pairwise terms ('estimate' measure presented)\nEach row shows how terms in columns depend on the term in that row."
     )
-    try(print(concurvity(dsm_final, full = FALSE)[["estimate"]] %>% round(digits = 3)))
+    try(print(mgcv::concurvity(dsm_final, full = FALSE)[["estimate"]] %>% round(digits = 3)))
     message("Plot is non-symmetric, showing how terms on y-axis depend on terms on the x-axis")
     try(vis_concurvity(dsm_final))
   }
@@ -4353,14 +4353,14 @@ check.dsm <- function(dsm_final,
     # create segment label as %H:%M:%S
     message("Doing autocorellogram")
     dsm_final$data <- dsm_final$data %>%
-      mutate(
+      dplyr::mutate(
         tr.lab = paste(
           dsm_final$data$CruiseID,
           dsm_final$data$Date,
           dsm_final$data$FlySwim,
           sep = "_"
         ),
-        seg.lab = format(as_datetime(dsm_final$data$StartTime), "%H:%M:%S")
+        seg.lab = format(lubridate::as_datetime(dsm_final$data$StartTime), "%H:%M:%S")
       )
     par(mfrow = c(1, 1))
     dsm_cor(
@@ -4443,9 +4443,9 @@ check.dsm <- function(dsm_final,
 #' @export
 augment.segdata <- function(segdata, distdata) {
   newsegdata <- distdata %>%
-    group_by(Sample.Label) %>%
-    summarize(estAbund = sum(adjSize), rawCount = sum(size)) %>%
-    right_join(segdata, by = "Sample.Label") %>%
+    dplyr::group_by(Sample.Label) %>%
+    dplyr::summarize(estAbund = sum(adjSize), rawCount = sum(size)) %>%
+    dplyr::right_join(segdata, by = "Sample.Label") %>%
     st_as_sf
   newsegdata$estAbund[is.na(newsegdata$estAbund)] <- 0
   newsegdata$rawCount[is.na(newsegdata$rawCount)] <- 0
@@ -4478,7 +4478,7 @@ adjust.time.covars <- function(form, segdata, k = 10) {
   if (grepl("s(year", as.character(form)[3], fixed = TRUE) &&
       (new.k < k)) {
     message("Removing year from formula for lack of data")
-    form <- update(form, . ~ . - s(year, bs = "ts"))
+    form <- update(form, . ~ . - mgcv::s(year, bs = "ts"))
 
     # enough data to have term at all?
     if (new.k >= 2) {
@@ -4495,7 +4495,7 @@ adjust.time.covars <- function(form, segdata, k = 10) {
   if (grepl("s(year", as.character(form)[3], fixed = TRUE) &&
       (new.k < k)) {
     message("Removing yday from formula for lack of data")
-    form <- update(form, . ~ . - s(yday, bs = "ts"))
+    form <- update(form, . ~ . - mgcv::s(yday, bs = "ts"))
 
     # enough data to have term at all?
     if (new.k >= 2) {
@@ -4665,7 +4665,7 @@ dsm.pred <-
   # Might have been just able to use platform.
   model <- mod.res[[modname]]
   ret <- predgrid %>%
-    mutate(subset = platform)
+    dplyr::mutate(subset = platform)
 
   # Predict from model for all seasons and values of platform, which
   # may or may not be a factor in the given model. So, in a no_factor model
@@ -4673,7 +4673,7 @@ dsm.pred <-
   # of platform. In a factor model these predictions for each level of platform
   # are different.
   ret <- ret %>%
-    mutate(NHat = predict(model, newdata=ret, off.set=ret$area),
+    dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area),
            Dens = NHat/area)
 
   # Create summed (ie Combined Nhat) across all levels of platform.
@@ -4683,10 +4683,10 @@ dsm.pred <-
     head(nrow(.) / length(unique(.$platform))) %>%
     # Sum NHats across platforms splitting the dataframe into a list with one
     # element per platform, extracting the NHat columns and summing with reduce
-    mutate(subset = "Combined",
+    dplyr::mutate(subset = "Combined",
            NHat =  split(ret, ~ platform) %>%
-             map(~ .x$NHat) %>%
-             reduce(`+`),
+             purrr::map(~ .x$NHat) %>%
+             purrr::reduce(`+`),
            Dens = NHat/area,
            platform = NA) %>%
     rbind(ret)   # tack on original rows for each platform level
@@ -4723,8 +4723,8 @@ dsm.pred <-
 
   # Save as a shapefile
   ret %>%
-    filter(subset == "Combined") %>%
-    st_write(
+    dplyr::filter(subset == "Combined") %>%
+    sf::st_write(
       dsn = ShapeDir,
       layer = paste(species, modname, "predictions", sep = "_"),
       driver = "ESRI Shapefile",
@@ -4737,8 +4737,8 @@ dsm.pred <-
   # saving
   message("Creating and saving seasonal rasters.")
   pp_raster <- season.names %>%
-    map(make.season.raster,
-        obj = filter(ret, subset == "Combined"),
+    purrr::map(make.season.raster,
+        obj = dplyr::filter(ret, subset == "Combined"),
         variable = "Dens") %>%
     rast
   names(pp_raster) <- season.names
@@ -4747,7 +4747,7 @@ dsm.pred <-
   # plot(pp_raster, main = paste(season.names, paste(species, modname, sep = "_")))
 
   # Save as a raster
-  writeRaster(pp_raster,
+  terra::writeRaster(pp_raster,
               file.path(
                 predDir,
                 sprintf(
@@ -4798,8 +4798,8 @@ do.det.fcn.render <- function(species,
   if (!dir.exists(dirname(out.file)))
     dir.create(dirname(out.file), recursive = TRUE)
 
-  render(
-    file.path(here("R"), "Generic_1_ddf_fitting.rmd"),
+  rmarkdown::render(
+    file.path(here::here("R"), "Generic_1_ddf_fitting.rmd"),
     params = list(
       species = species,
       do.final = do.final,
@@ -4826,8 +4826,8 @@ candidate.detfcn.summary <- function(df.spec.name, species) {
   do.ds.det.fcn.checks(folder, species = species, dsetname = df.spec.name)
 
   get.ds.res(folder) %>%
-    mutate(dataset = df.spec.name, species = species) %>%
-    relocate(species, dataset, Model, Key, Formula, DetProb, AIC, deltaAIC, )
+    dplyr::mutate(dataset = df.spec.name, species = species) %>%
+    dplyr::relocate(species, dataset, Model, Key, Formula, DetProb, AIC, deltaAIC, )
 }
 
 
@@ -4887,12 +4887,12 @@ get.ds.res <- function(folder) {
 do.ds.det.fcn.checks <- function(folder, species, dsetname) {
   fl <- list.files(path = folder, pattern = "AIC.*\\.RData", full.names = T)
 
-  walk(fl, function(filename) {
+  purrr::walk(fl, function(filename) {
     message(sprintf("Checking detection function: %s", filename))
     load(filename)
     check.det.fcn(model,
                   species = species,
-                  str_replace(basename(folder), fixed("DF Summaries_"), ""))
+                  stringr::str_replace(basename(folder), stringr::fixed("DF Summaries_"), ""))
   })
 }
 
@@ -4957,7 +4957,7 @@ get.stats.file <- function(path) {
 #' @export
 augment.distdata <- function(df.mod.spec) {
   df.mod.spec$fitted.distdata <- df.mod.spec$fitted.distdata %>%
-    mutate(Sample.Label = paste(Sample.Label, df.mod.spec$ddftype, sep = "_"),
+    dplyr::mutate(Sample.Label = paste(Sample.Label, df.mod.spec$ddftype, sep = "_"),
            ddfobj.orig = as.integer(df.mod.spec$ddftype))
   df.mod.spec
 }
@@ -4985,10 +4985,10 @@ create.segdata.copy <- function(df.mod.spec, init_segdata) {
 
   segdata <- switch(
     substr(df.mod.spec$ddftype, 1, 1),
-    S = filter(init_segdata, SurveyType == "Ship"),
-    A = filter(init_segdata, SurveyType == "Aerial")
+    S = dplyr::filter(init_segdata, SurveyType == "Ship"),
+    A = dplyr::filter(init_segdata, SurveyType == "Aerial")
   ) %>%
-    mutate(
+    dplyr::mutate(
       Sample.Label = paste(Sample.Label, df.mod.spec$ddftype, sep = "_"),
       ddftype_orig = df.mod.spec$ddftype,
       # Lookup the platform type for this ddftype. May or may not have a 1:1
@@ -5030,13 +5030,13 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   # these distdata components specified by df.mod.specs may have no obs and will
   # thus not be included
   distdata <- df.mod.specs %>%
-    map(augment.distdata) %>%
+    purrr::map(augment.distdata) %>%
     # Extract list of fitted.distdatas
-    map("fitted.distdata") %>%
+    purrr::map("fitted.distdata") %>%
     # Remove datasets with no obs - note use of base R Filter()
     Filter(function(x) nrow(x) > 0, .) %>%
-    map_dfr( ~ .) %>%  # Convert list to single dataframe
-    mutate(
+    purrr::map_dfr( ~ .) %>%  # Convert list to single dataframe
+    dplyr::mutate(
       # Need to renumber the ddfobj values sequentially from 1 to the number
       # of ddfs, whereas they may currently have gaps in the numeric sequence.
       # For example, if there were no obs in aerial_F_D (ddfobj.orig == 4) or
@@ -5097,10 +5097,10 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
     # regardless of whether there were any obs in that ddf. If there weren't
     # then all segments for this ddf spec will end up with zero obs in the
     # response variable created by dsm:::make_data()
-    map(create.segdata.copy, init_segdata = init_segdata) %>%
-    map_dfr(~ .) %>% # Convert to one large dataframe
+    purrr::map(create.segdata.copy, init_segdata = init_segdata) %>%
+    purrr::map_dfr(~ .) %>% # Convert to one large dataframe
     assign.season(seasons[[species]], datefield = "Date") %>%
-    select(
+    dplyr::select(
       SurveyType,
       Sample.Label,
       CruiseID,
@@ -5132,11 +5132,11 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
       platform,
       ddftype_orig,
       Season,
-      ends_with(".sc")
+      dplyr::ends_with(".sc")
     ) %>%
     # Now that platform has been created, turn it into a factor, and assign
     # ddfobj based on conversion vector created above
-    mutate(platform = as.factor(platform),
+    dplyr::mutate(platform = as.factor(platform),
       ddfobj = conv[ddftype_orig]) %>%
     # dsm() uses observations in segdata and associated detection function to
     # calculate the gam response internally. Calculate it here so I can check it's
@@ -5183,7 +5183,7 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   # Extract ddfs from df.mod.specs and drop any which don't have any observations
   # or else dsm() will get upset. Note we use the original ddfobj numbering
   # before it was recoded since this extracts the correct ddfs.
-  ddfs <- map(df.mod.specs, "fitted.model") %>%
+  ddfs <- purrr::map(df.mod.specs, "fitted.model") %>%
     magrittr::extract(unique(distdata$ddfobj.orig))
 
   ### TODO: need to deal with segments where WhatCount was something funky
