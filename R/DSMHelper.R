@@ -4300,6 +4300,12 @@ do.generic.render <- function(species, file){
     dir.create(dirname(out.file), recursive = TRUE)
   render_file <- file.path(RDir, file)
 
+  # Output message in render pane if called from a knitted document.
+  if (isTRUE(getOption('knitr.in.progress'))) {
+    cat(sprintf("Rendering generic file %s for %s to %s", file, species, out.file),
+        file = stderr())
+  }
+
   message(sprintf("Rendering generic file %s for %s to %s", file, species, out.file))
   rmarkdown::render(
     render_file,
