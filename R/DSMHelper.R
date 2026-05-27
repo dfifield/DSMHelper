@@ -4131,20 +4131,6 @@ do.generic.render <- function(species, file){
   )
 
   return(species)
-
-  callr::r(function(file, species, out.file) {
-    rmarkdown::render(
-      file,
-      params = list(species = species),
-      intermediates_dir = tempdir(),
-      output_file = out.file
-    )
-  },
-  args = list (
-    file = render_file,
-    species = species,
-    out.file = out.file
-  ))
 }
 
 
