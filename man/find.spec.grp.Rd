@@ -2,18 +2,26 @@
 % Please edit documentation in R/DSMHelper.R
 \name{find.spec.grp}
 \alias{find.spec.grp}
-\title{Find which species group a species alpha code belongs to}
+\title{Find the species group that a species alpha code belongs to}
 \usage{
+find.spec.grp(species)
+
 find.spec.grp(species)
 }
 \arguments{
 \item{species}{Character string (or vector) of species alpha codes.}
 }
 \value{
+Character string group name, or \code{NA} if not found.
+
 Character string group name, or \code{NA} if the species is not
 found in any group.
 }
 \description{
+Searches the project global \code{spec.grps} for the group containing
+\code{species} and returns its name.  Vectorised via
+\code{\link[base]{Vectorize}}.
+
 Searches the project global \code{spec.grps} list and returns the name of
 the group containing \code{species}.  Vectorised over \code{species}.
 }
