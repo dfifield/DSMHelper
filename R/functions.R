@@ -4715,9 +4715,10 @@ run.dsm.model <- function(mod.def,
 
     if(!inherits(model, "try-error")){
       # if we used "bam" then the data is not kept even if keepData == TRUE, so
-      # add it back in
+      # add it back in. Sometimes "data" is in model but it is NA.
       kd <- control[["keepData"]]
-      if (!is.null(kd) & isTRUE(kd) & !("data" %in% names(model))){
+      if (!is.null(kd) & isTRUE(kd) &
+          (!("data" %in% names(model))) | is.na(model$data)){
         model$data <-
           dsm:::make.data(
             response = as.character(mod.def$formula[[1]])[2],
