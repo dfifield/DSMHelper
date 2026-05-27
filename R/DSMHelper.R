@@ -14,6 +14,25 @@
 #   various env covar fns       - reference segProj, study.area, RasterDir
 # ============================================================================
 
+# Print message when user executes "library(DSMHelper).
+# Shamelessly borrowed from mgcv.
+.onAttach <- function(...) {
+  library(help=DSMHelper)$info[[1]] -> version
+
+  if (!is.null(version)) {
+    version <- version[pmatch("Version",version)]
+    um <- strsplit(version," ")[[1]]
+    version <- um[nchar(um)>0][2]
+  } else {
+    version <- "Unknown version"
+  }
+
+  hello <- paste0("This is DSMHelper ", version, ".")
+  packageStartupMessage(hello)
+}
+
+
+
 # ============================================================================
 # From functions.R
 # ============================================================================
