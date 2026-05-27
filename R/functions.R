@@ -4917,6 +4917,12 @@ do.det.fcn.render <- function(species,
   out.file <- file.path(ResultsDir, species, paste(species, suffix, sep = "_"))
   message(sprintf("Rendering generic ddf fitting for %s to %s", species, out.file))
 
+  # Output message in render pane if called from a knitted document.
+  if (isTRUE(getOption('knitr.in.progress'))) {
+    cat(sprintf("\nRendering generic ddf fitting for %s to %s", species, out.file),
+        file = stderr())
+  }
+
   # Make sure output dir exists
   if (!dir.exists(dirname(out.file)))
     dir.create(dirname(out.file), recursive = TRUE)
