@@ -18,6 +18,184 @@
 # From functions.R
 # ============================================================================
 
+#' Augment a transect row with WhatCount values from its constituent watches
+#'
+#' For each row in a transects data frame, determines how many distinct
+#' \code{WhatCount} values appear across the watches it aggregates and stores
+#' both the values and their count.  Note: performance is poor when called via
+#' \code{map()} on large data frames.
+#'
+#' @param row Single-row data frame for one transect, with a \code{Watches}
+#'   column of comma-separated watch IDs.
+#' @param watches Data frame of watch records with \code{WatchID} and
+#'   \code{WhatCount} columns.
+#' @return \code{row} with \code{WhatCounts} (list column of unique values)
+#'   and \code{nWhatCount} (integer count) appended.
+#' @export
+get.what.counts <- function(row, watches){
+  wtch.ids <- str_split_fixed(row$Watches, ",", n = Inf) %>%
+    str_trim
+  watches %<>% filter(WatchID %in% wtch.ids)
+  stopifnot(length(wtch.ids) == nrow(watches))
+  row$WhatCounts <- watches$WhatCount %>%
+    unique %>%
+    na.omit %>%
+    as.vector %>%
+    list
+  row$nWhatCount <- length(row$WhatCounts[[1]])
+  row
+}
+
+#' Convert a bearing in degrees to an ECSAS cardinal direction code
+#'
+#' Maps a numeric bearing to the integer codes used in \code{lkpDirections}
+#' in the ECSAS database.  Vectorised via \code{\link[base]{Vectorize}}.
+#'
+#' @param deg Numeric bearing in degrees (0--360), or \code{NA}.
+#' @return Integer direction code (1--9), or \code{NA}.
+#' @export
+convert.to.cardinal.code <- Vectorize(function(deg) {
+  if (is.na(deg))
+    NA
+  else if ((deg > 337.5 && deg <= 360) || (deg >= 0 && deg <= 22.5))
+    2
+  else if ((deg > 22.5) && (deg <= 67.5))
+    3
+  else if ((deg > 67.5) && (deg <= 112.5))
+    4
+  else if ((deg > 112.5) && (deg <= 157.5))
+    5
+  else if ((deg > 157.5) && (deg <= 202.5))
+    6
+  else if ((deg > 202.5) && (deg <= 247.5))
+    7
+  else if ((deg > 247.5) && (deg <= 292.5))
+    8
+  else if ((deg > 292.5) && (deg <= 337.5))
+    9
+  else
+    1
+})
+
+#' Find the species group that a species alpha code belongs to
+#'
+#' Searches the project global \code{spec.grps} for the group containing
+#' \code{species} and returns its name.  Vectorised via
+#' \code{\link[base]{Vectorize}}.
+#'
+#' @param species Character string alpha code (e.g. \code{"ATPU"}), or
+#'   \code{NA}.
+#' @return Character string group name, or \code{NA} if not found.
+#' @export
+find.spec.grp <- Vectorize(function(species) {
+  if (is.na(species))
+    return(NA)
+
+  res <- names(spec.grps[grepl(species, spec.grps)])
+
+  if (length(res) == 0)
+    return(NA)
+
+  if (length(res) > 1)
+    stop(sprintf(
+      "%s belongs to more than one species group: %s",
+      species,
+      paste(res, collapse = ", ")
+    ))
+
+  res
+})
+
+#' Plot annual survey effort within a study area
+#'
+#' Filters transects to those whose geometry falls within a given study area
+#' polygon and produces two plots: a faceted map of transect lines by year and
+#' a bar chart of total annual effort. Also prints a summary table. Transects
+#' crossing the study area boundary are included but not clipped (see issue #5).
+#'
+#' @param transects An sf object of LINESTRING transects with at least columns
+#'   \code{Date} (Date) and \code{Effort} (numeric, km). Any CRS is accepted;
+#'   coordinates are transformed to WGS84 internally.
+#' @param sa An sf polygon defining the study area. Any CRS is accepted.
+#' @param sa_label Character string used in plot titles, captions, and the
+#'   summary table caption. Defaults to \code{"study area"}.
+#' @param buf Numeric. Buffer in decimal degrees added around the study area
+#'   bounding box when setting map extents. Must be finite and >= 0. Defaults
+#'   to \code{0.5}.
+#' @param species Character string identifying the species or group, used in
+#'   plot titles. Defaults to \code{""}.
+#' @return A data frame of annual effort (columns: \code{Year},
+#'   \code{total_effort_km}, \code{n_transects}), returned invisibly. The
+#'   summary table and both plots are printed as side effects.
+#' @examples
+#' \dontrun{
+#' plot_annual_effort(the.data$transects, mcp_95, sa_label = "95% MCP")
+#' plot_annual_effort(the.data$transects, ccman, sa_label = "min. concave polygon")
+#' }
+#' @export
+plot_annual_effort <- function(transects, sa, sa_label = "study area", buf = 0.5,
+                               species = "") {
+  checkmate::expect_class(transects, "sf")
+  checkmate::expect_names(names(transects), must.include = c("Date", "Effort"))
+  checkmate::expect_class(sa, "sf")
+  checkmate::expect_string(sa_label, min.chars = 1)
+  checkmate::expect_number(buf, lower = 0, finite = TRUE)
+  checkmate::expect_string(species)
+
+  sa_ll <- st_transform(sa, 4326) %>% st_make_valid()
+
+  countries <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+  transects_ll <- st_transform(transects, 4326) %>%
+    mutate(Year = lubridate::year(Date))
+
+  # concaveman polygons can fail s2 spherical validity; use planar GEOS instead
+  old_s2 <- sf::sf_use_s2(FALSE)
+  transects_in_sa <- st_filter(transects_ll, sa_ll)
+  sf::sf_use_s2(old_s2)
+
+  effort_by_year <- transects_in_sa %>%
+    st_drop_geometry() %>%
+    group_by(Year) %>%
+    summarise(total_effort_km = sum(Effort, na.rm = TRUE),
+              n_transects = n())
+
+  print(knitr::kable(effort_by_year,
+                     caption = paste("Annual effort within", sa_label)))
+
+  bbox <- st_bbox(sa_ll)
+  p_map <- ggplot() +
+    geom_sf(data = countries, fill = "grey85", color = "grey60", linewidth = 0.3) +
+    geom_sf(data = sa_ll, fill = NA, color = "blue", linewidth = 0.6) +
+    geom_sf(data = transects_in_sa, color = "red", linewidth = 0.7,
+            alpha = 1.0) +
+    facet_wrap(~ Year, ncol = 4) +
+    coord_sf(
+      xlim = c(bbox["xmin"] - buf, bbox["xmax"] + buf),
+      ylim = c(bbox["ymin"] - buf, bbox["ymax"] + buf)
+    ) +
+    theme_bw() +
+    theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+    labs(
+      title = paste(species, "- Annual effort distribution within", sa_label),
+      caption = paste("Lines = transects within species study area (red outline).",
+                      "\nNote: transects crossing the boundary are not yet clipped",
+                      "(see issue #5).")
+    )
+  print(p_map)
+
+  p_bar <- ggplot(effort_by_year, aes(x = factor(Year), y = total_effort_km)) +
+    geom_col(fill = "steelblue") +
+    labs(x = "Year", y = "Total effort (km)",
+         title = paste(species, "- Total annual survey effort within", sa_label)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p_bar)
+
+  invisible(effort_by_year)
+}
+
+
 #' Validate and reconcile distance and interval distance columns
 #'
 #' Ensures an observation data frame does not simultaneously carry a
