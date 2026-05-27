@@ -77,15 +77,17 @@ convert.to.cardinal.code <- Vectorize(function(deg) {
     1
 })
 
-#' Find the species group that a species alpha code belongs to
+#' Find which species group a species alpha code belongs to
 #'
-#' Searches the project global \code{spec.grps} for the group containing
-#' \code{species} and returns its name.  Vectorised via
-#' \code{\link[base]{Vectorize}}.
+#' Searches the project global \code{spec.grps} list and returns the name of
+#' the group containing \code{species}.  Vectorised over \code{species}.
 #'
-#' @param species Character string alpha code (e.g. \code{"ATPU"}), or
-#'   \code{NA}.
-#' @return Character string group name, or \code{NA} if not found.
+#' @param species Character string (or vector) of species alpha codes.
+#' @details
+#' Raises an error if \code{species} belongs to multiple groups.
+#'
+#' @return Character string group name, or \code{NA} if the species is not
+#'   found in any group.
 #' @export
 find.spec.grp <- Vectorize(function(species) {
   if (is.na(species))
@@ -93,9 +95,11 @@ find.spec.grp <- Vectorize(function(species) {
 
   res <- names(spec.grps[grepl(species, spec.grps)])
 
+  # No match
   if (length(res) == 0)
     return(NA)
 
+  # Too many matches
   if (length(res) > 1)
     stop(sprintf(
       "%s belongs to more than one species group: %s",
@@ -2557,38 +2561,6 @@ do.pred.map <-
 
   m
 }
-
-#' Find which species group a species alpha code belongs to
-#'
-#' Searches the project global \code{spec.grps} list and returns the name of
-#' the group containing \code{species}.  Vectorised over \code{species}.
-#'
-#' @param species Character string (or vector) of species alpha codes.
-#' @return Character string group name, or \code{NA} if the species is not
-#'   found in any group.
-#' @export
-find.spec.grp <- Vectorize(function(species) {
-  if (is.na(species))
-    return(NA)
-
-  res <- names(spec.grps[grepl(species, spec.grps)])
-
-  # No match
-  if (length(res) == 0)
-    return(NA)
-
-  # Too many matches
-  if (length(res) > 1)
-    stop(sprintf(
-      "%s belongs to more than one species group: %s",
-      species,
-      paste(res, collapse = ", ")
-    ))
-
-  res
-})
-
-
 
 #' Collapse per-platform segdata copies into a single combined segdata
 #'
