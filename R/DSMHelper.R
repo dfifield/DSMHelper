@@ -4302,7 +4302,7 @@ do.generic.render <- function(species, file){
 
   # Output message in render pane if called from a knitted document.
   if (isTRUE(getOption('knitr.in.progress'))) {
-    cat(sprintf("Rendering generic file %s for %s to %s", file, species, out.file),
+    cat(sprintf("\nRendering generic file %s for %s to %s", file, species, out.file),
         file = stderr())
   }
 
