@@ -2730,6 +2730,310 @@ get.final.variance.name <- function(spec, season){
   filename
 }
 
+# Parse a prediction raster filename into its components.
+# Returns NULL if the name does not match the convention.
+.parse_pred_filename <- function(filepath) {
+  base  <- tools::file_path_sans_ext(basename(filepath))
+  parts <- regmatches(
+    base,
+    regexec(
+      "^([^.]+)\\.([^.]+)\\.(.+)\\.(\\d+_sqkm(?:_CV)?)$",
+      base, perl = TRUE
+    )
+  )[[1]]
+  if (length(parts) == 0) return(NULL)
+  list(
+    path     = filepath,
+    species  = parts[2],
+    season   = parts[3],
+    model    = parts[4],
+    cellsize = sub("_CV$", "", parts[5]),
+    cv       = grepl("_CV$", parts[5])
+  )
+}
+
+# Discover prediction files in folder matching the given filters.
+# NULL filter values mean "no filter" (include all).
+.discover_pred_files <- function(folder, species_filter, model_filter,
+                                  cellsize_filter, season_filter, cv) {
+  files   <- list.files(folder, full.names = TRUE)
+  parsed  <- lapply(files, .parse_pred_filename)
+  records <- Filter(Negate(is.null), parsed)
+  records <- Filter(function(r) r$cv == cv, records)
+  if (!is.null(species_filter))
+    records <- Filter(function(r) r$species == species_filter, records)
+  if (!is.null(model_filter))
+    records <- Filter(function(r) r$model == model_filter, records)
+  if (!is.null(cellsize_filter))
+    records <- Filter(function(r) r$cellsize == cellsize_filter, records)
+  if (!is.null(season_filter))
+    records <- Filter(function(r) r$season %in% season_filter, records)
+  records
+}
+
+# Find the first file in folder whose parsed components match exactly.
+# Returns the file path, or NULL if not found.
+.find_matching_file <- function(folder, species, season, model,
+                                 cellsize, cv) {
+  files <- list.files(folder, full.names = TRUE)
+  for (f in files) {
+    p <- .parse_pred_filename(f)
+    if (is.null(p)) next
+    if (p$species == species && p$season == season &&
+        p$model == model && p$cellsize == cellsize && p$cv == cv)
+      return(f)
+  }
+  NULL
+}
+
+#' Compare two sets of density surface model prediction rasters
+#'
+#' Finds matching raster files in two folders by parsing the standard DSMHelper
+#' filename convention (\code{species.season.model.cellsize[_CV].ext}),
+#' computes cell-by-cell differences, and saves a GeoTIFF difference raster
+#' for each matched pair. Summary statistics are printed and returned.
+#'
+#' Two operating modes are available:
+#' \itemize{
+#'   \item \strong{Seasonal mode} (default, \code{season1 = NULL}): all
+#'     seasons discovered in \code{folder1} are compared against the
+#'     corresponding season in \code{folder2}. The \code{seasons} argument
+#'     restricts which season labels are included.
+#'   \item \strong{Single mode} (\code{season1} provided): exactly one pair
+#'     is compared. \code{season2} defaults to \code{season1} when omitted,
+#'     allowing same-season cross-model or cross-species comparisons.
+#' }
+#'
+#' Both rasters in each pair must be geometrically identical (same extent,
+#' resolution, and CRS) and must have \code{NA} in exactly the same cells.
+#' Differences are computed as \code{r1 - r2}; positive values indicate that
+#' the first raster predicts higher densities.
+#'
+#' Output difference rasters are always written as GeoTIFF regardless of the
+#' input format.
+#'
+#' @param folder1 Character string. Directory containing the first raster set.
+#' @param folder2 Character string. Directory containing the second raster
+#'   set.
+#' @param output_dir Character string or \code{NULL}. Directory for saved
+#'   difference rasters; created if it does not exist. When \code{NULL}
+#'   (default) difference rasters are not written to disk.
+#' @param species1 Character string or \code{NULL}. Species code to match in
+#'   \code{folder1} (e.g. \code{"NOGA"}). \code{NULL} includes all species.
+#' @param model1 Character string or \code{NULL}. Model name to match in
+#'   \code{folder1}. \code{NULL} includes all models.
+#' @param species2 Character string or \code{NULL}. Species code to look up
+#'   in \code{folder2}. \code{NULL} uses the same species as the matched
+#'   \code{folder1} file.
+#' @param model2 Character string or \code{NULL}. Model name to look up in
+#'   \code{folder2}. \code{NULL} uses the same model as the matched
+#'   \code{folder1} file.
+#' @param cellsize Character string or \code{NULL}. Cell-size label (e.g.
+#'   \code{"100_sqkm"}) to filter on. \code{NULL} includes all cell sizes
+#'   found in \code{folder1}.
+#' @param season1 Character string or \code{NULL}. Season label for the first
+#'   raster in single mode. \code{NULL} (default) activates seasonal mode.
+#' @param season2 Character string or \code{NULL}. Season for the second
+#'   raster in single mode. Defaults to \code{season1} when \code{NULL}.
+#'   Ignored in seasonal mode.
+#' @param seasons Character vector or \code{NULL}. In seasonal mode, restrict
+#'   comparisons to these season labels. \code{NULL} includes all seasons
+#'   discovered in \code{folder1}.
+#' @param compare_cv Logical. If \code{TRUE}, compare coefficient-of-variation
+#'   rasters (\code{*_CV} files) instead of density rasters. Default
+#'   \code{FALSE}.
+#' @return A named list returned invisibly:
+#'   \describe{
+#'     \item{\code{$stats}}{Data frame with one row per comparison. Columns:
+#'       \code{species1}, \code{season1}, \code{model1}, \code{species2},
+#'       \code{season2}, \code{model2}, \code{mean_r1}, \code{min_r1},
+#'       \code{max_r1}, \code{mean_r2}, \code{min_r2}, \code{max_r2},
+#'       \code{mean_diff}, \code{min_diff}, \code{max_diff},
+#'       \code{median_diff}, \code{sd_diff}, \code{pearson_r}.}
+#'     \item{\code{$files}}{Character vector of saved difference raster
+#'       paths.}
+#'   }
+#' @examples
+#' \dontrun{
+#' # Simplest case: compare all matching files across two folders
+#' res <- compare_predictions("path/to/v1", "path/to/v2", "path/to/diffs")
+#'
+#' # Seasonal: compare all seasons for one species, two models
+#' res <- compare_predictions(
+#'   folder1    = "path/to/pred",
+#'   folder2    = "path/to/pred",
+#'   output_dir = "path/to/diffs",
+#'   species1   = "NOGA",
+#'   model1     = "dsm_nb_allpred",
+#'   model2     = "dsm_nb_depth_only"
+#' )
+#'
+#' # Single: compare Winter only
+#' res <- compare_predictions(
+#'   folder1    = "path/to/pred",
+#'   folder2    = "path/to/pred",
+#'   output_dir = "path/to/diffs",
+#'   species1   = "NOGA",
+#'   model1     = "dsm_nb_allpred",
+#'   model2     = "dsm_nb_depth_only",
+#'   season1    = "Winter"
+#' )
+#' }
+#' @export
+compare_predictions <- function(
+  folder1,
+  folder2,
+  output_dir = NULL,
+  species1   = NULL,
+  model1     = NULL,
+  species2   = NULL,
+  model2     = NULL,
+  cellsize   = NULL,
+  season1    = NULL,
+  season2    = NULL,
+  seasons    = NULL,
+  compare_cv = FALSE
+) {
+  checkmate::expect_string(folder1, min.chars = 1)
+  checkmate::expect_string(folder2, min.chars = 1)
+  checkmate::expect_directory_exists(folder1)
+  checkmate::expect_directory_exists(folder2)
+  checkmate::expect_flag(compare_cv)
+  if (!is.null(species1)) checkmate::expect_string(species1, min.chars = 1)
+  if (!is.null(model1))   checkmate::expect_string(model1,   min.chars = 1)
+  if (!is.null(species2)) checkmate::expect_string(species2, min.chars = 1)
+  if (!is.null(model2))   checkmate::expect_string(model2,   min.chars = 1)
+  if (!is.null(cellsize)) checkmate::expect_string(cellsize, min.chars = 1)
+  if (!is.null(season1))  checkmate::expect_string(season1,  min.chars = 1)
+  if (!is.null(season2))  checkmate::expect_string(season2,  min.chars = 1)
+  if (!is.null(seasons))  checkmate::expect_character(seasons, min.len = 1)
+  if (!is.null(output_dir))
+    checkmate::expect_string(output_dir, min.chars = 1)
+
+  seasonal_mode <- is.null(season1)
+  season_filter <- if (seasonal_mode) seasons else season1
+
+  candidates <- .discover_pred_files(
+    folder          = folder1,
+    species_filter  = species1,
+    model_filter    = model1,
+    cellsize_filter = cellsize,
+    season_filter   = season_filter,
+    cv              = compare_cv
+  )
+
+  if (length(candidates) == 0)
+    stop("No matching prediction files found in folder1.")
+
+  pairs <- list()
+  for (cand in candidates) {
+    s2   <- if (!is.null(species2)) species2 else cand$species
+    m2   <- if (!is.null(model2))   model2   else cand$model
+    sea2 <- if (!seasonal_mode) {
+              if (!is.null(season2)) season2 else season1
+            } else {
+              cand$season
+            }
+
+    path2 <- .find_matching_file(
+      folder   = folder2,
+      species  = s2,
+      season   = sea2,
+      model    = m2,
+      cellsize = cand$cellsize,
+      cv       = compare_cv
+    )
+
+    if (is.null(path2)) {
+      warning(sprintf(
+        "No match in folder2 for: species=%s season=%s model=%s cellsize=%s",
+        s2, sea2, m2, cand$cellsize
+      ))
+      next
+    }
+
+    pairs <- c(pairs, list(list(
+      path1    = cand$path,
+      path2    = path2,
+      species1 = cand$species,
+      season1  = cand$season,
+      model1   = cand$model,
+      cellsize = cand$cellsize,
+      species2 = s2,
+      season2  = sea2,
+      model2   = m2
+    )))
+  }
+
+  if (length(pairs) == 0)
+    stop("No matching file pairs found between folder1 and folder2.")
+
+  if (!is.null(output_dir)) create.dir.if.needed(output_dir)
+
+  stats_rows  <- list()
+  saved_files <- character(0)
+
+  for (pair in pairs) {
+    message(sprintf("Comparing:\n  %s\n  %s", pair$path1, pair$path2))
+
+    r1 <- terra::rast(pair$path1)
+    r2 <- terra::rast(pair$path2)
+
+    terra::compareGeom(r1, r2, stopiffalse = TRUE)
+
+    na1 <- is.na(terra::values(r1))
+    na2 <- is.na(terra::values(r2))
+    if (!all(na1 == na2))
+      stop(sprintf("NA masks differ between\n  %s\n  %s",
+                   pair$path1, pair$path2))
+
+    v1 <- as.vector(terra::values(r1, na.rm = TRUE))
+    v2 <- as.vector(terra::values(r2, na.rm = TRUE))
+    d  <- v1 - v2
+
+    stats_rows <- c(stats_rows, list(data.frame(
+      species1    = pair$species1,
+      season1     = pair$season1,
+      model1      = pair$model1,
+      species2    = pair$species2,
+      season2     = pair$season2,
+      model2      = pair$model2,
+      mean_r1     = mean(v1),
+      min_r1      = min(v1),
+      max_r1      = max(v1),
+      mean_r2     = mean(v2),
+      min_r2      = min(v2),
+      max_r2      = max(v2),
+      mean_diff   = mean(d),
+      min_diff    = min(d),
+      max_diff    = max(d),
+      median_diff = median(d),
+      sd_diff     = sd(d),
+      pearson_r   = cor(v1, v2, method = "pearson")
+    )))
+
+    if (!is.null(output_dir)) {
+      diff_r    <- r1 - r2
+      diff_path <- file.path(output_dir, sprintf(
+        "diff.%s.%s.%s.vs.%s.%s.%s.%s.tif",
+        pair$species1, pair$season1, pair$model1,
+        pair$species2, pair$season2, pair$model2,
+        pair$cellsize
+      ))
+      terra::writeRaster(diff_r, diff_path, datatype = "FLT4S",
+                         overwrite = TRUE)
+      message(sprintf("Saved: %s", diff_path))
+      saved_files <- c(saved_files, diff_path)
+    }
+  }
+
+  stats_df <- dplyr::bind_rows(stats_rows)
+  message("\nComparison summary:")
+  message(paste(capture.output(print(stats_df)), collapse = "\n"))
+
+  invisible(list(stats = stats_df, files = saved_files))
+}
+
 #' Copy a species prediction HTML summary to the versioned predictions folder
 #'
 #' Copies the HTML report for the final model of \code{spec} into
