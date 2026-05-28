@@ -2771,6 +2771,47 @@ get.final.variance.name <- function(spec, season){
   records
 }
 
+# Build a leaflet map of a difference raster using a diverging blue-white-red
+# palette centred on zero (blue = r2 > r1, red = r1 > r2).
+.compare_pred_map <- function(diff_r, pair, compare_cv) {
+  d_vals  <- as.vector(terra::values(diff_r, na.rm = TRUE))
+  max_abs <- max(abs(d_vals))
+  if (max_abs == 0) max_abs <- 1
+
+  pal <- leaflet::colorNumeric(
+    palette  = c("blue", "white", "red"),
+    domain   = c(-max_abs, max_abs),
+    na.color = "transparent"
+  )
+
+  r_wgs84 <- terra::project(diff_r, "EPSG:4326")
+  r_rast  <- raster::raster(r_wgs84)
+
+  title <- sprintf(
+    "%s %s %s<br>vs %s %s %s%s",
+    pair$species1, pair$season1, pair$model1,
+    pair$species2, pair$season2, pair$model2,
+    if (compare_cv) " (CV)" else ""
+  )
+
+  leaflet::leaflet() %>%
+    leaflet::addTiles(
+      options = leaflet::tileOptions(updateWhenZooming = FALSE,
+                                     updateWhenIdle    = FALSE)
+    ) %>%
+    leaflet::addRasterImage(r_rast, colors = pal, opacity = 0.8) %>%
+    leaflet::addLegend(
+      pal     = pal,
+      values  = raster::values(r_rast),
+      title   = title,
+      opacity = 1
+    ) %>%
+    leaflet::addScaleBar(
+      position = "bottomright",
+      options  = leaflet::scaleBarOptions(imperial = FALSE)
+    )
+}
+
 # Find the first file in folder whose parsed components match exactly.
 # Returns the file path, or NULL if not found.
 .find_matching_file <- function(folder, species, season, model,
@@ -2842,6 +2883,10 @@ get.final.variance.name <- function(spec, season){
 #' @param compare_cv Logical. If \code{TRUE}, compare coefficient-of-variation
 #'   rasters (\code{*_CV} files) instead of density rasters. Default
 #'   \code{FALSE}.
+#' @param plot Logical. If \code{TRUE}, produce an interactive leaflet map for
+#'   each comparison using a diverging blue–white–red palette centred on zero
+#'   (blue = second raster higher, red = first raster higher). Default
+#'   \code{FALSE}.
 #' @return A named list returned invisibly:
 #'   \describe{
 #'     \item{\code{$stats}}{Data frame with one row per comparison. Columns:
@@ -2852,6 +2897,8 @@ get.final.variance.name <- function(spec, season){
 #'       \code{median_diff}, \code{sd_diff}, \code{pearson_r}.}
 #'     \item{\code{$files}}{Character vector of saved difference raster
 #'       paths.}
+#'     \item{\code{$maps}}{Named list of leaflet map objects, one per
+#'       comparison (empty when \code{plot = FALSE}).}
 #'   }
 #' @examples
 #' \dontrun{
@@ -2892,7 +2939,8 @@ compare_predictions <- function(
   season1    = NULL,
   season2    = NULL,
   seasons    = NULL,
-  compare_cv = FALSE
+  compare_cv = FALSE,
+  plot       = FALSE
 ) {
   checkmate::expect_string(folder1, min.chars = 1)
   checkmate::expect_string(folder2, min.chars = 1)
@@ -2909,6 +2957,7 @@ compare_predictions <- function(
   if (!is.null(seasons))  checkmate::expect_character(seasons, min.len = 1)
   if (!is.null(output_dir))
     checkmate::expect_string(output_dir, min.chars = 1)
+  checkmate::expect_flag(plot)
 
   seasonal_mode <- is.null(season1)
   season_filter <- if (seasonal_mode) seasons else season1
@@ -2973,6 +3022,7 @@ compare_predictions <- function(
   timestamp   <- format(Sys.time(), "%Y%m%d_%H%M%S")
   stats_rows  <- list()
   saved_files <- character(0)
+  maps        <- list()
 
   for (pair in pairs) {
     message(sprintf("Comparing:\n  %s\n  %s", pair$path1, pair$path2))
@@ -3013,8 +3063,11 @@ compare_predictions <- function(
       pearson_r   = cor(v1, v2, method = "pearson")
     )))
 
+    if (!is.null(output_dir) || plot) {
+      diff_r <- r1 - r2
+    }
+
     if (!is.null(output_dir)) {
-      diff_r    <- r1 - r2
       diff_path <- file.path(output_dir, sprintf(
         "diff.%s.%s.%s.vs.%s.%s.%s.%s.%s.tif",
         pair$species1, pair$season1, pair$model1,
@@ -3026,13 +3079,22 @@ compare_predictions <- function(
       message(sprintf("Saved: %s", diff_path))
       saved_files <- c(saved_files, diff_path)
     }
+
+    if (plot) {
+      map_key       <- sprintf(
+        "%s.%s.%s.vs.%s.%s.%s",
+        pair$species1, pair$season1, pair$model1,
+        pair$species2, pair$season2, pair$model2
+      )
+      maps[[map_key]] <- .compare_pred_map(diff_r, pair, compare_cv)
+    }
   }
 
   stats_df <- dplyr::bind_rows(stats_rows)
   message("\nComparison summary:")
   message(paste(capture.output(print(stats_df)), collapse = "\n"))
 
-  invisible(list(stats = stats_df, files = saved_files))
+  invisible(list(stats = stats_df, files = saved_files, maps = maps))
 }
 
 #' Copy a species prediction HTML summary to the versioned predictions folder

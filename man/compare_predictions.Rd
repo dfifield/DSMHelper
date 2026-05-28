@@ -16,7 +16,8 @@ compare_predictions(
   season1 = NULL,
   season2 = NULL,
   seasons = NULL,
-  compare_cv = FALSE
+  compare_cv = FALSE,
+  plot = FALSE
 )
 }
 \arguments{
@@ -61,6 +62,11 @@ discovered in \code{folder1}.}
 \item{compare_cv}{Logical. If \code{TRUE}, compare coefficient-of-variation
 rasters (\code{*_CV} files) instead of density rasters. Default
 \code{FALSE}.}
+
+\item{plot}{Logical. If \code{TRUE}, produce an interactive leaflet map for
+each comparison using a diverging blue–white–red palette centred on zero
+(blue = second raster higher, red = first raster higher). Default
+\code{FALSE}.}
 }
 \value{
 A named list returned invisibly:
@@ -73,6 +79,8 @@ A named list returned invisibly:
 \code{median_diff}, \code{sd_diff}, \code{pearson_r}.}
 \item{\code{$files}}{Character vector of saved difference raster
 paths.}
+\item{\code{$maps}}{Named list of leaflet map objects, one per
+comparison (empty when \code{plot = FALSE}).}
 }
 }
 \description{
