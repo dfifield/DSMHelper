@@ -2970,6 +2970,7 @@ compare_predictions <- function(
 
   if (!is.null(output_dir)) create.dir.if.needed(output_dir)
 
+  timestamp   <- format(Sys.time(), "%Y%m%d_%H%M%S")
   stats_rows  <- list()
   saved_files <- character(0)
 
@@ -3015,10 +3016,10 @@ compare_predictions <- function(
     if (!is.null(output_dir)) {
       diff_r    <- r1 - r2
       diff_path <- file.path(output_dir, sprintf(
-        "diff.%s.%s.%s.vs.%s.%s.%s.%s.tif",
+        "diff.%s.%s.%s.vs.%s.%s.%s.%s.%s.tif",
         pair$species1, pair$season1, pair$model1,
         pair$species2, pair$season2, pair$model2,
-        pair$cellsize
+        pair$cellsize, timestamp
       ))
       terra::writeRaster(diff_r, diff_path, datatype = "FLT4S",
                          overwrite = TRUE)
