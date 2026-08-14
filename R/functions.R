@@ -338,10 +338,15 @@ create.survey.data <- function(raw.dat = NULL,
 
   # create watches
   message("Creating watches...")
+  # NB: WhatCount must be kept. The aerial watches built in 00.01 include it, so
+  # dropping it here leaves the ship/SOMEC watches one column short and the
+  # rbind() in combine_all_data fails with "numbers of columns of arguments do
+  # not match".
   keep_cols <- c("SurveyType", "TransectID", "Program", "CruiseID", "WatchID",
                  "ObserverName", "TransFarEdge", "DistMeth", "Date", "StartTime",
                  "EndTime", "LatStart", "LongStart", "LatEnd", "LongEnd",
-                 "WatchLenKm", "ObsHeight", "CalcDurMin", "TotalWidthKm")
+                 "WatchLenKm", "ObsHeight", "CalcDurMin", "TotalWidthKm",
+                 "WhatCount")
 
   # These three only needed for making transects
   if (create_transects)
@@ -349,17 +354,38 @@ create.survey.data <- function(raw.dat = NULL,
 
   watches <- raw.dat %>%
     dplyr::select(dplyr::all_of(keep_cols)) %>%
-    dplyr::mutate(Sample.Label = WatchID,
-                  TransectSides = 1) %>%
-    dplyr::distinct() %>%
-    dplyr::arrange(CruiseID, ObserverName, Date, StartTime)
+    dplyr::mutate(
+      Sample.Label = WatchID,
+      # For ECSAS, TransectSides is 1 for ship, and assigned elsewhere in
+      # Extract_data.Rmd for air. For SOMEC, both aerial and ship data pass
+      # through here and all aerial surveys are 2 sided whereas ship are 1.
+      TransectSides = dplyr::case_when(
+        dataset == "SOMEC" & SurveyType == "Aerial" ~ 2,
+        .default = 1)
+    ) %>%
+    dplyr::distinct()
 
-  # SOMEC data has multiple observers in the same watch (which I guess is ok)
-  if (dataset == "SOMEC") {
-    watches <- watches %>%
-      dplyr::select(-ObserverName) %>%
-      dplyr::distinct()
-  }
+  # Collapse watches recorded once per observer into a single row, keeping the
+  # observer names.
+  #
+  # NB: do NOT simply drop ObserverName for SOMEC. That was an earlier stopgap
+  # to make the watch data consistent, but it discards who observed and leaves
+  # the column absent entirely, so the ship/SOMEC watches no longer share a
+  # column set with the aerial ones and rbind() fails downstream.
+  watches <- watches %>%
+    dplyr::group_by(dplyr::across(-ObserverName)) %>%
+    dplyr::summarise(
+      ObserverName = paste(unique(ObserverName), collapse = ", "),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(CruiseID, Sample.Label, ObserverName, Date, StartTime)
+
+  # Make sure we didn't lose any watches while collapsing observers
+  missing_ids <- setdiff(raw.dat$WatchID, watches$WatchID)
+  if (length(missing_ids) != 0)
+    stop("create.survey.data: lost the following WatchIDs after collapsing ",
+         "watches with multiple observers: ",
+         paste(missing_ids, collapse = ", "))
 
   # make sure all data for a watch is consistent. Find rows with duplicate watchIDs
   # and remove these watches
