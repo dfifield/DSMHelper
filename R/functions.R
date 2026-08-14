@@ -1797,17 +1797,22 @@ st.write.if.any <- function(dat, dsn = ShapeDir, layer, what = "data",
 #' or survey type with no coverage of the study area, which would otherwise
 #' abort the knit partway through data extraction.
 #'
+#' Note the name deliberately does \strong{not} begin with \code{hist.}:
+#' \code{hist} is an S3 generic, so roxygen registers any \code{hist.<x>}
+#' function as a method for class \code{<x>} rather than exporting it, and it
+#' would then not be callable by name.
+#'
 #' @param x Numeric vector to plot.
 #' @param ... Further arguments passed to \code{\link[graphics]{hist}}.
 #' @return The value of \code{hist()} if drawn, otherwise
 #'   \code{invisible(NULL)}.
 #' @examples
 #' \dontrun{
-#' hist.if.any(numeric(0))  # no plot, no error
-#' hist.if.any(the.data$watches$WatchLenKm)
+#' draw.hist.if.any(numeric(0))  # no plot, no error
+#' draw.hist.if.any(the.data$watches$WatchLenKm)
 #' }
 #' @export
-hist.if.any <- function(x, ...) {
+draw.hist.if.any <- function(x, ...) {
   if (length(stats::na.omit(x)) == 0) {
     message("No data to plot - skipping histogram.")
     return(invisible(NULL))
