@@ -377,13 +377,31 @@ create.survey.data <- function(raw.dat = NULL,
   }
 
   # clip to study area
-  watches <- watches %>%
+  #
+  # NB: rmapshaper::ms_clip() throws "Not compatible with STRSXP: [type=list]"
+  # rather than returning an empty result when nothing overlaps, so check for
+  # overlap first. This happens for a whole dataset when the study area has no
+  # coverage by this survey type at all.
+  watch_pts <- watches %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
     sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
-    dplyr::select(WatchID) %>% # just keep WatchID
-    rmapshaper::ms_clip(study.area %>% sf::st_transform(sf::st_crs(4326))) %>%   # do the clipping -
-    dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
-    sf::st_transform(outproj)
+    dplyr::select(WatchID) # just keep WatchID
+  study_area_4326 <- study.area %>% sf::st_transform(sf::st_crs(4326))
+
+  if (nrow(sf::st_filter(watch_pts, study_area_4326)) == 0) {
+    warning(sprintf(
+      "create.survey.data: no %s watches overlap study.area - returning no watches",
+      dataset), immediate. = TRUE)
+    watches <- watch_pts %>%
+      dplyr::slice(0) %>%
+      dplyr::left_join(watches, by = "WatchID") %>%
+      sf::st_transform(outproj)
+  } else {
+    watches <- watch_pts %>%
+      rmapshaper::ms_clip(study_area_4326) %>%   # do the clipping -
+      dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
+      sf::st_transform(outproj)
+  }
 
 
   # Create transects: combine watches on on same day, same ship, same observer
@@ -410,46 +428,18 @@ create.survey.data <- function(raw.dat = NULL,
 
 
     if (saveshp) {
-      # Will whine about discarded datum and abbreviated field names until these
-      # warnings are removed from new rgdal.
-      layer.name <- paste0(file.prefix, "_transects.shp")
-      message(sprintf(
-        "Saving transects to shapefile '%s'",
-        file.path(ShapeDir, layer.name)
-      ))
-
-      suppressWarnings(
-        sf::st_write(
-          transects,
-          dsn = ShapeDir,
-          layer = layer.name,
-          driver = "ESRI Shapefile",
-          delete_layer = TRUE
-        )
-      )
+      st.write.if.any(transects,
+                      layer = paste0(file.prefix, "_transects.shp"),
+                      what = "transects")
     }
   }
 
 
   # Save watches as shapefile
   if (saveshp) {
-    # Will whine about discarded datum and abbreviated field names until these
-    # warnings are removed from new rgdal.
-    layer.name <- paste0(file.prefix, "_watches.shp")
-    message(sprintf(
-      "Saving watches to shapefile '%s'",
-      file.path(ShapeDir, layer.name)
-    ))
-
-    suppressWarnings(
-      sf::st_write(
-        watches,
-        dsn = ShapeDir,
-        layer = layer.name,
-        driver = "ESRI Shapefile",
-        delete_layer = TRUE
-      )
-    )
+    st.write.if.any(watches,
+                    layer = paste0(file.prefix, "_watches.shp"),
+                    what = "watches")
   }
 
   # no longer remember why this was desirable
@@ -487,8 +477,12 @@ create.survey.data <- function(raw.dat = NULL,
     ) %>%
     # Assign DistType (Need to do after filtering FlySwim for W or F),
     # and add FlockID if there isn't one
+    # NB: use seq_len(), not 1:nrow(). On 0 rows 1:nrow(.) is 1:0 == c(1, 0),
+    # a length-2 vector, which case_when() rejects against a length-0
+    # condition. all(is.na(x)) is TRUE for an empty vector, so this branch is
+    # *guaranteed* to be taken when there are no observations.
     dplyr::mutate(DistType = assign.dist.type(.),
-                  FlockID = dplyr::case_when(all(is.na(FlockID)) ~ 1:nrow(.),
+                  FlockID = dplyr::case_when(all(is.na(FlockID)) ~ seq_len(nrow(.)),
                                              TRUE ~ FlockID)) %>%
     dplyr::left_join(watches[, c("WatchID", "Sample.Label")], by = "WatchID") %>%
     dplyr::rename(object = FlockID,
@@ -557,33 +551,38 @@ create.survey.data <- function(raw.dat = NULL,
     warning("No observations left after filtering!", immediate. = TRUE)
 
   # Clip to study area
-  obs <- obs %>%
+  #
+  # NB: see the note on the watches clip above - ms_clip() errors rather than
+  # returning an empty result when nothing overlaps, so check for overlap
+  # first. Unlike the watches case this can fire even when the survey type does
+  # cover the study area, if it simply recorded no in-transect observations
+  # inside it.
+  obs_pts <- obs %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
     sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
-    dplyr::select(object) %>% # just keep WatchID
-    rmapshaper::ms_clip(study.area %>% sf::st_transform(sf::st_crs(4326))) %>%   # do the clipping -
-    dplyr::left_join(obs, by = "object") %>%  # add other cols back in
-    sf::st_transform(outproj)
+    dplyr::select(object) # just keep object
+  study_area_4326 <- study.area %>% sf::st_transform(sf::st_crs(4326))
+
+  if (nrow(sf::st_filter(obs_pts, study_area_4326)) == 0) {
+    warning(sprintf(
+      "create.survey.data: no %s observations overlap study.area - returning no observations",
+      dataset), immediate. = TRUE)
+    obs <- obs_pts %>%
+      dplyr::slice(0) %>%
+      dplyr::left_join(obs, by = "object") %>%
+      sf::st_transform(outproj)
+  } else {
+    obs <- obs_pts %>%
+      rmapshaper::ms_clip(study_area_4326) %>%   # do the clipping -
+      dplyr::left_join(obs, by = "object") %>%  # add other cols back in
+      sf::st_transform(outproj)
+  }
 
   # Save as shapefile
   if (saveshp) {
-    # Will whine about discarded datum and abbreviated field names until these
-    # warnings are removed from new rgdal.
-    layer.name <- paste0(file.prefix, "_obs.shp")
-    message(sprintf(
-      "Saving obs to shapefile '%s'",
-      file.path(ShapeDir, layer.name)
-    ))
-
-    suppressWarnings(
-      sf::st_write(
-        obs,
-        dsn = ShapeDir,
-        layer = layer.name,
-        driver = "ESRI Shapefile",
-        delete_layer = TRUE
-      )
-    )
+    st.write.if.any(obs,
+                    layer = paste0(file.prefix, "_obs.shp"),
+                    what = "obs")
   }
 
   ##### After all that, now just create a single distdata for use in distance
@@ -596,8 +595,14 @@ create.survey.data <- function(raw.dat = NULL,
     sf::st_drop_geometry() %>%
     droplevels
 
-  # Set dataset attribute
-  distdata$Dataset <- watches$Dataset <- dataset
+  # Set dataset attribute.
+  #
+  # NB: assigning a scalar into a column of a 0-row data frame errors with
+  # "replacement has 1 row, data has 0", so size the value to the number of
+  # rows. This keeps the column present (and correctly typed) on empty data so
+  # downstream rbind()/bind_rows() still line up.
+  distdata$Dataset <- rep(dataset, nrow(distdata))
+  watches$Dataset <- rep(dataset, nrow(watches))
 
   the.data <-
     if (create_transects) {
@@ -1528,6 +1533,61 @@ assign.season <- function(dat, season.def, datefield = "Date"){
 }
 
 
+#' Write an sf object to a shapefile, skipping empty ones
+#'
+#' Wrapper around \code{\link[sf]{st_write}} that skips the write when
+#' \code{dat} has no rows.  Writing an empty \code{sf} object fails for line
+#' geometries because an empty \code{sfc} carries no geometry type for the ESRI
+#' Shapefile driver to declare, and an empty layer is not useful in any case.
+#' This arises whenever a study area has no coverage by one survey type.
+#'
+#' Note that when the write is skipped any pre-existing layer of the same name
+#' is left untouched, so a stale file from an earlier run may remain on disk.
+#' The skip is reported via \code{message()} so this is visible in the knitted
+#' output.
+#'
+#' @param dat \code{sf} object to write.
+#' @param dsn Directory path for the output shapefile.
+#' @param layer Layer name (filename without extension) for the shapefile.
+#' @param what Short description of the contents used in the messages
+#'   (e.g. \code{"watches"}).
+#' @param quiet If \code{TRUE}, suppress the "Saving ..." message.
+#' @return \code{invisible(TRUE)} if written, \code{invisible(FALSE)} if
+#'   skipped.
+#' @export
+st.write.if.any <- function(dat, dsn = ShapeDir, layer, what = "data",
+                            quiet = FALSE) {
+
+  checkmate::expect_class(dat, "sf")
+  checkmate::expect_string(layer)
+  checkmate::expect_string(what)
+
+  if (nrow(dat) == 0) {
+    message(sprintf(
+      paste0("No %s to save - skipping shapefile '%s'. Any existing layer of ",
+             "that name is now stale."),
+      what, file.path(dsn, layer)))
+    return(invisible(FALSE))
+  }
+
+  if (!quiet)
+    message(sprintf("Saving %s to shapefile '%s'", what, file.path(dsn, layer)))
+
+  # Will whine about discarded datum and abbreviated field names until these
+  # warnings are removed from new rgdal.
+  suppressWarnings(
+    sf::st_write(
+      dat,
+      dsn = dsn,
+      layer = layer,
+      driver = "ESRI Shapefile",
+      delete_layer = TRUE
+    )
+  )
+  invisible(TRUE)
+}
+
+
 #' Convert a data frame to sf and write as a shapefile
 #'
 #' @param df Data frame to convert.
@@ -1793,13 +1853,7 @@ create.segdata <- function(the.data,
   if (verbose) message("Saving results")
   save(segdata, file = segdatloc)
 
-  sf::st_write(
-    segdata,
-    dsn = ShapeDir,
-    layer = "segdata.shp",
-    driver = "ESRI Shapefile",
-    delete_layer = TRUE
-  )
+  st.write.if.any(segdata, layer = "segdata.shp", what = "segdata")
 
   if (verbose) print("Done.")
   segdata
@@ -5154,6 +5208,31 @@ dsm.pred <-
     # Extract model and create a subset column in predgrid from platform
     # Might have been just able to use platform.
     model <- mod.res[[modname]]
+
+    # Reconcile predgrid platform levels against the ones the model was
+    # actually fitted with.
+    #
+    # These are derived independently: segdata$platform levels come from the
+    # data (as.factor() in create.dsm.data), whereas the predgrid copies come
+    # from the *declared* global ddftype_to_platform in
+    # create.seasonal.predgrid(). They agree as long as every declared platform
+    # occurs in the data, but a study area covered by only one survey type (or
+    # a species never recorded in one behaviour class) can break that, and
+    # predict() would then fail deep inside mgcv with "factor has new levels".
+    # Fail here instead, where the cause is obvious.
+    mod_levels <- model$xlevels$platform
+    if (!is.null(mod_levels)) {
+      extra <- setdiff(unique(as.character(predgrid$platform)), mod_levels)
+      if (length(extra) > 0)
+        stop(sprintf(
+          paste0("dsm.pred: predgrid has platform level(s) %s that model '%s' ",
+                 "was not fitted with (model has %s). The predgrid is built ",
+                 "from the global ddftype_to_platform, so prune it to the ",
+                 "survey types actually present."),
+          paste(sQuote(extra), collapse = ", "), modname,
+          paste(sQuote(mod_levels), collapse = ", ")))
+    }
+
     ret <- predgrid %>%
       dplyr::mutate(subset = platform)
 
@@ -5646,15 +5725,26 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   conv[mingood] <- NA # ignore the actuall good ddf that the others point to
   no_obs_ddfs <- which(conv == mingood)
 
-  # get aerial and ship initial segdata sizes and name them "A" and "S"
+  # Get survey type of each ddf. This requires that the order of ddftype_levels
+  # and def.ddf.list have the same order.
+  survey_type_index <- substr(ddftype_levels, 1,1)
+
+  # get aerial and ship initial segdata sizes and name them "A" and "S".
+  #
+  # NB: table() only returns entries for survey types actually present in the
+  # data, so a study area covered by only one survey type (eg. one with no
+  # aerial coverage at all) leaves sizes["A"] as NA. That NA propagates through
+  # sum() into tot_no_obs_ddf_segs, making the check below evaluate to NA and
+  # abort with "missing value where TRUE/FALSE needed". Build the vector over
+  # every survey type implied by ddftype_levels so absent ones are 0, not NA.
+  expected_types <- unique(survey_type_index)
   sizes <- table(init_segdata$SurveyType) %>%
     setNames(names(.) %>% substr(1,1))
+  sizes <- setNames(as.vector(sizes[expected_types]), expected_types)
+  sizes[is.na(sizes)] <- 0
 
-  # Get survey type of each ddf, and then get the number of segemnts that had a
-  # ddf with no obs that have used min(newddfs) as their ddfobj.
-  # This requires that the order of ddftype_levels and def.ddf.list have the
-  # same order.
-  survey_type_index <- substr(ddftype_levels, 1,1)
+  # Get the number of segments that had a ddf with no obs that have used
+  # min(newddfs) as their ddfobj.
   tot_no_obs_ddf_segs<- sum(sizes[survey_type_index[no_obs_ddfs]])
 
   # The number of segments with ddfobj equal to mingodd should equal the number
