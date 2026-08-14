@@ -323,17 +323,17 @@ create.survey.data <- function(raw.dat = NULL,
                                intransect.only = TRUE) {
 
 
-  coll = makeAssertCollection()
+  coll = checkmate::makeAssertCollection()
   checkmate::assert_data_frame(raw.dat, add = coll)
-  assert(
+  checkmate::assert(
     checkmate::check_class(study.area, "sf"),
     add = coll
   )
-  assert(
+  checkmate::assert(
     checkmate::check_string(file.prefix),
     add = coll
   )
-  reportAssertions(coll)
+  checkmate::reportAssertions(coll)
 
 
   # create watches
@@ -3030,7 +3030,7 @@ compare_predictions <- function(
     r1 <- terra::rast(pair$path1)
     r2 <- terra::rast(pair$path2)
 
-    terra::compareGeom(r1, r2, stopiffalse = TRUE)
+    terra::compareGeom(r1, r2, stopOnError = TRUE)
 
     na1 <- is.na(terra::values(r1))
     na2 <- is.na(terra::values(r2))
