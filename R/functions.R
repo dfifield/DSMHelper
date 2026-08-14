@@ -5879,6 +5879,26 @@ create.segdata.copy <- function(df.mod.spec, init_segdata) {
 #' @export
 create.dsm.data <- function(species, df.mod.specs, init_segdata) {
 
+  # The ddfobj bookkeeping below turns each spec's ddftype factor into an
+  # integer (augment.distdata) and indexes conv/def.ddf.list with it, so the
+  # specs' factor levels must be exactly the current ddftype_levels.
+  #
+  # They diverge whenever ddftype_levels changes - most easily by pruning to
+  # the survey types present (prune.ddf.globals) - while the fitted ddfs saved
+  # in <species>_dfModList.rda still carry the old levels. The symptom is an
+  # inscrutable "Something went wrong assigning ddfobjs" further down, so check
+  # up front and say what to do about it.
+  spec_levels <- unique(unlist(lapply(df.mod.specs, function(s) levels(s$ddftype))))
+  if (!is.null(spec_levels) && !identical(spec_levels, ddftype_levels))
+    stop(sprintf(
+      paste0("create.dsm.data: the fitted ddf specs use ddftype levels (%s) ",
+             "that differ from the current ddftype_levels (%s). The saved ddfs ",
+             "are stale - re-run 01.03_Do_final_ddf_fitting.Rmd for '%s' so the ",
+             "ddfs are refitted against the current ddftypes."),
+      paste(spec_levels, collapse = ", "),
+      paste(ddftype_levels, collapse = ", "),
+      species))
+
   #### Create distdata ---------------------
 
   # Create the observation data that will be passed to dsm(). Note that some of
