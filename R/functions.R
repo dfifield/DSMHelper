@@ -234,7 +234,9 @@ check.distdata.cols <- function(data) {
 #' @param filename Name of the output CSV file.
 #' @param ... Additional arguments passed to
 #'   \code{ECSAS.find.suspicious.posn()}.
-#' @return Data frame of suspicious watches, or \code{NULL} if none found.
+#' @return Data frame of suspicious watches; a 0-row data frame if none were
+#'   found (previously \code{NULL}, which made callers such as
+#'   \code{table(probs$Program)} fail with "nothing to tabulate").
 #' @export
 check.problem.data = function(alldat,
                               rel.folder,
@@ -248,7 +250,9 @@ check.problem.data = function(alldat,
   probs <- ECSASconnect::ECSAS.find.suspicious.posn(alldat, leave = leave, ...) %>%
     dplyr::mutate(prev_fixed = WatchID %in% fixed_db)
 
-  if (nrow(probs) > 1) {
+  # NB: > 0, not > 1. With exactly one problem watch the old test took the
+  # "none found" branch, silently discarding that watch and reporting none.
+  if (nrow(probs) > 0) {
     message (sprintf("%d problem watches found. %d of these were flagged as previously fixed in db",
                      nrow(probs), sum(probs$prev_fixed)))
 
@@ -269,7 +273,8 @@ check.problem.data = function(alldat,
                     prev_fixed, dist_dr_km, dist_geo_km, dist_diff_km, pct_diff) %T>%
       readr::write_csv(file = here::here(rel.folder, filename))
   } else {
-    probs <- NULL
+    # Leave probs as the 0-row data frame rather than setting it to NULL, so
+    # callers can use nrow()/table() on the result without special-casing.
 
     # None found - clean up old files
     message("No problem watches found.")
@@ -877,6 +882,146 @@ get.behav <- function(nm) {
 get.dist_type <- function(nm) {
   parse.df.name(nm)$dist_type
 }
+
+#' Determine which survey types a dataset actually contains
+#'
+#' Returns the distinct, sorted \code{SurveyType} values present in \code{dat}.
+#' Most study areas are covered by both ship and aerial surveys, but some are
+#' covered by only one (for example a study area no aerial survey has ever
+#' flown), in which case the DDF types for the absent survey type have no data
+#' at all and should be pruned - see \code{\link{prune.ddf.globals}}.
+#'
+#' @param dat Data frame (typically \code{the.data$watches}) with a
+#'   \code{SurveyType} column.
+#' @return Character vector of the survey types present, sorted.
+#' @examples
+#' \dontrun{
+#' get.survey.types(the.data$watches)
+#' #> [1] "Ship"
+#' }
+#' @export
+get.survey.types <- function(dat) {
+
+  checkmate::expect_data_frame(dat)
+  checkmate::expect_names(names(dat), must.include = "SurveyType")
+
+  types <- dat$SurveyType %>%
+    as.character() %>%
+    stats::na.omit() %>%
+    unique() %>%
+    sort()
+
+  if (length(types) == 0)
+    stop("get.survey.types: no non-NA SurveyType values found.")
+
+  types
+}
+
+
+#' Prune the DDF globals to the survey types actually present
+#'
+#' \code{ddftype_levels}, \code{def.ddf.list} and \code{ddftype_to_platform}
+#' each enumerate all combinations of survey type, behaviour and distance
+#' availability, and are coupled \strong{positionally} - element \emph{i} of
+#' each refers to the same DDF type (see the warning in
+#' \code{analysis settings.R} that they must be listed in the same order).
+#' When a study area has no coverage by one survey type, that type's DDF types
+#' have no observations and no segments, and carrying them forward creates
+#' empty result folders, fails final DDF fitting, and trips the segment
+#' bookkeeping in \code{\link{create.dsm.data}}.
+#'
+#' This prunes all three together, by position, so they cannot drift apart.
+#' Pruning is a no-op when every survey type is present.
+#'
+#' Because the absent survey type contributes no segments, dropping its DDF
+#' types yields the same \code{segdata} as keeping them as empty copies - the
+#' change is structural, not statistical.
+#'
+#' @param survey.types Character vector of survey types present, as returned by
+#'   \code{\link{get.survey.types}} (e.g. \code{c("Aerial", "Ship")}).
+#' @param ddftype_levels Character vector of DDF type codes, whose first
+#'   character is the survey type initial (e.g. \code{"SWD"}).
+#' @param def.ddf.list Named list of default DDF specs, in the same order as
+#'   \code{ddftype_levels}.
+#' @param ddftype_to_platform Named character vector mapping DDF type to
+#'   platform, named by \code{ddftype_levels}.
+#' @param quiet If \code{TRUE}, suppress the message reporting what was pruned.
+#' @return Named list with the pruned \code{ddftype_levels},
+#'   \code{def.ddf.list} and \code{ddftype_to_platform}.
+#' @examples
+#' \dontrun{
+#' pruned <- prune.ddf.globals(c("Ship"), ddftype_levels, def.ddf.list,
+#'                             ddftype_to_platform)
+#' pruned$ddftype_levels
+#' #> [1] "SWD" "SFD" "SWN" "SFN"
+#' }
+#' @export
+prune.ddf.globals <- function(survey.types,
+                              ddftype_levels,
+                              def.ddf.list,
+                              ddftype_to_platform,
+                              quiet = FALSE) {
+
+  checkmate::expect_character(survey.types, min.len = 1, any.missing = FALSE)
+  checkmate::expect_character(ddftype_levels, min.len = 1, any.missing = FALSE)
+  checkmate::expect_list(def.ddf.list, min.len = 1)
+  checkmate::expect_character(ddftype_to_platform, min.len = 1)
+  checkmate::expect_flag(quiet)
+
+  # The three globals are coupled positionally, so they must line up before we
+  # prune by position.
+  if (length(def.ddf.list) != length(ddftype_levels))
+    stop(sprintf(
+      paste0("prune.ddf.globals: def.ddf.list has %d entries but ",
+             "ddftype_levels has %d. They must correspond one-to-one, in order."),
+      length(def.ddf.list), length(ddftype_levels)))
+
+  if (!identical(names(ddftype_to_platform), ddftype_levels))
+    stop(paste0("prune.ddf.globals: names(ddftype_to_platform) must be exactly ",
+                "ddftype_levels, in the same order."))
+
+  # A ddftype belongs to a survey type if its first character matches that
+  # survey type's initial ("S" for Ship, "A" for Aerial).
+  known_initials <- unique(substr(ddftype_levels, 1, 1))
+  wanted_initials <- unique(substr(survey.types, 1, 1))
+
+  unknown <- setdiff(wanted_initials, known_initials)
+  if (length(unknown) > 0)
+    stop(sprintf(
+      "prune.ddf.globals: survey type(s) %s do not match any ddftype in %s.",
+      paste(sQuote(survey.types[substr(survey.types, 1, 1) %in% unknown]),
+            collapse = ", "),
+      paste(sQuote(ddftype_levels), collapse = ", ")))
+
+  keep <- substr(ddftype_levels, 1, 1) %in% wanted_initials
+
+  if (!any(keep))
+    stop("prune.ddf.globals: pruning would remove every ddftype.")
+
+  dropped <- ddftype_levels[!keep]
+
+  if (!quiet) {
+    if (length(dropped) == 0) {
+      message(sprintf("Survey types present: %s. All %d ddftypes retained.",
+                      paste(survey.types, collapse = ", "),
+                      length(ddftype_levels)))
+    } else {
+      message(sprintf(
+        paste0("Survey types present: %s. Dropping %d ddftype(s) with no ",
+               "possible data: %s."),
+        paste(survey.types, collapse = ", "),
+        length(dropped),
+        paste(dropped, collapse = ", ")))
+    }
+  }
+
+  list(
+    ddftype_levels = ddftype_levels[keep],
+    def.ddf.list = def.ddf.list[keep],
+    ddftype_to_platform = ddftype_to_platform[keep]
+  )
+}
+
 
 #' Process all DDF specs for a given species
 #'
@@ -1585,6 +1730,32 @@ st.write.if.any <- function(dat, dsn = ShapeDir, layer, what = "data",
     )
   )
   invisible(TRUE)
+}
+
+
+#' Draw a histogram, skipping empty data
+#'
+#' \code{\link[graphics]{hist}} errors with "invalid number of 'breaks'" on a
+#' zero-length vector.  That happens for any diagnostic histogram of a dataset
+#' or survey type with no coverage of the study area, which would otherwise
+#' abort the knit partway through data extraction.
+#'
+#' @param x Numeric vector to plot.
+#' @param ... Further arguments passed to \code{\link[graphics]{hist}}.
+#' @return The value of \code{hist()} if drawn, otherwise
+#'   \code{invisible(NULL)}.
+#' @examples
+#' \dontrun{
+#' hist.if.any(numeric(0))  # no plot, no error
+#' hist.if.any(the.data$watches$WatchLenKm)
+#' }
+#' @export
+hist.if.any <- function(x, ...) {
+  if (length(stats::na.omit(x)) == 0) {
+    message("No data to plot - skipping histogram.")
+    return(invisible(NULL))
+  }
+  graphics::hist(x, ...)
 }
 
 
