@@ -883,6 +883,63 @@ get.dist_type <- function(nm) {
   parse.df.name(nm)$dist_type
 }
 
+#' Drop DDF spec entries that no longer correspond to a live ddftype
+#'
+#' \code{01.02_Create_final_ddf_model_specs.Rmd} records the analyst's final
+#' DDF choices by assigning into \code{df.mod.list[[species]]$<ddfname>}.  When
+#' the ddftypes have been pruned to the survey types actually present (see
+#' \code{\link{prune.ddf.globals}}), assigning to a name that is no longer in
+#' the list silently \emph{appends} a new element rather than erroring, which
+#' breaks the positional correspondence between \code{def.ddf.list} and
+#' \code{ddftype_levels} that the rest of the pipeline relies on.
+#'
+#' This drops any such entries, reporting what was removed, so the hand-written
+#' per-species blocks can be left untouched across SubProjects with different
+#' survey coverage.
+#'
+#' @param df.mod.list Named list (by species) of named lists of DDF specs.
+#' @param valid.names Character vector of the DDF spec names that should be
+#'   retained; defaults to the project global \code{def.ddf.list}'s names.
+#' @return \code{df.mod.list} with out-of-date entries removed.
+#' @examples
+#' \dontrun{
+#' df.mod.list <- prune.df.mod.list(df.mod.list)
+#' save(df.mod.list, file = dfModlistLoc)
+#' }
+#' @export
+prune.df.mod.list <- function(df.mod.list, valid.names = names(def.ddf.list)) {
+
+  checkmate::expect_list(df.mod.list, min.len = 1)
+  checkmate::expect_character(valid.names, min.len = 1, any.missing = FALSE)
+
+  dropped <- list()
+
+  df.mod.list <- df.mod.list %>%
+    purrr::imap(function(specs, species) {
+      extra <- setdiff(names(specs), valid.names)
+      if (length(extra) > 0) {
+        dropped[[species]] <<- extra
+        specs <- specs[names(specs) %in% valid.names]
+      }
+      specs
+    })
+
+  if (length(dropped) > 0) {
+    warning(sprintf(
+      paste0("prune.df.mod.list: dropped ddf spec(s) for ddftypes that are ",
+             "not present in this study area:\n%s\nThis is expected when a ",
+             "SubProject's study area has no coverage by one survey type - ",
+             "the per-species blocks still set them, and they are ignored."),
+      paste(sprintf("  %s: %s", names(dropped),
+                    purrr::map_chr(dropped, paste, collapse = ", ")),
+            collapse = "\n")),
+      immediate. = TRUE)
+  }
+
+  df.mod.list
+}
+
+
 #' Determine which survey types a dataset actually contains
 #'
 #' Returns the distinct, sorted \code{SurveyType} values present in \code{dat}.
@@ -5284,6 +5341,27 @@ run.dsm.model <- function(mod.def,
 
     # Adjust formula
     form <- adjust.time.covars(mod.def$formula[[1]], segment.data)
+
+    # A factor needs at least two levels to be used as a model term. mgcv would
+    # otherwise fail with the opaque "contrasts can be applied only to factors
+    # with 2 or more levels", so check here where the cause can be named.
+    #
+    # Note this does NOT fire merely because a study area has only one survey
+    # type: platform is bird behaviour (W/F), not survey type, so it keeps both
+    # levels in that case. It fires when a species was never recorded in one
+    # behaviour class, which would break every candidate model that has a
+    # platform term (currently all of them).
+    if ("platform" %in% all.vars(form) && !is.null(segment.data$platform)) {
+      plat_levels <- unique(stats::na.omit(as.character(segment.data$platform)))
+      if (length(plat_levels) < 2)
+        stop(sprintf(
+          paste0("run.dsm.model: model '%s' has a platform term but segdata ",
+                 "has only the platform level %s. A factor needs >= 2 levels. ",
+                 "This species has no observations in the other behaviour ",
+                 "class; use a model without a platform term (the _nofactor ",
+                 "variants in dsm.mod.specs) or drop this species."),
+          mod.def$modname, paste(sQuote(plat_levels), collapse = ", ")))
+    }
 
     # Call dsm(). Note the list indexing for formula and family since these are
     # list columns in mod.def. Temporarily disable warnings about partial
