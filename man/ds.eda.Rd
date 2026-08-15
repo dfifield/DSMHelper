@@ -31,5 +31,5 @@ dataset/platform/behaviour combination.}
 }
 \description{
 Produces covariate-vs-distance plots for each variable listed in the DDF
-spec, dispatching to \code{\link{plot.covar}}.
+spec, dispatching to \code{\link{plot_covar}}.
 }

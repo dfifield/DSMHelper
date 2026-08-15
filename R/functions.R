@@ -1364,7 +1364,7 @@ do.det.fcn <- function(distdata,
 #' Distance sampling exploratory data analysis plots
 #'
 #' Produces covariate-vs-distance plots for each variable listed in the DDF
-#' spec, dispatching to \code{\link{plot.covar}}.
+#' spec, dispatching to \code{\link{plot_covar}}.
 #'
 #' @param distdata Data frame of observation data.
 #' @param species Character string species code; used in plot titles.
@@ -1396,7 +1396,7 @@ ds.eda <-
     # plot individual covars
     purrr::walk(
       vars,
-      plot.covar,
+      plot_covar,
       distdata = distdata,
       species = species,
       df.spec = df.spec,
@@ -1411,6 +1411,12 @@ ds.eda <-
 #' covariates), or a scatter plot with a linear smoother (for continuous
 #' covariates).
 #'
+#' Named with an underscore rather than the project's usual dot separator:
+#' \code{plot} is an S3 generic, so a function called \code{plot.covar} is
+#' registered by roxygen as a \code{plot} method for the (non-existent) class
+#' \code{"covar"} instead of being exported, and is then not callable by name.
+#' This takes a covariate \emph{name}, not an object, so it is not a method.
+#'
 #' @param covar Character string name of the covariate column to plot.
 #' @param distdata Data frame of observation data.
 #' @param species Character string species code; used in the plot title.
@@ -1419,7 +1425,7 @@ ds.eda <-
 #' @param suffix Character string appended to the plot title.
 #' @return \code{invisible(NULL)}, called for its side-effect (plot).
 #' @export
-plot.covar <-
+plot_covar <-
   function(covar = NULL,
            distdata = NULL,
            species = NULL,
@@ -4612,10 +4618,16 @@ get.dens.est <- function(dsm_final, predgrid) {
 #'
 #' \strong{Note: not currently used.}
 #'
+#' Named with an underscore rather than the project's usual dot separator:
+#' \code{print} is an S3 generic, so a function called \code{print.dens.est}
+#' is registered by roxygen as a \code{print} method for the (non-existent)
+#' class \code{"dens.est"} instead of being exported. Its argument is a plain
+#' named list, so it is not a method.
+#'
 #' @param densEst Named list as returned by \code{\link{get.dens.est}}.
 #' @return \code{invisible(NULL)}, called for its side-effect (printed output).
 #' @export
-print.dens.est <- function(densEst){
+print_dens_est <- function(densEst){
   cat("Density estimate:\n\n")
 
   cat("Approximate asymptotic confidence interval:\n")
