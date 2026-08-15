@@ -14,7 +14,7 @@
 #'   and \code{nWhatCount} (integer count) appended.
 #' @export
 get.what.counts <- function(row, watches){
-  wtch.ids <- str_split_fixed(row$Watches, ",", n = Inf) %>%
+  wtch.ids <- stringr::str_split_fixed(row$Watches, ",", n = Inf) %>%
     str_trim
   watches %<>% filter(WatchID %in% wtch.ids)
   stopifnot(length(wtch.ids) == nrow(watches))
@@ -127,41 +127,41 @@ plot_annual_effort <- function(transects, sa, sa_label = "study area", buf = 0.5
   checkmate::expect_number(buf, lower = 0, finite = TRUE)
   checkmate::expect_string(species)
 
-  sa_ll <- st_transform(sa, 4326) %>% st_make_valid()
+  sa_ll <- sf::st_transform(sa, 4326) %>% sf::st_make_valid()
 
   countries <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
 
-  transects_ll <- st_transform(transects, 4326) %>%
-    mutate(Year = lubridate::year(Date))
+  transects_ll <- sf::st_transform(transects, 4326) %>%
+    dplyr::mutate(Year = lubridate::year(Date))
 
   # concaveman polygons can fail s2 spherical validity; use planar GEOS instead
   old_s2 <- sf::sf_use_s2(FALSE)
-  transects_in_sa <- st_filter(transects_ll, sa_ll)
+  transects_in_sa <- sf::st_filter(transects_ll, sa_ll)
   sf::sf_use_s2(old_s2)
 
   effort_by_year <- transects_in_sa %>%
-    st_drop_geometry() %>%
-    group_by(Year) %>%
-    summarise(total_effort_km = sum(Effort, na.rm = TRUE),
-              n_transects = n())
+    sf::st_drop_geometry() %>%
+    dplyr::group_by(Year) %>%
+    dplyr::summarise(total_effort_km = sum(Effort, na.rm = TRUE),
+              n_transects = dplyr::n())
 
   print(knitr::kable(effort_by_year,
                      caption = paste("Annual effort within", sa_label)))
 
-  bbox <- st_bbox(sa_ll)
-  p_map <- ggplot() +
-    geom_sf(data = countries, fill = "grey85", color = "grey60", linewidth = 0.3) +
-    geom_sf(data = sa_ll, fill = NA, color = "blue", linewidth = 0.6) +
-    geom_sf(data = transects_in_sa, color = "red", linewidth = 0.7,
+  bbox <- sf::st_bbox(sa_ll)
+  p_map <- ggplot2::ggplot() +
+    ggplot2::geom_sf(data = countries, fill = "grey85", color = "grey60", linewidth = 0.3) +
+    ggplot2::geom_sf(data = sa_ll, fill = NA, color = "blue", linewidth = 0.6) +
+    ggplot2::geom_sf(data = transects_in_sa, color = "red", linewidth = 0.7,
             alpha = 1.0) +
-    facet_wrap(~ Year, ncol = 4) +
-    coord_sf(
+    ggplot2::facet_wrap(~ Year, ncol = 4) +
+    ggplot2::coord_sf(
       xlim = c(bbox["xmin"] - buf, bbox["xmax"] + buf),
       ylim = c(bbox["ymin"] - buf, bbox["ymax"] + buf)
     ) +
-    theme_bw() +
-    theme(axis.text = element_blank(), axis.ticks = element_blank()) +
-    labs(
+    ggplot2::theme_bw() +
+    ggplot2::theme(axis.text = ggplot2::element_blank(), axis.ticks = ggplot2::element_blank()) +
+    ggplot2::labs(
       title = paste(species, "- Annual effort distribution within", sa_label),
       caption = paste("Lines = transects within species study area (red outline).",
                       "\nNote: transects crossing the boundary are not yet clipped",
@@ -169,12 +169,12 @@ plot_annual_effort <- function(transects, sa, sa_label = "study area", buf = 0.5
     )
   print(p_map)
 
-  p_bar <- ggplot(effort_by_year, aes(x = factor(Year), y = total_effort_km)) +
-    geom_col(fill = "steelblue") +
-    labs(x = "Year", y = "Total effort (km)",
+  p_bar <- ggplot2::ggplot(effort_by_year, ggplot2::aes(x = factor(Year), y = total_effort_km)) +
+    ggplot2::geom_col(fill = "steelblue") +
+    ggplot2::labs(x = "Year", y = "Total effort (km)",
          title = paste(species, "- Total annual survey effort within", sa_label)) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    ggplot2::theme_bw() +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
   print(p_bar)
 
   invisible(effort_by_year)
@@ -416,11 +416,11 @@ create.survey.data <- function(raw.dat = NULL,
   # and same direction into transects.
   if (create_transects) {
     message("Creating transects...")
-    transects <- ECSAS.create.transects(sf::st_drop_geometry(watches)) %>%
+    transects <- ECSASconnect::ECSAS.create.transects(sf::st_drop_geometry(watches)) %>%
       sf::st_as_sf()
 
     # Modify watches and set the Sample.Label for each watch
-    watches %<>% ECSAS.add.sample.label(sf::st_drop_geometry(transects))
+    watches %<>% ECSASconnect::ECSAS.add.sample.label(sf::st_drop_geometry(transects))
 
     # Cconvert Watches list column in transects object into vector of watchID's
     # contained in each transect since st_write (and other downstream code?)
@@ -1152,7 +1152,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
       # XXX need to replace calculation of left with info from the aerial
       # transect for each observer??? Since it isn't really the smallest
       # distance if there are obs and it isn't really 0 if there are no obs.
-      df_final <- dummy_ddf(
+      df_final <- dsm::dummy_ddf(
         distdata$object %>%
           stringr::str_replace("[a-zA-Z_]+", "") %>%
           as.numeric(),
@@ -1169,7 +1169,7 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
       }
 
       # For ECSAS ship we have defined cutpoints and no left trunc
-      df_final <- dummy_ddf(
+      df_final <- dsm::dummy_ddf(
         distdata$object %>%
           stringr::str_replace("[a-zA-Z_]+", "") %>%
           as.numeric(),
@@ -1896,7 +1896,7 @@ rxtractogon.rast <-
     rast <- dat %>%
       t %>%                   # rxtracto returns matrix in odd order with x and y transposed and south to north so: transpose
       .[nrow(.):1, ] %>%       # ... and reverse order of rows
-      raster(
+      raster::raster(
         xmn = min(xcoord),
         xmx = max(xcoord),
         ymn = min(ycoord),
@@ -2024,7 +2024,7 @@ create.ncdf.rast <-
         xmx = max(x),
         ymn = min(y),
         ymx = max(y),
-        crs = CRS(inproj)
+        crs = sp::CRS(inproj)
       ) %>%
       raster::flip(direction = "y") %>%
       rast
@@ -2189,13 +2189,19 @@ rast.monthly.mean <- function(mnth, r){
   message("Getting monthly means for month ", mnth)
   r.mnths <- names(r) %>%
     stringr::str_split_fixed(stringr::fixed("."), n = Inf) %>%
-    extract(, 2) %>%
+    magrittr::extract(, 2) %>%
     stringr::str_split_fixed(stringr::fixed("-"), n = Inf) %>%
-    extract(, 2) %>%
+    magrittr::extract(, 2) %>%
     as.integer
 
   sel <- r[[which(r.mnths == mnth)]]
-  mean(sel)
+
+  # NB: terra::mean(), not bare mean(). mean() lives in base, so inside this
+  # package it shadows terra's S4 method for SpatRaster and silently returns
+  # NA ("argument is not numeric or logical") instead of the cell-wise mean
+  # raster. The caller then fails with "none of the elements of x are a
+  # SpatRaster". Same root cause as the terra::plot() note in create.ncdf.rast.
+  terra::mean(sel)
 }
 
 #' Produce a dotchart for a single column of a data frame
@@ -2521,15 +2527,15 @@ do.pred.map <-
     m <-
       leaflet::leaflet(
         data = dat,
-        options = leafletOptions(preferCanvas = TRUE)
+        options = leaflet::leafletOptions(preferCanvas = TRUE)
       ) %>%
       # Options help to speed up rendering. NOTE - dont't use addProviderTiles
       # if you want to save the map and reload in a subsequent R session - it won't
       # work.
       leaflet::addTiles(options = leaflet::tileOptions(updateWhenZooming = FALSE,
                                                        updateWhenIdle = FALSE)) %>%
-      addMapPane("density", zIndex = 410) %>%
-      addMapPane("abund", zIndex = 420) %>%
+      leaflet::addMapPane("density", zIndex = 410) %>%
+      leaflet::addMapPane("abund", zIndex = 420) %>%
       # Predicted density
       leaflet::addPolygons(
         fillColor = ~ pal_pred(Dens),
@@ -2573,8 +2579,8 @@ do.pred.map <-
         # values = class_intervals$brks, # only for discrete color scale
         title = paste(species, season)
       ) %>%
-      addMouseCoordinates() %>%
-      leaflet::addScaleBar(position = "bottomright", options = scaleBarOptions(imperial = FALSE)) %>%
+      leafem::addMouseCoordinates() %>%
+      leaflet::addScaleBar(position = "bottomright", options = leaflet::scaleBarOptions(imperial = FALSE)) %>%
       leaflet::addLayersControl(overlayGroups = groups,
                                 options = leaflet::layersControlOptions(collapsed = FALSE)) %>%
       leaflet::hideGroup(c("est abund"))
@@ -3169,22 +3175,6 @@ copy.prediction.summary <- function(spec){
     )
 }
 
-#' Remove debug flags from all currently debugged functions
-#'
-#' @param where Character vector of search-path entries to scan; defaults to
-#'   the full \code{search()} path.
-#' @return \code{invisible(NULL)}.
-#' @export
-undebug.all <- function(where=search()) {
-  aa <- all_debugged(where)
-  lapply(aa$env,undebug)
-  ## now debug namespaces
-  invisible(mapply(function(ns,fun) {
-    undebug(getFromNamespace(fun,ns))
-  },names(aa$ns),aa$ns))
-}
-
-
 #' Arrange four seasonal leaflet maps in a 2x2 HTML table
 #'
 #' \strong{Note: not currently used.}
@@ -3227,10 +3217,10 @@ save.map <- function(maps, modname, species) {
   timestr <- format(Sys.time(), "%Y%m%d_%H%M%S")
   filename <- here::here(dirname, paste0(modname, "_", timestr, ".html"))
   message(sprintf("%s, %s: Saving map in %s.", species, modname, filename))
-  list(h2(paste0(species, "_", modname, "_", timestr)),
+  list(htmltools::h2(paste0(species, "_", modname, "_", timestr)),
        leafsync::sync(maps)) %>%
     tagList %>%
-    save_html(file = filename)
+    htmltools::save_html(file = filename)
 }
 
 #' Produce a patchwork of four seasonal ggplot prediction maps
@@ -3265,7 +3255,7 @@ do.pred.maps.ggplot <-
     ret <- season.names %>%
       purrr::map(do.pred.map.ggplot, dat, modname, species, subs, ...)
 
-    ret <- wrap_plots(ret) + plot_annotation(title = modname)
+    ret <- patchwork::wrap_plots(ret) + patchwork::plot_annotation(title = modname)
     ret
   }
 
@@ -3311,7 +3301,7 @@ do.pred.map.ggplot <-
 
     ret <- ggplot2::ggplot(dat = dat) +
       ggplot2::geom_sf(ggplot2::aes(fill = Dens), color = NA)  +
-      scale_fill_continuous(
+      ggplot2::scale_fill_continuous(
         type = "viridis"
         # breaks = class_intervals$brks,
         # labels = round(class_intervals$brks, 4)
@@ -3398,7 +3388,7 @@ init.df.mod.list <- function(saveit = FALSE) {
 #' @return Factor vector of distance types, the same length as \code{nrow(dat)}.
 #' @export
 assign.dist.type <- function(dat) {
-  distmeth <- ECSAS.get.table(ecsas.path = ECSAS.Path, "lkpDistMeth")
+  distmeth <- ECSASconnect::ECSAS.get.table(ecsas.path = ECSAS.Path, "lkpDistMeth")
   DistType <- dplyr::left_join(dat, distmeth, by = c("DistMeth" = "DistMethCode")) %>%
     dplyr::mutate(DistType = as.factor(
       dplyr::case_when(
@@ -3951,7 +3941,7 @@ run.ddf.model <-
       if (exists("model")) {
         try.res <- try({
           # first spit out all the things that we want in the model summary
-          ch <- ddf.gof(model$ddf, qq = FALSE)$chisquare$chi1
+          ch <- mrds::ddf.gof(model$ddf, qq = FALSE)$chisquare$chi1
           summ <- summary(model)
           cat(paste0("Date: ", date(), "\n"), file = modOutFileConn)
           cat(paste0("Model name: ", mod$label, "\n"), file = modOutFileConn)
@@ -3960,7 +3950,7 @@ run.ddf.model <-
               "\n",
               file = modOutFileConn)
           cat(paste0("AIC: ",  round(model$ddf$criterion, 3), "\n"), file = modOutFileConn)
-          #ddf.gof(model$ddf, qq=FALSE)$dsgof$CvM$p,
+          #mrds::ddf.gof(model$ddf, qq=FALSE)$dsgof$CvM$p,
           cat(paste0("Chi_scores: ", paste(round((ch$observed - ch$expected) ^
                                                    2 / ch$expected, 3
           ), collapse = ", "), "\n"), file = modOutFileConn)
@@ -4150,7 +4140,7 @@ do.ds <-
       if(nrow(modDat) > 0) {
         if (parallel) {
           cat(paste0("Using parallel processing with ", nCores, " cores.\n"), file = logfileConn)
-          cl <- makeCluster(min(nCores, nrow(modDat)), type = "SOCK")
+          cl <- parallel::makeCluster(min(nCores, nrow(modDat)), type = "SOCK")
           doSNOW::registerDoSNOW(cl)
 
           models <- plyr::dlply(
@@ -4169,7 +4159,7 @@ do.ds <-
             verbose = verbose,
             ...
           )
-          stopCluster(cl)
+          parallel::stopCluster(cl)
 
           # Tried but had problems with some things not defined...
           # future::plan(multisession, workers = nCores)
@@ -4290,7 +4280,7 @@ check.det.fcn <-
     # GOF testing
     message("GOF testing")
     if (!("fake_ddf" %in% class(model))){
-      print(ddf.gof(model$ddf, asp = 1))
+      print(mrds::ddf.gof(model$ddf, asp = 1))
       # plot model
       plot(
         model,
@@ -4532,7 +4522,7 @@ get.per.cell.var <- function(this.dsm,
     dat.split <- split(df, cut(1:nrow(df), nchunks, FALSE))
   } else{
     # Process all of df in one chunk, make it a list so it can be processed
-    # by either map() of parLapply() below.
+    # by either map() of parallel::parLapply() below.
     dat.split <- list(df)
   }
 
@@ -4541,18 +4531,18 @@ get.per.cell.var <- function(this.dsm,
 
   if (parallel) {
 
-    cl <- makeCluster(nodes)
+    cl <- parallel::makeCluster(nodes)
 
     # Could just execute the things we need instead.
-    # clusterEvalQ(cl, source(here::here("R/analysis settings.R")))
-    clusterEvalQ(cl, {
+    # parallel::clusterEvalQ(cl, source(here::here("R/analysis settings.R")))
+    parallel::clusterEvalQ(cl, {
       library(dsm)
       library(purrr)
     })
 
     # Need envir arg or else it won't find data objects when being rendered.
     # takes about 1 min
-    clusterExport(
+    parallel::clusterExport(
       cl,
       c(
         "apply.dsm.var",
@@ -4563,7 +4553,7 @@ get.per.cell.var <- function(this.dsm,
     )
 
     # Run the function
-    system.time(res <- parLapply(
+    system.time(res <- parallel::parLapply(
       cl,
       dat.split,
       apply.dsm.var,
@@ -4571,7 +4561,7 @@ get.per.cell.var <- function(this.dsm,
     )
     )
 
-    stopCluster(cl)
+    parallel::stopCluster(cl)
   } else {  # non-parallel version
     # apply the function to the chunks serially with map
     print(system.time(
@@ -4791,8 +4781,8 @@ check.dsm <- function(dsm_final,
   par(mfrow = c(1,1))
   message("MGCV checks")
   try(my.gam.check(dsm_final))
-  message("rqgam_check():")
-  rqgam_check(dsm_final)
+  message("dsm::rqgam_check():")
+  dsm::rqgam_check(dsm_final)
 
   # Remove "dsm" class to make DHARMa happy
   message("DHARMa checks")
@@ -4800,7 +4790,7 @@ check.dsm <- function(dsm_final,
   class(simmod) <- class(simmod)[-1] # Simulate residuals doesn't like dsm class
   sims <- DHARMa::simulateResiduals(fittedModel = simmod)
   plot(sims)
-  testResiduals(sims)
+  DHARMa::testResiduals(sims)
   DHARMa::testZeroInflation(sims)
   # May fail if x,y locations are not unique
   res <- try(DHARMa::testSpatialAutocorrelation(sims, segdata$x, segdata$y))
@@ -4842,7 +4832,7 @@ check.dsm <- function(dsm_final,
     )
     try(print(mgcv::concurvity(dsm_final, full = FALSE)[["estimate"]] %>% round(digits = 3)))
     message("Plot is non-symmetric, showing how terms on y-axis depend on terms on the x-axis")
-    try(vis_concurvity(dsm_final))
+    try(dsm::vis_concurvity(dsm_final))
   }
 
   par(mfrow = c(1,1))
@@ -4869,9 +4859,9 @@ check.dsm <- function(dsm_final,
       x = segdata$x / 1000,
       y = segdata$y / 1000
     )
-  coordinates(mydata) <- ~ x + y
+  sp::coordinates(mydata) <- ~ x + y
 
-  print(bubble(
+  print(sp::bubble(
     mydata,
     "E",
     col = c("black", "red"),
@@ -4898,7 +4888,7 @@ check.dsm <- function(dsm_final,
         seg.lab = format(lubridate::as_datetime(dsm_final$data$StartTime), "%H:%M:%S")
       )
     par(mfrow = c(1, 1))
-    dsm_cor(
+    dsm::dsm_cor(
       dsm_final,
       Transect.Label = "tr.lab",
       Segment.Label = "seg.lab",
@@ -5231,12 +5221,12 @@ dsm.pred <-
 
     # if (do.plots) {
     #   # Plot combined result
-    #   combined_plot <- ggplot() +
-    #     geom_sf(
+    #   combined_plot <- ggplot2::ggplot() +
+    #     ggplot2::geom_sf(
     #       data = filter(ret, subset == "Combined"),
-    #       mapping = aes(colour = Dens, fill = Dens)
+    #       mapping = ggplot2::aes(colour = Dens, fill = Dens)
     #     ) +
-    #     labs(x = "", y = "", fill = "Dens") +
+    #     ggplot2::labs(x = "", y = "", fill = "Dens") +
     #     ggtitle("Fly+Swim Combined") +
     #     theme_minimal() +
     #     scale_colour_viridis_c(option = "E") +
@@ -5244,13 +5234,13 @@ dsm.pred <-
     #   print(combined_plot)
     #
     #   # Plot individual fly and swim results
-    #   ind_plot <- ggplot() +
-    #     geom_sf(
+    #   ind_plot <- ggplot2::ggplot() +
+    #     ggplot2::geom_sf(
     #       data = filter(ret, subset != "Combined"),
-    #       mapping = aes(colour = Dens, fill = Dens)
+    #       mapping = ggplot2::aes(colour = Dens, fill = Dens)
     #     ) +
-    #     labs(x = "", y = "", fill = "Dens") +
-    #     facet_wrap(vars(FlySwim)) +
+    #     ggplot2::labs(x = "", y = "", fill = "Dens") +
+    #     ggplot2::facet_wrap(vars(FlySwim)) +
     #     theme_minimal() +
     #     scale_colour_viridis_c(option = "E") +
     #     scale_fill_viridis_c(option = "E")
@@ -5585,7 +5575,7 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
       # aerial_F_N (ddfobj.orig == 8) then the
       # ddfobj.orig would be numbered 1, 2, 3, 5, 6, 7 but should be renumbered
       # as 1:6.
-      ddfobj = dense_rank(ddfobj.orig)
+      ddfobj = dplyr::dense_rank(ddfobj.orig)
     )
 
   # Make sure we still have some obs in distdata and all rows  are assigned a
@@ -5774,4 +5764,3 @@ list.unfinished.ddfs <- function(folder, covars = dfCovars){
 create.failed.ddf.file <- function(mod, folder) {
   file.create(file.path(folder, paste0("failed_model_", mod$label, ".txt")))
 }
-
