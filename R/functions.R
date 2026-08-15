@@ -3135,30 +3135,6 @@ copy.prediction.summary <- function(spec){
     )
 }
 
-#' Remove debug flags from all currently debugged functions
-#'
-#' \strong{Note: this function is currently broken.} It calls
-#' \code{all_debugged()}, which is defined neither in this package nor in any
-#' of its dependencies, so calling \code{undebug.all()} fails with "could not
-#' find function \"all_debugged\"". It appears to have been copied from a
-#' debugging snippet without its companion function. Left in place rather than
-#' guessed at, since the intended implementation is not recoverable from what
-#' is here.
-#'
-#' @param where Character vector of search-path entries to scan; defaults to
-#'   the full \code{search()} path.
-#' @return \code{invisible(NULL)}.
-#' @export
-undebug.all <- function(where=search()) {
-  aa <- all_debugged(where)
-  lapply(aa$env,undebug)
-  ## now debug namespaces
-  invisible(mapply(function(ns,fun) {
-    undebug(getFromNamespace(fun,ns))
-  },names(aa$ns),aa$ns))
-}
-
-
 #' Arrange four seasonal leaflet maps in a 2x2 HTML table
 #'
 #' \strong{Note: not currently used.}
