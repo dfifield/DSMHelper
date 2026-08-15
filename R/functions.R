@@ -1899,7 +1899,9 @@ rxtractogon.rast <-
       )
 
     if (plotit)
-      plot(rast, main = sprintf("%s from %s for %s", parameter, dataset, tcoord))
+      # see note on terra::plot() in create.ncdf.rast - a bare plot() inside
+      # this package resolves to graphics::plot and cannot draw a raster
+      raster::plot(rast, main = sprintf("%s from %s for %s", parameter, dataset, tcoord))
 
     if (saveit) {
 
@@ -2033,7 +2035,13 @@ create.ncdf.rast <-
       res <- terra::project(res, outproj, threads = TRUE) %>%
       terra::mask(study.area)
 
-    plot(res, main = paste(datname, the.date))
+    # NB: terra::plot(), not bare plot(). This package's NAMESPACE has no
+    # import() directives, so inside package code `plot` resolves up the
+    # namespace chain to graphics::plot and never reaches terra's S4 generic
+    # (which is only visible via the search path). A bare plot() on a
+    # SpatRaster therefore dies with "invalid type passed to graphics
+    # function", even though the identical call works from the console.
+    terra::plot(res, main = paste(datname, the.date))
     res
   }
 
