@@ -14,5 +14,11 @@ the full \code{search()} path.}
 \code{invisible(NULL)}.
 }
 \description{
-Remove debug flags from all currently debugged functions
+\strong{Note: this function is currently broken.} It calls
+\code{all_debugged()}, which is defined neither in this package nor in any
+of its dependencies, so calling \code{undebug.all()} fails with "could not
+find function \"all_debugged\"". It appears to have been copied from a
+debugging snippet without its companion function. Left in place rather than
+guessed at, since the intended implementation is not recoverable from what
+is here.
 }

@@ -14,6 +14,26 @@
 #   various env covar fns       - reference segProj, study.area, RasterDir
 # ============================================================================
 
+#' Operators imported for use throughout DSMHelper
+#'
+#' The pipe operators are used pervasively in this package (\code{\%>\%} alone
+#' appears in over 200 places).  They cannot be written with a \code{::}
+#' prefix in a pipeline, so unlike the rest of the package's dependencies they
+#' have to be imported into the namespace rather than qualified at the call
+#' site.
+#'
+#' Without this, every pipeline relies on the \emph{user} having attached
+#' magrittr (or the tidyverse) before calling a DSMHelper function, because an
+#' unqualified name inside package code resolves via
+#' namespace -> imports -> base -> search path, and only the search path would
+#' have it.
+#'
+#' @importFrom magrittr %>% %<>% %T>%
+#' @name DSMHelper-imports
+#' @keywords internal
+NULL
+
+
 # Print message when user executes "library(DSMHelper).
 # Shamelessly borrowed from mgcv.
 .onAttach <- function(...) {
