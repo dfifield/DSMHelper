@@ -15,7 +15,7 @@
 #' @export
 get.what.counts <- function(row, watches){
   wtch.ids <- stringr::str_split_fixed(row$Watches, ",", n = Inf) %>%
-    stringr::str_trim
+    stringr::str_trim()
   watches %<>% dplyr::filter(WatchID %in% wtch.ids)
   stopifnot(length(wtch.ids) == nrow(watches))
   row$WhatCounts <- watches$WhatCount %>%
@@ -2032,7 +2032,7 @@ create.segdata <- function(the.data,
     stringr::str_sub(end = -4) %>%
     paste0("-16") %>%
     unique %>%
-    stringr::str_sort
+    stringr::str_sort()
 
   ### Depth and other static rasters
   # Depth
@@ -2060,7 +2060,7 @@ create.segdata <- function(the.data,
       terra::vect(segdata),
       bind = TRUE
     ) %>%
-    sf::st_as_sf
+    sf::st_as_sf()
 
   ### Extract depth gradient values
   if (verbose) message("Extracting depth gradient at watch locations")
@@ -2070,7 +2070,7 @@ create.segdata <- function(the.data,
       terra::vect(segdata),
       bind = TRUE
     ) %>%
-    sf::st_as_sf
+    sf::st_as_sf()
 
   ### Extract SST values
   if (verbose) message("Extracting sst at watch locations")
@@ -2082,7 +2082,7 @@ create.segdata <- function(the.data,
       layer = needed.layers,
       bind = TRUE
     ) %>%
-    sf::st_as_sf %>%
+    sf::st_as_sf() %>%
     dplyr::rename(sst = value) %>%
     dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
 
@@ -2096,7 +2096,7 @@ create.segdata <- function(the.data,
       layer = needed.layers,
       bind = TRUE
     ) %>%
-    sf::st_as_sf %>%
+    sf::st_as_sf() %>%
     dplyr::rename(sst.g = value) %>%
     dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
 
@@ -2209,7 +2209,7 @@ rxtractogon.rast <-
       terra::writeRaster(rast, filename = filename, format = "HFA", overwrite = TRUE)
     }
 
-    terra::rast
+    terra::rast()
   }
 
 #' Apply a focal filter to every layer of a RasterStack
@@ -2314,7 +2314,7 @@ create.ncdf.rast <-
         crs = sp::CRS(inproj)
       ) %>%
       raster::flip(direction = "y") %>%
-      terra::rast
+      terra::rast()
 
     # is reprojection/resampling required
     if (!is.null(to)) {
@@ -2670,7 +2670,7 @@ create.seasonal.predgrid <- function(species, predgrid) {
     # seasonal means computed, add area, and make back into sf object.
     dplyr::select(!dplyr::matches(match.re)) %>%
     cbind(p.geom) %>% # add geometry back in
-    sf::st_sf
+    sf::st_sf()
 
   # Rename scaled columns to match what was in the model specs. This is harmless
   # if they are already named correctly with .sc.
@@ -2693,7 +2693,7 @@ create.seasonal.predgrid <- function(species, predgrid) {
   ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
     setNames(unique(ddftype_to_platform)) %>%
     purrr::list_rbind(names_to = "platform") %>%
-    sf::st_sf
+    sf::st_sf()
 
 
   # From multiddf paper code:
@@ -2735,7 +2735,7 @@ do.pred.maps <-
     subs <- match.arg(subs)
     dat <- dplyr::filter(dat, subset == subs)
     segdata <- model$data %>%
-      sf::st_as_sf
+      sf::st_as_sf()
 
     message(sprintf("%s, %s: Doing %s abundance prediction map for",
                     species, modname, subs))
@@ -3506,7 +3506,7 @@ save.map <- function(maps, modname, species) {
   message(sprintf("%s, %s: Saving map in %s.", species, modname, filename))
   list(htmltools::h2(paste0(species, "_", modname, "_", timestr)),
        leafsync::sync(maps)) %>%
-    htmltools::tagList %>%
+    htmltools::tagList() %>%
     htmltools::save_html(file = filename)
 }
 
@@ -5258,7 +5258,7 @@ augment.segdata <- function(segdata, distdata) {
     dplyr::group_by(Sample.Label) %>%
     dplyr::summarize(estAbund = sum(adjSize), rawCount = sum(size)) %>%
     dplyr::right_join(segdata, by = "Sample.Label") %>%
-    sf::st_as_sf
+    sf::st_as_sf()
   newsegdata$estAbund[is.na(newsegdata$estAbund)] <- 0
   newsegdata$rawCount[is.na(newsegdata$rawCount)] <- 0
   newsegdata$estDens <- newsegdata$estAbund/newsegdata$segment.area
@@ -5599,7 +5599,7 @@ dsm.pred <-
       purrr::map(make.season.raster,
                  obj = dplyr::filter(ret, subset == "Combined"),
                  variable = "Dens") %>%
-      terra::rast
+      terra::rast()
     names(pp_raster) <- season.names
 
     # produce 4 panel plot. Not necessary since this is done at end of Generic_3_prediction.rmd
