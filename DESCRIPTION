@@ -21,6 +21,7 @@ Imports:
     dplyr,
     dsm,
     dsmextra,
+    ECSASconnect,
     furrr,
     future,
     geodist,
@@ -62,7 +63,6 @@ Remotes:
     densitymodelling/dsmextra,
     RoyChristian/ECSASconnect
 Suggests:
-    ECSASconnect,
     knitr,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
