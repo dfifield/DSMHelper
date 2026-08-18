@@ -197,7 +197,7 @@ check.distdata.cols <- function(data) {
     if (all(is.na(data$distbegin)) && all(is.na(data$distend))) {
       message("check.distdata.cols: removing distbegin and distend columns that are all NA from data")
       data <- dplyr::select(data, -distbegin, -distend)
-    } else if (all.equal(data$distance, (data$distbegin + data$distend) / 2)) {
+    } else if (isTRUE(all.equal(data$distance, (data$distbegin + data$distend) / 2))) {
       message(
         "check.distdata.cols: removing distance column because data has distbegin and distend columns"
       )
@@ -205,7 +205,7 @@ check.distdata.cols <- function(data) {
     } else {
       stop(
         paste0(
-          "run.ddf.model: data has both distance and non-NA distbegin/distend ",
+          "check.distdata.cols: data has both distance and non-NA distbegin/distend ",
           "columns but data$distance != (data$distbegin + data$distend)/2"
         )
       )
