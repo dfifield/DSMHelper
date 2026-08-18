@@ -1479,16 +1479,16 @@ do.det.fcn <- function(distdata,
       if (rerun) {
         # (re-)fit the model - Doing a real ddf
 
-        # remove unneeded cols, but be careful because some cols are needed
-        # downstream by create.dsm.data) for example.
-        # and remove redundant distance or distbegin/distend cols.
-        distdata <-
-          distdata %>%
-          dplyr::select(object, size, distbegin, distend, distance, Season,
-                        SurveyType, FlySwim, Sample.Label, WatchID, Alpha, Dataset,
-                        LatStart, LongStart,
-                        dplyr::all_of(all.vars(df.model$final.formula))) %>%
-          check.distdata.cols()
+        # Keep every column. This used to narrow distdata to a hard-coded list
+        # to shrink the saved .rda files, but the strip-transect path does not
+        # narrow (create.strip.ddf restores the full frame into df_final$data),
+        # so the two paths produced fitted.distdata with different columns and
+        # create.dsm.data's bind_rows padded the difference with NA. Any column
+        # added upstream is now carried by both paths automatically.
+        #
+        # Still drop the redundant distance or distbegin/distend cols, which
+        # ds() refuses to accept together.
+        distdata <- check.distdata.cols(distdata)
 
         ###### use do.ds machinery to re-fit final model
         df_final <- do.ds(
