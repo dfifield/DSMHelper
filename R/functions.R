@@ -5368,7 +5368,13 @@ run.dsm.model <- function(mod.def,
   sf::sf_use_s2(FALSE)
 
   filename <- file.path(folder, paste0(mod.def$modname, ".Rdata"))
-  # Rerun dsm?
+
+  # Can we reuse a previously saved fit? A file holding a try-error records a
+  # failure, not a result, so treat it as if it were absent. Reusing one would
+  # make a single bad run permanent: every later rerun.dsms = FALSE call would
+  # reload the same error in seconds and never refit, with nothing in the
+  # return value to distinguish that from a fit that had just failed.
+  model <- NULL
   if (rerun.dsms == FALSE && file.exists(filename)) {
     # Load saved model result from file
     message(sprintf(
@@ -5376,7 +5382,17 @@ run.dsm.model <- function(mod.def,
       mod.def$modname
     ))
     load(filename)
-  } else {
+    if (inherits(model, "try-error")) {
+      message(sprintf(
+        paste0("run.dsm.model: %s holds a failed fit from an earlier run. ",
+               "Refitting rather than reusing it."),
+        basename(filename)
+      ))
+      model <- NULL
+    }
+  }
+
+  if (is.null(model)) {
     # Rerun the dsm
     message("Running dsm model ", mod.def$modname)
 
@@ -5458,12 +5474,23 @@ run.dsm.model <- function(mod.def,
           segment.data %>% dplyr::arrange(Sample.Label) %>% as.data.frame %>% magrittr::extract("estAbund")
         )
       )
-    } else { # Model failed to fit. Give message and then continue on to save.
+    } else { # Model failed to fit.
       message("run.dsm.model: dsm() failed: ", model)
     }
 
-    message(sprintf("Saving model result to %s", filename))
-    save(model, file = filename, compress = FALSE)
+    # Only a real fit is worth caching. Saving a try-error here is what made
+    # the failure permanent, so leave the file alone instead: if an earlier
+    # good fit is on disk it stays usable, and if nothing is there the next
+    # run retries from scratch.
+    if (inherits(model, "try-error")) {
+      message(sprintf(
+        "run.dsm.model: not saving failed fit for %s to %s",
+        mod.def$modname, filename
+      ))
+    } else {
+      message(sprintf("Saving model result to %s", filename))
+      save(model, file = filename, compress = FALSE)
+    }
   } # End rerun dsm
 
   model
