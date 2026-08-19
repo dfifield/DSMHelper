@@ -16,7 +16,7 @@ file to render, relative to \code{RDir}.}
 \code{invisible(NULL)}, called for its side-effect (HTML rendered).
 }
 \description{
-Sources \code{R/analysis settings.r} (project-specific path) then renders
+Sources \code{R/analysis_settings.R} (project-specific path) then renders
 \code{rmdfile} with \code{species} as a parameter, timestamping the output
 filename.
 }

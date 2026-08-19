@@ -36,7 +36,7 @@ Named list with the pruned \code{ddftype_levels},
 each enumerate all combinations of survey type, behaviour and distance
 availability, and are coupled \strong{positionally} - element \emph{i} of
 each refers to the same DDF type (see the warning in
-\code{analysis settings.R} that they must be listed in the same order).
+\code{analysis_settings.R} that they must be listed in the same order).
 When a study area has no coverage by one survey type, that type's DDF types
 have no observations and no segments, and carrying them forward creates
 empty result folders, fails final DDF fitting, and trips the segment

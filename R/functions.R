@@ -1007,7 +1007,7 @@ get.survey.types <- function(dat) {
 #' each enumerate all combinations of survey type, behaviour and distance
 #' availability, and are coupled \strong{positionally} - element \emph{i} of
 #' each refers to the same DDF type (see the warning in
-#' \code{analysis settings.R} that they must be listed in the same order).
+#' \code{analysis_settings.R} that they must be listed in the same order).
 #' When a study area has no coverage by one survey type, that type's DDF types
 #' have no observations and no segments, and carrying them forward creates
 #' empty result folders, fails final DDF fitting, and trips the segment
@@ -4072,7 +4072,7 @@ is_discrete_gam <- function(model) {
 
 #' Render a one-off RMarkdown file for a single species
 #'
-#' Sources \code{R/analysis settings.r} (project-specific path) then renders
+#' Sources \code{R/analysis_settings.R} (project-specific path) then renders
 #' \code{rmdfile} with \code{species} as a parameter, timestamping the output
 #' filename.
 #'
@@ -4082,7 +4082,7 @@ is_discrete_gam <- function(model) {
 #' @return \code{invisible(NULL)}, called for its side-effect (HTML rendered).
 #' @export
 do_oneoff_render <- function(rmdfile, species) {
-  source(here::here("R/analysis settings.r"), echo = T)
+  source(here::here("R/analysis_settings.R"), echo = T)
 
   rmarkdown::render(
     here::here(RDir, rmdfile),
@@ -4821,7 +4821,7 @@ get.per.cell.var <- function(this.dsm,
     cl <- parallel::makeCluster(nodes)
 
     # Could just execute the things we need instead.
-    # parallel::clusterEvalQ(cl, source(here::here("R/analysis settings.R")))
+    # parallel::clusterEvalQ(cl, source(here::here("R/analysis_settings.R")))
     parallel::clusterEvalQ(cl, {
       library(dsm)
       library(purrr)
@@ -5358,7 +5358,7 @@ run.dsm.model <- function(mod.def,
                           rerun.dsms = TRUE,
                           ...) {
   # logfileConn <- file(description = paste0("E:/test_", Sys.getpid(), ".txt"), open = "at")
-  # source(here::here("R/analysis settings.R"))
+  # source(here::here("R/analysis_settings.R"))
   # logfileConn <- file(here::here(ResultsDir,
   #                         paste0("dsm_logfile_", Sys.getpid(), ".txt")), "at")
   #
