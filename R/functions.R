@@ -4387,7 +4387,7 @@ do.ds <-
 
     cat(paste0("\n\ndoDS: ", date(), "\n"), file = logfileConn)
 
-    if (parallel & logfile != "" & runModels)
+    if (parallel && logfile != "" && runModels)
       cat("WARNING: No logging to file for individual sub-processes when parallel == TRUE.\n", file = logfileConn)
 
     # only run models that currently have no results in folder. Useful when a
@@ -5427,9 +5427,14 @@ run.dsm.model <- function(mod.def,
     if(!inherits(model, "try-error")){
       # if we used "bam" then the data is not kept even if keepData == TRUE, so
       # add it back in. Sometimes "data" is in model but it is NA.
+      #
+      # The test must stay scalar: model$data is normally a data frame, so
+      # is.na() on it returns a matrix and if() then fails with "the condition
+      # has length > 1". Testing for a usable data frame covers all three bad
+      # cases (absent, NULL, or a bare NA) in one scalar expression.
       kd <- control[["keepData"]]
-      if (!is.null(kd) & isTRUE(kd) &
-          (!("data" %in% names(model))) | is.na(model$data)){
+      data_ok <- is.data.frame(model$data) && nrow(model$data) > 0
+      if (isTRUE(kd) && !data_ok) {
         model$data <-
           dsm:::make.data(
             response = as.character(mod.def$formula[[1]])[2],
