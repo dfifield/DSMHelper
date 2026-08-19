@@ -5130,7 +5130,9 @@ check.dsm <- function(dsm_final,
   # by.
   message("Observed vs expected plot")
   try(print(oe.dens(dsm_final, covar = "platform", plotit = T)))
-  try(print(oe.dens(dsm_final, covar = "depth", plotit = T)))
+  # depth is continuous, so bin it - without cut, oe.dens aggregates by every
+  # unique depth value, giving one point (and one table column) per segment.
+  try(print(oe.dens(dsm_final, covar = "depth", cut = 10, plotit = T)))
   # oe.dens(dsm_final, covar = "depth.g", plotit = T)
   # oe.dens(dsm_final, covar = "sst", plotit = T)
   # oe.dens(dsm_final, covar = "sst.g", plotit = T)
