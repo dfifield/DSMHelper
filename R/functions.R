@@ -5062,7 +5062,7 @@ check.dsm <- function(dsm_final,
 
   # Sometimes whines about S3 methods.
   message("Gratia checks")
-  suppressWarnings(gratia::appraise(dsm_final))
+  try(print(suppressWarnings(gratia::appraise(dsm_final))))
 
   # Gam checks from MGCV
   par(mfrow = c(1,1))
@@ -5077,10 +5077,12 @@ check.dsm <- function(dsm_final,
   class(simmod) <- class(simmod)[-1] # Simulate residuals doesn't like dsm class
   sims <- DHARMa::simulateResiduals(fittedModel = simmod)
   plot(sims)
-  DHARMa::testResiduals(sims)
-  DHARMa::testZeroInflation(sims)
+  print(DHARMa::testResiduals(sims))
+  print(DHARMa::testZeroInflation(sims))
   # May fail if x,y locations are not unique
   res <- try(DHARMa::testSpatialAutocorrelation(sims, segdata$x, segdata$y))
+  if (!inherits(res, "try-error"))
+    print(res)
 
   # If more than one resid at a given location.
   # Note still use try() since this may fail to allocate enough memory if
@@ -5127,16 +5129,20 @@ check.dsm <- function(dsm_final,
   # reccommendation to use the "platform" variable to aggregate
   # by.
   message("Observed vs expected plot")
-  try(oe.dens(dsm_final, covar = "platform", plotit = T))
-  try(oe.dens(dsm_final, covar = "depth", plotit = T))
+  try(print(oe.dens(dsm_final, covar = "platform", plotit = T)))
+  try(print(oe.dens(dsm_final, covar = "depth", plotit = T)))
   # oe.dens(dsm_final, covar = "depth.g", plotit = T)
   # oe.dens(dsm_final, covar = "sst", plotit = T)
   # oe.dens(dsm_final, covar = "sst.g", plotit = T)
   # # oe.dens(dsm_final, covar = "year", plotit = T)
   # # oe.dens(dsm_final, covar = "yday", plotit = T)
 
-  # check zero infl - not sure this is right
-  (OD_dsm_final <- sum(resid(dsm_final, type = "pearson"))/dsm_final$df.res)
+  # Overdispersion: Pearson chi-square / residual df. ~1 indicates the
+  # mean-variance relationship is adequate; >1 overdispersed, <1 underdispersed.
+  # Note the scale parameter is estimated (not fixed at 1) for the Tweedie and
+  # negative binomial families used here, so treat this as a rough guide.
+  message("Overdispersion statistic (Pearson chi-sq / resid df)")
+  print(OD_dsm_final <- sum(resid(dsm_final, type = "pearson")^2)/dsm_final$df.res)
 
   # Bubble plot
   message("Doing bubbleplot")
