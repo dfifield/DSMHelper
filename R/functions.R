@@ -5127,7 +5127,7 @@ check.dsm <- function(dsm_final,
   # reccommendation to use the "platform" variable to aggregate
   # by.
   message("Observed vs expected plot")
-  try(oe.dens(dsm_final, covar = "ddftype", plotit = T))
+  try(oe.dens(dsm_final, covar = "platform", plotit = T))
   try(oe.dens(dsm_final, covar = "depth", plotit = T))
   # oe.dens(dsm_final, covar = "depth.g", plotit = T)
   # oe.dens(dsm_final, covar = "sst", plotit = T)
