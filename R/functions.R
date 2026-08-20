@@ -5167,9 +5167,15 @@ check.dsm <- function(dsm_final,
 
   if (!brief) {
     # check autocorellogram
-    # create transect label as cruiseid & date & flyswim in order to avoid
-    # having the duplicated segments (one for fly one for swim) together in the
-    # same "Transect".
+    # Build the transect label from cruiseid + date + platform so the
+    # duplicated segments (one for fly, one for swim) do not land in the same
+    # "Transect". This previously used FlySwim. FlySwim is not gone - it is an
+    # observation-level column, still present in the.data$distdata - but it has
+    # never been part of the DSM segment data that check.dsm() sees, so it
+    # silently contributed nothing to the label and every fly/swim pair shared
+    # one. platform is the segment-level equivalent. Note the older
+    # Generic_2_dsm_bam_test.R does build a segdata carrying FlySwim, which is
+    # likely where the original reference came from.
     # create segment label as %H:%M:%S
     message("Doing autocorellogram")
     dsm_final$data <- dsm_final$data %>%
