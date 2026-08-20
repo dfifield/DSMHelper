@@ -5177,7 +5177,7 @@ check.dsm <- function(dsm_final,
         tr.lab = paste(
           dsm_final$data$CruiseID,
           dsm_final$data$Date,
-          dsm_final$data$FlySwim,
+          dsm_final$data$platform,
           sep = "_"
         ),
         seg.lab = format(lubridate::as_datetime(dsm_final$data$StartTime), "%H:%M:%S")
