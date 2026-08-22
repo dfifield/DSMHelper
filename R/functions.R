@@ -4803,8 +4803,10 @@ get.family.key <- function(fam) {
 #'   \code{modname}, \code{formula} and \code{family} -- i.e. \code{dsm.mod.specs}.
 #' @return A tibble with one row per family present, columns \code{family_key},
 #'   \code{modname}, \code{AIC}, \code{n_candidates} (how many candidates that
-#'   family contributed), and list-columns \code{formula} and \code{family}.
-#'   Ordered by \code{AIC}.
+#'   family contributed), and list-columns \code{formula} (taken from the fitted
+#'   model, so it carries the \code{offset(off.set)} term \code{dsm()} adds) and
+#'   \code{family}. Ordered by \code{AIC}. Carries an \code{"all_candidates"}
+#'   attribute holding every usable candidate in the same shape.
 #' @examples
 #' \dontrun{
 #' load(here(RDataDir, "ATPU.dsm.RData"))
@@ -4834,7 +4836,11 @@ get.family.finalists <- function(mod.res, mod.specs) {
       family_key = get.family.key(mod.specs$family[[i]]),
       modname    = modname,
       AIC        = summarize.dsm(model)$AIC,
-      formula    = list(mod.specs$formula[[i]]),
+      # The FITTED model's formula, not the spec's: dsm() appends
+      # offset(off.set), and refitting without it drops the effort/area exposure
+      # correction entirely - which makes nb() fail to converge on sparse data
+      # and sends the predictions off by orders of magnitude.
+      formula    = list(stats::formula(model)),
       family     = list(mod.specs$family[[i]]))
   })
 
@@ -4842,12 +4848,17 @@ get.family.finalists <- function(mod.res, mod.specs) {
   if (nrow(cand) == 0)
     stop("get.family.finalists: no usable fitted candidates")
 
-  cand %>%
+  finalists <- cand %>%
     dplyr::group_by(.data$family_key) %>%
     dplyr::mutate(n_candidates = dplyr::n()) %>%
     dplyr::slice_min(.data$AIC, n = 1, with_ties = FALSE) %>%
     dplyr::ungroup() %>%
     dplyr::arrange(.data$AIC)
+
+  # Every candidate, so a matched-formulation comparison can be built later
+  # without reloading the (multi-GB) model suite.
+  attr(finalists, "all_candidates") <- cand
+  finalists
 }
 
 

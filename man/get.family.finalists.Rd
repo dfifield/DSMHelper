@@ -17,8 +17,10 @@ Entries that are \code{try-error}s, or that are missing from
 \value{
 A tibble with one row per family present, columns \code{family_key},
 \code{modname}, \code{AIC}, \code{n_candidates} (how many candidates that
-family contributed), and list-columns \code{formula} and \code{family}.
-Ordered by \code{AIC}.
+family contributed), and list-columns \code{formula} (taken from the fitted
+model, so it carries the \code{offset(off.set)} term \code{dsm()} adds) and
+\code{family}. Ordered by \code{AIC}. Carries an \code{"all_candidates"}
+attribute holding every usable candidate in the same shape.
 }
 \description{
 Step one of the two-step model selection. AIC cannot compare models across
