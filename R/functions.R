@@ -4873,7 +4873,10 @@ get.family.finalists <- function(mod.res, mod.specs) {
 #'   projection units (metres).
 #' @param n_folds Number of folds.
 #' @param block_size Block edge length in projection units.
-#' @param seed Random seed for block-to-fold assignment.
+#' @param seed Random seed for block-to-fold assignment. The random number
+#'   generator kind is pinned to Mersenne-Twister for the duration and restored
+#'   afterwards, so the folds are the same whether or not the caller is running
+#'   inside a \code{future} (which switches to L'Ecuyer-CMRG).
 #' @return Integer vector of fold membership, length \code{nrow(segdata)}, with
 #'   an \code{"n_blocks"} attribute giving the number of occupied blocks. That
 #'   count is worth reporting: it is the real sample size behind the folds, and a
@@ -4889,6 +4892,14 @@ assign.blocks <- function(segdata, n_folds, block_size, seed) {
   checkmate::expect_numeric(segdata$y, any.missing = FALSE)
   checkmate::expect_count(n_folds, positive = TRUE)
   checkmate::expect_number(block_size, lower = 0)
+
+  # Pin the generator, not just the seed. Under furrr's seed = TRUE the workers
+  # run L'Ecuyer-CMRG, and set.seed() on a different generator yields a
+  # different sequence - which silently produced different folds inside workers
+  # than in the main process, from an identical seed.
+  old_kind <- RNGkind()
+  on.exit(RNGkind(old_kind[1], old_kind[2], old_kind[3]), add = TRUE)
+  suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
 
   set.seed(seed)
   block_id     <- paste(floor(segdata$x / block_size),
@@ -5080,8 +5091,13 @@ run.family.cv <- function(species, segdata, finalists,
                                 type = "response")
       obs_y   <- segdata[[resp]][test_idx]
 
+      # Same reasoning as assign.blocks(): fix the generator as well as the seed,
+      # so scores are reproducible whether or not the caller is inside a future.
+      old_kind <- RNGkind()
+      suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
       set.seed(seed + k)
       sim_mat <- sim.response(fit, pred_mu, n_sim)
+      RNGkind(old_kind[1], old_kind[2], old_kind[3])
 
       # 90% predictive interval coverage: the direct check on whether a family's
       # tails are too light to carry prediction variance downstream.

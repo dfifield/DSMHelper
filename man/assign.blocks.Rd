@@ -14,7 +14,10 @@ projection units (metres).}
 
 \item{block_size}{Block edge length in projection units.}
 
-\item{seed}{Random seed for block-to-fold assignment.}
+\item{seed}{Random seed for block-to-fold assignment. The random number
+generator kind is pinned to Mersenne-Twister for the duration and restored
+afterwards, so the folds are the same whether or not the caller is running
+inside a \code{future} (which switches to L'Ecuyer-CMRG).}
 }
 \value{
 Integer vector of fold membership, length \code{nrow(segdata)}, with
