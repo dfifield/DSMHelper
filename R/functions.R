@@ -5936,6 +5936,12 @@ run.dsm.model <- function(mod.def,
 #' a \code{"Combined"} subset by summing across platform levels, writes a
 #' combined shapefile, and saves four-season rasters as GeoTIFFs.
 #'
+#' Predictions are made with \code{discrete = FALSE} so that a cell's predicted
+#' density depends only on that cell's covariates and the model, not on the
+#' composition of the grid it happens to be predicted alongside. Note this does
+#' not reach \code{dsm::dsm_var_gam()} in the variance step, which takes no
+#' \code{discrete} argument - only refitting without discrete does.
+#'
 #' Expects project globals \code{ShapeDir}, \code{predDir}, \code{season.names},
 #' and \code{predgridCellArea}.
 #'
@@ -5995,8 +6001,17 @@ dsm.pred <-
     # we will end up with n identical copies of predictions: 1 for each value
     # of platform. In a factor model these predictions for each level of platform
     # are different.
+    # discrete = FALSE forces exact prediction. A model fitted with
+    # discrete = TRUE re-discretises whatever newdata it is handed, so a cell's
+    # prediction depends on the composition of the grid it is predicted with -
+    # change the grid extent, or predict in batches, and unchanged cells move.
+    # predict.dsm() strips the "dsm" class and forwards ... to predict.bam(), so
+    # this reaches the right place. It is a no-op for a model that was fitted
+    # without discrete (e.g. via dsm.options$refit.without.discrete), which is
+    # the other, broader way to get the same guarantee.
     ret <- ret %>%
-      dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area),
+      dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area,
+                                   discrete = FALSE),
                     Dens = NHat/area)
 
     # Create summed (ie Combined Nhat) across all levels of platform.
