@@ -1,6 +1,6 @@
 Package: DSMHelper
 Title: Distance Sampling and Density Surface Modelling Utilities
-Version: 0.3.3
+Version: 0.3.4
 Authors@R:
     person("Dave", "Fifield", email = "dave.fifield@ec.gc.ca",
            role = c("aut", "cre"))

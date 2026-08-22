@@ -5109,8 +5109,16 @@ run.family.cv <- function(species, segdata, finalists,
         next
       }
 
+      # discrete = FALSE is essential here, not an optimisation choice. A model
+      # fitted with discrete = TRUE re-discretises whatever newdata it is given,
+      # so the SAME held-out segment gets a different prediction depending on
+      # which other segments happen to share its fold - about 0.3% on this data.
+      # Several species are separated by less than that, so composition-dependent
+      # predictions could decide a verdict. discrete = FALSE predicts exactly and
+      # is invariant to the composition of newdata; it also puts folds that fell
+      # back to a non-discrete fit on the same footing as the rest.
       pred_mu <- stats::predict(fit, newdata = segdata[test_idx, ],
-                                type = "response")
+                                type = "response", discrete = FALSE)
       obs_y   <- segdata[[resp]][test_idx]
 
       # Same reasoning as assign.blocks(): fix the generator as well as the seed,
