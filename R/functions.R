@@ -4755,6 +4755,366 @@ summarize.dsm <- function(model){
 
 
 
+#' Short, stable key for a response family
+#'
+#' Normalises a family object's name so that fitted and unfitted objects agree
+#' (\code{"Tweedie"} and \code{"Tweedie(p=1.167)"} both give \code{"tw"}), and so
+#' that families beyond the two currently in \code{dsm.mod.specs} get a key of
+#' their own rather than an error. Nothing downstream should assume the set of
+#' keys is \code{c("tw", "nb")}.
+#'
+#' @param fam A family object, or the character name of one.
+#' @return Length-one character key.
+#' @examples
+#' get.family.key(mgcv::tw())
+#' get.family.key("Negative Binomial(0.017)")
+#' @export
+get.family.key <- function(fam) {
+  nm <- if (is.character(fam)) fam else fam$family
+  checkmate::expect_character(nm, len = 1, any.missing = FALSE)
+
+  # Fitted families carry their estimated parameter, e.g. "Tweedie(p=1.167)".
+  base <- tolower(trimws(sub("\\(.*$", "", nm)))
+
+  switch(base,
+         "tweedie"           = "tw",
+         "negative binomial" = "nb",
+         gsub("[^a-z0-9]+", "", base))
+}
+
+
+#' Pick the AIC-best candidate within each response family
+#'
+#' Step one of the two-step model selection. AIC cannot compare models across
+#' response families when the response is non-integer -- a Tweedie likelihood is
+#' a density and a negative binomial likelihood is a probability mass, so the two
+#' are not on a common scale -- but it is entirely valid *within* a family, where
+#' every candidate shares a response and a likelihood. Step two is
+#' \code{\link{run.family.cv}}, which chooses between the finalists this returns.
+#'
+#' Works with whatever \code{mod.specs} contains: any number of candidates, any
+#' number of families, any naming scheme. The family is read from each spec's
+#' family object rather than parsed out of the model name.
+#'
+#' @param mod.res Named list of fitted DSMs as saved by \code{run.dsm.models()}.
+#'   Entries that are \code{try-error}s, or that are missing from
+#'   \code{mod.specs}, are dropped with a message.
+#' @param mod.specs Data frame of candidate specifications with columns
+#'   \code{modname}, \code{formula} and \code{family} -- i.e. \code{dsm.mod.specs}.
+#' @return A tibble with one row per family present, columns \code{family_key},
+#'   \code{modname}, \code{AIC}, \code{n_candidates} (how many candidates that
+#'   family contributed), and list-columns \code{formula} and \code{family}.
+#'   Ordered by \code{AIC}.
+#' @examples
+#' \dontrun{
+#' load(here(RDataDir, "ATPU.dsm.RData"))
+#' get.family.finalists(mod.res, dsm.mod.specs)
+#' }
+#' @export
+get.family.finalists <- function(mod.res, mod.specs) {
+  checkmate::expect_list(mod.res, min.len = 1)
+  checkmate::expect_data_frame(mod.specs, min.rows = 1)
+  if (!all(c("modname", "formula", "family") %in% names(mod.specs)))
+    stop("get.family.finalists: mod.specs needs modname, formula and family columns")
+
+  rows <- purrr::map(seq_len(nrow(mod.specs)), function(i) {
+    modname <- mod.specs$modname[[i]]
+    model   <- mod.res[[modname]]
+
+    if (is.null(model)) {
+      message(sprintf("get.family.finalists: no fitted model for %s, skipping", modname))
+      return(NULL)
+    }
+    if (inherits(model, "try-error")) {
+      message(sprintf("get.family.finalists: %s is a try-error, skipping", modname))
+      return(NULL)
+    }
+
+    tibble::tibble(
+      family_key = get.family.key(mod.specs$family[[i]]),
+      modname    = modname,
+      AIC        = summarize.dsm(model)$AIC,
+      formula    = list(mod.specs$formula[[i]]),
+      family     = list(mod.specs$family[[i]]))
+  })
+
+  cand <- dplyr::bind_rows(rows)
+  if (nrow(cand) == 0)
+    stop("get.family.finalists: no usable fitted candidates")
+
+  cand %>%
+    dplyr::group_by(.data$family_key) %>%
+    dplyr::mutate(n_candidates = dplyr::n()) %>%
+    dplyr::slice_min(.data$AIC, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(.data$AIC)
+}
+
+
+#' Assign segments to spatial-block cross-validation folds
+#'
+#' Squares of \code{block_size} on the analysis projection are assigned to folds
+#' at random, so each fold holds out whole regions rather than scattered
+#' segments. Random hold-outs would leak neighbouring segments into training and
+#' flatter every model equally, because the residuals are spatially structured.
+#'
+#' @param segdata Data frame with numeric \code{x} and \code{y} columns in
+#'   projection units (metres).
+#' @param n_folds Number of folds.
+#' @param block_size Block edge length in projection units.
+#' @param seed Random seed for block-to-fold assignment.
+#' @return Integer vector of fold membership, length \code{nrow(segdata)}, with
+#'   an \code{"n_blocks"} attribute giving the number of occupied blocks. That
+#'   count is worth reporting: it is the real sample size behind the folds, and a
+#'   block size close to the study area extent can leave too few blocks to spread
+#'   across \code{n_folds}.
+#' @examples
+#' assign.blocks(data.frame(x = runif(100, 0, 5e5), y = runif(100, 0, 5e5)),
+#'               5, 1e5, 1)
+#' @export
+assign.blocks <- function(segdata, n_folds, block_size, seed) {
+  checkmate::expect_data_frame(segdata, min.rows = 1)
+  checkmate::expect_numeric(segdata$x, any.missing = FALSE)
+  checkmate::expect_numeric(segdata$y, any.missing = FALSE)
+  checkmate::expect_count(n_folds, positive = TRUE)
+  checkmate::expect_number(block_size, lower = 0)
+
+  set.seed(seed)
+  block_id     <- paste(floor(segdata$x / block_size),
+                        floor(segdata$y / block_size), sep = "_")
+  unique_block <- unique(block_id)
+  # rep_len then sample spreads folds as evenly as the block count allows.
+  block_fold   <- stats::setNames(
+    sample(rep_len(seq_len(n_folds), length(unique_block))), unique_block)
+
+  structure(unname(block_fold[block_id]), n_blocks = length(unique_block))
+}
+
+
+#' Continuous ranked probability score from predictive samples
+#'
+#' CRPS is a proper scoring rule evaluated on the response scale, so unlike a
+#' log-score it carries no dominating-measure baggage and is defined for discrete
+#' and continuous predictive distributions alike. That is what makes it usable to
+#' compare a negative binomial against a Tweedie.
+#'
+#' \code{CRPS(F, y) = E|X - y| - 0.5 * E|X - X'|}, with the second expectation
+#' evaluated by the sorted-sample identity
+#' \code{E|X - X'| = (2 / m^2) * sum_i (2i - m - 1) * x_(i)}, which is
+#' O(m log m) per observation rather than the O(m^2) all-pairs form.
+#'
+#' @param sim_mat Numeric matrix of predictive draws, one row per observation and
+#'   one column per draw.
+#' @param obs Numeric vector of observed values, length \code{nrow(sim_mat)}.
+#' @return Numeric vector of per-observation CRPS. Lower is better.
+#' @examples
+#' calc.crps(matrix(rnorm(200), nrow = 2), c(0, 1))
+#' @export
+calc.crps <- function(sim_mat, obs) {
+  checkmate::expect_matrix(sim_mat, mode = "numeric")
+  checkmate::expect_numeric(obs, len = nrow(sim_mat), any.missing = FALSE)
+
+  n_draw <- ncol(sim_mat)
+  term_1 <- rowMeans(abs(sim_mat - obs))
+  sorted <- t(apply(sim_mat, 1, sort))
+  term_2 <- as.vector(sorted %*% (2 * seq_len(n_draw) - n_draw - 1)) * (2 / n_draw^2)
+
+  term_1 - 0.5 * term_2
+}
+
+
+#' Randomised probability integral transform from predictive samples
+#'
+#' Uniform on (0, 1) when the predictive distribution is correct. The random
+#' tie-break makes this valid for discrete predictive distributions and, unlike
+#' DHARMa's quantile residuals, applies identical treatment to every family --
+#' DHARMa decides whether to jitter from the declared family, which makes its
+#' statistic a poor basis for choosing *between* families.
+#'
+#' @param sim_mat Numeric matrix of predictive draws, one row per observation.
+#' @param obs Numeric vector of observed values, length \code{nrow(sim_mat)}.
+#' @return Numeric vector of PIT values in [0, 1].
+#' @examples
+#' calc.pit(matrix(rpois(200, 3), nrow = 2), c(2, 4))
+#' @export
+calc.pit <- function(sim_mat, obs) {
+  checkmate::expect_matrix(sim_mat, mode = "numeric")
+  checkmate::expect_numeric(obs, len = nrow(sim_mat), any.missing = FALSE)
+
+  n_below <- rowSums(sim_mat <  obs)
+  n_equal <- rowSums(sim_mat == obs)
+
+  (n_below + stats::runif(length(obs)) * n_equal) / ncol(sim_mat)
+}
+
+
+#' Draw from a fitted model's predictive distribution
+#'
+#' Simulates new responses at supplied fitted means using the fitted family's own
+#' parameters. Add a branch here when a new family is added to
+#' \code{dsm.mod.specs}; the error is deliberate rather than a silent fallback,
+#' because a wrong predictive distribution would quietly corrupt every score.
+#'
+#' @param fit Fitted \code{bam}/\code{gam} object.
+#' @param mu Numeric vector of fitted means on the response scale.
+#' @param n_sim Number of draws per element of \code{mu}.
+#' @return Numeric matrix, \code{length(mu)} rows by \code{n_sim} columns.
+#' @examples
+#' \dontrun{
+#' sim.response(fit, predict(fit, type = "response"), 200)
+#' }
+#' @export
+sim.response <- function(fit, mu, n_sim) {
+  checkmate::expect_class(fit, "gam")
+  checkmate::expect_numeric(mu, any.missing = FALSE)
+  checkmate::expect_count(n_sim, positive = TRUE)
+
+  key <- get.family.key(fit$family)
+  n   <- length(mu)
+
+  if (key == "tw") {
+    # getTheta(TRUE) returns p for tw(); the scale lives in $sig2.
+    matrix(mgcv::rTweedie(rep(mu, n_sim),
+                          p = fit$family$getTheta(TRUE), phi = fit$sig2),
+           nrow = n)
+  } else if (key == "nb") {
+    matrix(stats::rnbinom(n * n_sim, mu = rep(mu, n_sim),
+                          size = fit$family$getTheta(TRUE)),
+           nrow = n)
+  } else {
+    stop("sim.response: no predictive simulation defined for family '",
+         fit$family$family, "'")
+  }
+}
+
+
+#' Spatial-block cross-validation of one species' family finalists
+#'
+#' Step two of the two-step model selection. Refits each finalist from
+#' \code{\link{get.family.finalists}} on every spatial-block training set and
+#' scores it on the held-out block, using criteria that compare across response
+#' families because they live on the response scale.
+#'
+#' Every finalist sees identical folds, so the comparison is paired. Models are
+#' refitted with \code{mgcv::bam()} rather than through \code{dsm()} because the
+#' stored model already carries everything needed: \code{$data} holds the segment
+#' data including the \code{off.set} offset column, and \code{formula()} carries
+#' the offset term, so there is no detection function to reattach.
+#'
+#' @param species Character species/group label, copied into the output.
+#' @param segdata Segment data from a fitted model's \code{$data}. Needs
+#'   \code{x}, \code{y} and the response named in the finalists' formulae.
+#' @param finalists Tibble from \code{\link{get.family.finalists}}.
+#' @param n_folds,block_size,n_sim Cross-validation geometry: number of folds,
+#'   block edge length in projection units, predictive draws per held-out
+#'   segment.
+#' @param seed Seed for block assignment; predictive draws use \code{seed +
+#'   fold}, so every finalist sees the same draws within a fold.
+#' @param nthreads Passed to \code{mgcv::bam()}.
+#' @param calib.covar Column in \code{segdata} to aggregate the
+#'   observed-vs-expected calibration check over, or \code{NULL} to skip it.
+#'   Defaults to \code{"platform"}, which is present in the segment data whether
+#'   or not the formula uses it -- factor-smooth and no-factor formulations still
+#'   get a calibration score.
+#' @param progress If \code{TRUE}, report each fold as it completes.
+#' @return A tibble, one row per finalist per fold: \code{species},
+#'   \code{family_key}, \code{modname}, \code{fold}, \code{n_test}, \code{CRPS},
+#'   \code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{calib} (mean
+#'   |1 - observed/expected| over the levels of \code{calib.covar}), one
+#'   \code{OE_<level>} column per level, and \code{mins}.
+#' @examples
+#' \dontrun{
+#' run.family.cv("ATPU", dsm_data, finalists, n_folds = 5, seed = 20260820)
+#' }
+#' @export
+run.family.cv <- function(species, segdata, finalists,
+                          n_folds = 5, block_size = 1e5, n_sim = 200,
+                          seed = 1, nthreads = 1, calib.covar = "platform",
+                          progress = TRUE) {
+  checkmate::expect_character(species, len = 1, any.missing = FALSE)
+  checkmate::expect_data_frame(segdata, min.rows = 1)
+  checkmate::expect_data_frame(finalists, min.rows = 1)
+  if (!all(c("family_key", "modname", "formula", "family") %in% names(finalists)))
+    stop("run.family.cv: finalists must come from get.family.finalists()")
+
+  fold_id <- assign.blocks(segdata, n_folds, block_size, seed)
+  if (isTRUE(progress))
+    message(sprintf("%s: %d segments, %d occupied blocks, %d folds, sizes %s",
+                    species, nrow(segdata), attr(fold_id, "n_blocks"),
+                    length(unique(fold_id)),
+                    paste(table(fold_id), collapse = "/")))
+
+  resp <- as.character(finalists$formula[[1]][[2]])
+
+  out <- NULL
+  for (i in seq_len(nrow(finalists))) {
+    for (k in seq_len(n_folds)) {
+      train_idx <- which(fold_id != k)
+      test_idx  <- which(fold_id == k)
+      started   <- Sys.time()
+
+      fit <- try(mgcv::bam(finalists$formula[[i]], data = segdata[train_idx, ],
+                           family = finalists$family[[i]],
+                           method = "fREML", discrete = TRUE,
+                           nthreads = nthreads),
+                 silent = TRUE)
+
+      if (inherits(fit, "try-error")) {
+        message(sprintf("run.family.cv: %s %s fold %d failed: %s",
+                        species, finalists$modname[i], k, sub("\n.*", "", fit[1])))
+        next
+      }
+
+      pred_mu <- stats::predict(fit, newdata = segdata[test_idx, ],
+                                type = "response")
+      obs_y   <- segdata[[resp]][test_idx]
+
+      set.seed(seed + k)
+      sim_mat <- sim.response(fit, pred_mu, n_sim)
+
+      # 90% predictive interval coverage: the direct check on whether a family's
+      # tails are too light to carry prediction variance downstream.
+      lower <- apply(sim_mat, 1, stats::quantile, 0.05)
+      upper <- apply(sim_mat, 1, stats::quantile, 0.95)
+
+      row <- tibble::tibble(
+        species    = species,
+        family_key = finalists$family_key[i],
+        modname    = finalists$modname[i],
+        fold       = k,
+        n_test     = length(test_idx),
+        CRPS       = mean(calc.crps(sim_mat, obs_y)),
+        MAE        = mean(abs(obs_y - pred_mu)),
+        RMSE       = sqrt(mean((obs_y - pred_mu)^2)),
+        PIT_KS     = as.numeric(suppressWarnings(
+                       stats::ks.test(calc.pit(sim_mat, obs_y), "punif")$statistic)),
+        cover90    = mean(obs_y >= lower & obs_y <= upper))
+
+      # Observed/expected by the calibration covariate, if there is one. Kept
+      # generic: one column per level, plus the mean distance from 1 so the
+      # verdict logic downstream never has to know the levels.
+      if (!is.null(calib.covar) && calib.covar %in% names(segdata)) {
+        grp <- segdata[[calib.covar]][test_idx]
+        oe  <- tapply(obs_y, grp, sum) / tapply(pred_mu, grp, sum)
+        row <- dplyr::bind_cols(
+          row,
+          tibble::as_tibble(stats::setNames(as.list(oe), paste0("OE_", names(oe)))),
+          tibble::tibble(calib = mean(abs(1 - oe), na.rm = TRUE)))
+      }
+
+      row$mins <- as.numeric(difftime(Sys.time(), started, units = "mins"))
+      out <- dplyr::bind_rows(out, row)
+
+      if (isTRUE(progress))
+        message(sprintf("  %s %-34s fold %d done (%.1f min) CRPS=%.4f",
+                        species, finalists$modname[i], k,
+                        row$mins, row$CRPS))
+    }
+  }
+  out
+}
+
+
 #' Apply dsm_var_gam to one chunk of prediction data
 #'
 #' Calls \code{\link[dsm]{dsm_var_gam}} on \code{dat} using the offset stored
