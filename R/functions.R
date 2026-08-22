@@ -5075,15 +5075,37 @@ run.family.cv <- function(species, segdata, finalists,
       test_idx  <- which(fold_id == k)
       started   <- Sys.time()
 
-      fit <- try(mgcv::bam(finalists$formula[[i]], data = segdata[train_idx, ],
-                           family = finalists$family[[i]],
-                           method = "fREML", discrete = TRUE,
-                           nthreads = nthreads),
+      # discrete = TRUE is much faster but is the fragile path: on sparse data the
+      # nb() fits sit close to the edge of convergence and fail intermittently
+      # under parallel load, with "Error in if (sum(uconv))". Fall back to the
+      # stable path rather than dropping the fold, which would silently turn a
+      # two-family comparison into a one-family one. Mirrors
+      # dsm.options$refit.without.discrete in the final-fit step.
+      fit_args <- list(finalists$formula[[i]],
+                       data   = segdata[train_idx, ],
+                       family = finalists$family[[i]],
+                       method = "fREML")
+
+      fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = TRUE,
+                                                     nthreads = nthreads))),
                  silent = TRUE)
+      discrete_used <- TRUE
 
       if (inherits(fit, "try-error")) {
-        message(sprintf("run.family.cv: %s %s fold %d failed: %s",
-                        species, finalists$modname[i], k, sub("\n.*", "", fit[1])))
+        message(sprintf("run.family.cv: %s %s fold %d failed under discrete = TRUE (%s); retrying without",
+                        species, finalists$modname[i], k,
+                        sub("
+.*", "", fit[1])))
+        fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = FALSE))),
+                   silent = TRUE)
+        discrete_used <- FALSE
+      }
+
+      if (inherits(fit, "try-error")) {
+        message(sprintf("run.family.cv: %s %s fold %d failed both ways: %s",
+                        species, finalists$modname[i], k,
+                        sub("
+.*", "", fit[1])))
         next
       }
 
@@ -5115,7 +5137,8 @@ run.family.cv <- function(species, segdata, finalists,
         RMSE       = sqrt(mean((obs_y - pred_mu)^2)),
         PIT_KS     = as.numeric(suppressWarnings(
                        stats::ks.test(calc.pit(sim_mat, obs_y), "punif")$statistic)),
-        cover90    = mean(obs_y >= lower & obs_y <= upper))
+        cover90    = mean(obs_y >= lower & obs_y <= upper),
+        discrete   = discrete_used)
 
       # Observed/expected by the calibration covariate, if there is one. Kept
       # generic: one column per level, plus the mean distance from 1 so the
