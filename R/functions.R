@@ -5033,6 +5033,11 @@ sim.response <- function(fit, mu, n_sim) {
 #' @param seed Seed for block assignment; predictive draws use \code{seed +
 #'   fold}, so every finalist sees the same draws within a fold.
 #' @param nthreads Passed to \code{mgcv::bam()}.
+#' @param allow.slow.refit If a fold still fails after a single-threaded retry,
+#'   whether to refit it with \code{discrete = FALSE}. Correct but very
+#'   expensive: measured at 474 minutes per fit against 1.7 for the discrete
+#'   path, so a handful of folds can dominate an entire run. Defaults to
+#'   \code{FALSE}, in which case the fold is dropped and reported.
 #' @param calib.covar Column in \code{segdata} to aggregate the
 #'   observed-vs-expected calibration check over, or \code{NULL} to skip it.
 #'   Defaults to \code{"platform"}, which is present in the segment data whether
@@ -5052,7 +5057,7 @@ sim.response <- function(fit, mu, n_sim) {
 run.family.cv <- function(species, segdata, finalists,
                           n_folds = 5, block_size = 1e5, n_sim = 200,
                           seed = 1, nthreads = 1, calib.covar = "platform",
-                          progress = TRUE) {
+                          allow.slow.refit = FALSE, progress = TRUE) {
   checkmate::expect_character(species, len = 1, any.missing = FALSE)
   checkmate::expect_data_frame(segdata, min.rows = 1)
   checkmate::expect_data_frame(finalists, min.rows = 1)
@@ -5089,16 +5094,30 @@ run.family.cv <- function(species, segdata, finalists,
       fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = TRUE,
                                                      nthreads = nthreads))),
                  silent = TRUE)
-      discrete_used <- TRUE
+      fit_path <- "discrete"
 
-      if (inherits(fit, "try-error")) {
-        message(sprintf("run.family.cv: %s %s fold %d failed under discrete = TRUE (%s); retrying without",
+      # The failure is intermittent and load-related, so retry single-threaded
+      # first: it removes the non-determinism in the threaded accumulation and
+      # costs roughly the same. Only then consider discrete = FALSE, which is
+      # correct but wildly expensive - measured at 474 min per fit against 1.7
+      # min for the discrete path on this data, so it is off unless asked for.
+      if (inherits(fit, "try-error") && nthreads != 1) {
+        message(sprintf("run.family.cv: %s %s fold %d failed (%s); retrying single-threaded",
                         species, finalists$modname[i], k,
                         sub("
 .*", "", fit[1])))
+        fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = TRUE,
+                                                       nthreads = 1))),
+                   silent = TRUE)
+        fit_path <- "discrete_1thread"
+      }
+
+      if (inherits(fit, "try-error") && isTRUE(allow.slow.refit)) {
+        message(sprintf("run.family.cv: %s %s fold %d still failing; refitting with discrete = FALSE (expect hours)",
+                        species, finalists$modname[i], k))
         fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = FALSE))),
                    silent = TRUE)
-        discrete_used <- FALSE
+        fit_path <- "exact"
       }
 
       if (inherits(fit, "try-error")) {
@@ -5146,7 +5165,7 @@ run.family.cv <- function(species, segdata, finalists,
         PIT_KS     = as.numeric(suppressWarnings(
                        stats::ks.test(calc.pit(sim_mat, obs_y), "punif")$statistic)),
         cover90    = mean(obs_y >= lower & obs_y <= upper),
-        discrete   = discrete_used)
+        fit_path   = fit_path)
 
       # Observed/expected by the calibration covariate, if there is one. Kept
       # generic: one column per level, plus the mean distance from 1 so the
@@ -5218,6 +5237,23 @@ get.per.cell.var <- function(this.dsm,
   # If off.set is a vector add it to the df so it will be split properly as well.
   if (length(off.set) > 1 && length(off.set) != nrow(df)) {
     stop("get.per.cell.var: off.set vector is not same length as df")
+  }
+
+  # dsm_var_gam() predicts internally and takes no discrete argument, so there
+  # is no way to force exact prediction from here - the fit decides. A model
+  # fitted with discrete = TRUE re-discretises whatever newdata it is given, so
+  # with nchunks > 1 each chunk is discretised on its own and a cell's variance
+  # depends on which chunk it landed in. Changing nchunks changes the answer.
+  if (!is.null(this.dsm$dinfo)) {
+    warning(sprintf(paste0(
+      "get.per.cell.var: model was fitted with discrete = TRUE, so dsm_var_gam() ",
+      "will use discretised prediction%s. Refit without discrete (see ",
+      "dsm.options$refit.without.discrete) for variance that does not depend on ",
+      "how the grid is divided."),
+      if (nchunks > 1)
+        sprintf(" independently within each of the %d chunks, making per-cell variance depend on chunk boundaries",
+                nchunks) else ""),
+      call. = FALSE)
   }
 
   df$.my.off.set <- off.set

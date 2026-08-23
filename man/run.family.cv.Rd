@@ -14,6 +14,7 @@ run.family.cv(
   seed = 1,
   nthreads = 1,
   calib.covar = "platform",
+  allow.slow.refit = FALSE,
   progress = TRUE
 )
 }
@@ -39,6 +40,12 @@ observed-vs-expected calibration check over, or \code{NULL} to skip it.
 Defaults to \code{"platform"}, which is present in the segment data whether
 or not the formula uses it -- factor-smooth and no-factor formulations still
 get a calibration score.}
+
+\item{allow.slow.refit}{If a fold still fails after a single-threaded retry,
+whether to refit it with \code{discrete = FALSE}. Correct but very
+expensive: measured at 474 minutes per fit against 1.7 for the discrete
+path, so a handful of folds can dominate an entire run. Defaults to
+\code{FALSE}, in which case the fold is dropped and reported.}
 
 \item{progress}{If \code{TRUE}, report each fold as it completes.}
 }
