@@ -5263,6 +5263,13 @@ apply.dsm.var <- function(dat, this.dsm){
 #' @param this.dsm Fitted \code{dsm} object.
 #' @param df Prediction grid data frame.
 #' @param nchunks Integer number of chunks to split \code{df} into.
+#' @param exact.predict If \code{TRUE} (default) and the model was fitted with
+#'   \code{discrete = TRUE}, drop its \code{$dinfo} so that \code{dsm_var_gam()}
+#'   predicts exactly. \code{dsm_var_gam()} takes no \code{discrete} argument, so
+#'   this is the only way to reach it: without it each chunk is discretised
+#'   separately and a cell's variance depends on which chunk it fell in, meaning
+#'   \code{nchunks} silently changes the answer. Only the evaluation changes -
+#'   coefficients and \code{Vp} are untouched.
 #' @param off.set Numeric offset (cell area): either a scalar or a vector the
 #'   same length as \code{nrow(df)}.
 #' @param parallel If \code{TRUE}, process chunks in parallel with
@@ -5275,7 +5282,8 @@ get.per.cell.var <- function(this.dsm,
                              nchunks,
                              off.set = 1,
                              parallel = FALSE,
-                             nodes = 1
+                             nodes = 1,
+                             exact.predict = TRUE
 ) {
 
   # If off.set is a vector add it to the df so it will be split properly as well.
@@ -5284,19 +5292,29 @@ get.per.cell.var <- function(this.dsm,
   }
 
   # dsm_var_gam() predicts internally and takes no discrete argument, so there
-  # is no way to force exact prediction from here - the fit decides. A model
-  # fitted with discrete = TRUE re-discretises whatever newdata it is given, so
-  # with nchunks > 1 each chunk is discretised on its own and a cell's variance
-  # depends on which chunk it landed in. Changing nchunks changes the answer.
-  if (!is.null(this.dsm$dinfo)) {
-    warning(sprintf(paste0(
-      "get.per.cell.var: model was fitted with discrete = TRUE, so dsm_var_gam() ",
-      "will use discretised prediction%s. Refit without discrete (see ",
-      "dsm.options$refit.without.discrete) for variance that does not depend on ",
-      "how the grid is divided."),
+  # is no way to ask it for exact prediction. But a model fitted with
+  # discrete = TRUE re-discretises whatever newdata it is handed, so with
+  # nchunks > 1 each chunk is discretised on its own and a cell's variance
+  # depends on which chunk it landed in - change nchunks and the answer changes.
+  #
+  # Dropping $dinfo makes predict.bam() take the exact path, which is precisely
+  # what predict(discrete = FALSE) does. Verified identical to that call, and
+  # composition-independent, while leaving the coefficients and Vp untouched -
+  # this changes how the fitted model is evaluated, not the fit itself.
+  if (isTRUE(exact.predict) && !is.null(this.dsm$dinfo)) {
+    message(sprintf(paste0(
+      "get.per.cell.var: model was fitted with discrete = TRUE; predicting ",
+      "exactly instead%s. Pass exact.predict = FALSE to keep the discretised ",
+      "path."),
       if (nchunks > 1)
-        sprintf(" independently within each of the %d chunks, making per-cell variance depend on chunk boundaries",
-                nchunks) else ""),
+        sprintf(", so per-cell variance does not depend on which of the %d chunks a cell falls in",
+                nchunks) else ""))
+    this.dsm$dinfo <- NULL
+  } else if (!is.null(this.dsm$dinfo) && nchunks > 1) {
+    warning(sprintf(paste0(
+      "get.per.cell.var: model was fitted with discrete = TRUE and ",
+      "exact.predict is FALSE, so each of the %d chunks is discretised ",
+      "separately and per-cell variance depends on chunk boundaries."), nchunks),
       call. = FALSE)
   }
 

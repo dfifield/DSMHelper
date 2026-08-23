@@ -10,7 +10,8 @@ get.per.cell.var(
   nchunks,
   off.set = 1,
   parallel = FALSE,
-  nodes = 1
+  nodes = 1,
+  exact.predict = TRUE
 )
 }
 \arguments{
@@ -27,6 +28,14 @@ same length as \code{nrow(df)}.}
 \code{parLapply}.}
 
 \item{nodes}{Integer number of cluster nodes for parallel processing.}
+
+\item{exact.predict}{If \code{TRUE} (default) and the model was fitted with
+\code{discrete = TRUE}, drop its \code{$dinfo} so that \code{dsm_var_gam()}
+predicts exactly. \code{dsm_var_gam()} takes no \code{discrete} argument, so
+this is the only way to reach it: without it each chunk is discretised
+separately and a cell's variance depends on which chunk it fell in, meaning
+\code{nchunks} silently changes the answer. Only the evaluation changes -
+coefficients and \code{Vp} are untouched.}
 }
 \value{
 List of per-chunk results from \code{\link{apply.dsm.var}}.
