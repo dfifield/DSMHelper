@@ -5010,6 +5010,45 @@ sim.response <- function(fit, mu, n_sim) {
 }
 
 
+#' A fresh, unused copy of a response family
+#'
+#' mgcv's extended families (\code{tw()}, \code{nb()}) carry mutable state in
+#' their closures' environment: fitting writes the estimated parameter back into
+#' the object it was handed. Reusing one object across fits therefore couples
+#' them, and a *failed* fit can leave it in a state that makes every later fit
+#' using it fail too.
+#'
+#' That is not hypothetical. \code{dsm.mod.specs} holds one family object per
+#' candidate, and \code{\link{get.family.finalists}} hands back a reference to
+#' it, so every species and every fold in a run share the same \code{nb()}. In a
+#' sequential run over eleven species the first species failed three folds and
+#' every subsequent species then failed all five, 0 for 50.
+#'
+#' Rebuilds from the family key, so it covers whatever
+#' \code{\link{get.family.key}} recognises. A family carrying non-default
+#' arguments will not survive the round trip - hence the explicit error for
+#' anything unregistered, rather than a silent fallback that would quietly
+#' change the model.
+#'
+#' @param fam A family object.
+#' @return A newly constructed family object of the same kind.
+#' @examples
+#' f <- mgcv::nb()
+#' identical(environment(f$getTheta), environment(fresh.family(f)$getTheta))
+#' @export
+fresh.family <- function(fam) {
+  key <- get.family.key(fam)
+
+  switch(key,
+         tw = mgcv::tw(),
+         nb = mgcv::nb(),
+         stop("fresh.family: no constructor registered for family '",
+              if (is.character(fam)) fam else fam$family,
+              "'. Add one here rather than reusing the supplied object, which ",
+              "would couple fits together."))
+}
+
+
 #' Spatial-block cross-validation of one species' family finalists
 #'
 #' Step two of the two-step model selection. Refits each finalist from
@@ -5086,9 +5125,12 @@ run.family.cv <- function(species, segdata, finalists,
       # stable path rather than dropping the fold, which would silently turn a
       # two-family comparison into a one-family one. Mirrors
       # dsm.options$refit.without.discrete in the final-fit step.
+      # A fresh family per fit. The object in dsm.mod.specs is shared by every
+      # species and every fold, and mgcv mutates it, so without this a single
+      # failed fit poisons all the ones after it. See fresh.family().
       fit_args <- list(finalists$formula[[i]],
                        data   = segdata[train_idx, ],
-                       family = finalists$family[[i]],
+                       family = fresh.family(finalists$family[[i]]),
                        method = "fREML")
 
       fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = TRUE,
@@ -5106,6 +5148,7 @@ run.family.cv <- function(species, segdata, finalists,
                         species, finalists$modname[i], k,
                         sub("
 .*", "", fit[1])))
+        fit_args$family <- fresh.family(finalists$family[[i]])
         fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = TRUE,
                                                        nthreads = 1))),
                    silent = TRUE)
@@ -5115,6 +5158,7 @@ run.family.cv <- function(species, segdata, finalists,
       if (inherits(fit, "try-error") && isTRUE(allow.slow.refit)) {
         message(sprintf("run.family.cv: %s %s fold %d still failing; refitting with discrete = FALSE (expect hours)",
                         species, finalists$modname[i], k))
+        fit_args$family <- fresh.family(finalists$family[[i]])
         fit <- try(do.call(mgcv::bam, c(fit_args, list(discrete = FALSE))),
                    silent = TRUE)
         fit_path <- "exact"
