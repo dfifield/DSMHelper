@@ -4755,13 +4755,117 @@ summarize.dsm <- function(model){
 
 
 
+# Response families the DSM model selection code knows how to rebuild and to
+# simulate from. Keyed by get.family.key(). An environment rather than a literal
+# so a SubProject can add a family without a package release - see
+# register.dsm.family().
+.dsm_families <- new.env(parent = emptyenv())
+
+#' Register a response family for DSM model selection
+#'
+#' The selection code is agnostic to how many response families are in play:
+#' \code{\link{get.family.finalists}} takes the AIC-best candidate in each family
+#' it finds, and \code{\link{run.family.cv}} scores all of them against the same
+#' folds. The only family-specific knowledge it needs is how to rebuild a family
+#' object and how to draw from its predictive distribution, and that lives here.
+#'
+#' Adding a third or fourth family to \code{dsm.mod.specs} therefore takes one
+#' call to this function -- from \code{analysis_settings.R} if the family is
+#' specific to one SubProject -- rather than an edit inside the package.
+#'
+#' A constructor is required rather than reusing the family object supplied with
+#' the model spec: mgcv's extended families carry mutable state in their
+#' closures, so sharing one object across fits couples them and lets a failed fit
+#' poison later ones. See \code{\link{fresh.family}}.
+#'
+#' @param key Family key, as \code{\link{get.family.key}} returns it, e.g.
+#'   \code{"tw"}. Registering an existing key replaces it.
+#' @param constructor Function of no arguments returning a newly built family
+#'   object, e.g. \code{function() mgcv::tw()}.
+#' @param simulate Function of \code{(fit, mu, n_sim)} returning
+#'   \code{length(mu) * n_sim} draws from the fitted predictive distribution,
+#'   varying fastest over \code{mu}. \code{fit} is the fitted model, so
+#'   family parameters can be read from \code{fit$family} and \code{fit$sig2}.
+#' @return Invisibly, the key.
+#' @examples
+#' \dontrun{
+#' # a Poisson candidate added to dsm.mod.specs for one SubProject
+#' register.dsm.family(
+#'   "poisson",
+#'   constructor = function() stats::poisson(),
+#'   simulate = function(fit, mu, n_sim)
+#'     stats::rpois(length(mu) * n_sim, lambda = rep(mu, n_sim)))
+#' }
+#' @seealso \code{\link{registered.dsm.families}}, \code{\link{fresh.family}},
+#'   \code{\link{sim.response}}
+#' @export
+register.dsm.family <- function(key, constructor, simulate) {
+  checkmate::expect_string(key, min.chars = 1)
+  checkmate::expect_function(constructor, nargs = 0)
+  checkmate::expect_function(simulate, args = c("fit", "mu", "n_sim"))
+
+  assign(key, list(constructor = constructor, simulate = simulate),
+         envir = .dsm_families)
+  invisible(key)
+}
+
+#' Keys of the response families currently registered
+#'
+#' @return Character vector of keys, sorted.
+#' @examples
+#' registered.dsm.families()
+#' @seealso \code{\link{register.dsm.family}}
+#' @export
+registered.dsm.families <- function() sort(ls(.dsm_families))
+
+#' Look up a registered family, or fail with a useful message
+#'
+#' @param key Family key from \code{\link{get.family.key}}.
+#' @param what Caller context, used to prefix the error.
+#' @return The registry entry: a list of \code{constructor} and \code{simulate}.
+#' @noRd
+get.dsm.family <- function(key, what) {
+  checkmate::expect_string(key)
+
+  if (!exists(key, envir = .dsm_families, inherits = FALSE))
+    stop(what, " is not registered. Registered: ",
+         paste(registered.dsm.families(), collapse = ", "),
+         ". Add it with register.dsm.family(\"", key,
+         "\", constructor, simulate) - see ?register.dsm.family. Guessing a ",
+         "constructor here would silently change the model, and guessing a ",
+         "simulator would silently invalidate every cross-validation score.")
+
+  get(key, envir = .dsm_families, inherits = FALSE)
+}
+
+.onLoad <- function(libname, pkgname) {
+  # The two families dsm.mod.specs ships with. Anything else is registered by
+  # the caller; nothing in the selection code assumes this pair.
+  register.dsm.family(
+    "tw",
+    constructor = function() mgcv::tw(),
+    # getTheta(TRUE) returns p for tw(); the scale lives in $sig2.
+    simulate = function(fit, mu, n_sim)
+      mgcv::rTweedie(rep(mu, n_sim), p = fit$family$getTheta(TRUE),
+                     phi = fit$sig2))
+
+  register.dsm.family(
+    "nb",
+    constructor = function() mgcv::nb(),
+    simulate = function(fit, mu, n_sim)
+      stats::rnbinom(length(mu) * n_sim, mu = rep(mu, n_sim),
+                     size = fit$family$getTheta(TRUE)))
+}
+
+
 #' Short, stable key for a response family
 #'
 #' Normalises a family object's name so that fitted and unfitted objects agree
 #' (\code{"Tweedie"} and \code{"Tweedie(p=1.167)"} both give \code{"tw"}), and so
 #' that families beyond the two currently in \code{dsm.mod.specs} get a key of
 #' their own rather than an error. Nothing downstream should assume the set of
-#' keys is \code{c("tw", "nb")}.
+#' keys is \code{c("tw", "nb")}; the families the selection code can rebuild and
+#' simulate from are whatever \code{\link{register.dsm.family}} has been given.
 #'
 #' @param fam A family object, or the character name of one.
 #' @return Length-one character key.
@@ -4991,22 +5095,17 @@ sim.response <- function(fit, mu, n_sim) {
   checkmate::expect_numeric(mu, any.missing = FALSE)
   checkmate::expect_count(n_sim, positive = TRUE)
 
-  key <- get.family.key(fit$family)
-  n   <- length(mu)
+  key  <- get.family.key(fit$family)
+  spec <- get.dsm.family(key,
+                         what = paste0("sim.response: family '",
+                                       fit$family$family, "'"))
 
-  if (key == "tw") {
-    # getTheta(TRUE) returns p for tw(); the scale lives in $sig2.
-    matrix(mgcv::rTweedie(rep(mu, n_sim),
-                          p = fit$family$getTheta(TRUE), phi = fit$sig2),
-           nrow = n)
-  } else if (key == "nb") {
-    matrix(stats::rnbinom(n * n_sim, mu = rep(mu, n_sim),
-                          size = fit$family$getTheta(TRUE)),
-           nrow = n)
-  } else {
-    stop("sim.response: no predictive simulation defined for family '",
-         fit$family$family, "'")
-  }
+  draws <- spec$simulate(fit, mu, n_sim)
+  if (length(draws) != length(mu) * n_sim)
+    stop("sim.response: the simulator registered for '", key, "' returned ",
+         length(draws), " draws, expected ", length(mu) * n_sim)
+
+  matrix(draws, nrow = length(mu))
 }
 
 
@@ -5024,11 +5123,11 @@ sim.response <- function(fit, mu, n_sim) {
 #' sequential run over eleven species the first species failed three folds and
 #' every subsequent species then failed all five, 0 for 50.
 #'
-#' Rebuilds from the family key, so it covers whatever
-#' \code{\link{get.family.key}} recognises. A family carrying non-default
-#' arguments will not survive the round trip - hence the explicit error for
-#' anything unregistered, rather than a silent fallback that would quietly
-#' change the model.
+#' Rebuilds from the family key using the constructor registered for it, so it
+#' covers whatever has been passed to \code{\link{register.dsm.family}} rather
+#' than a fixed pair. A family carrying non-default arguments will not survive
+#' the round trip - hence the explicit error for anything unregistered, rather
+#' than a silent fallback that would quietly change the model.
 #'
 #' @param fam A family object.
 #' @return A newly constructed family object of the same kind.
@@ -5038,14 +5137,11 @@ sim.response <- function(fit, mu, n_sim) {
 #' @export
 fresh.family <- function(fam) {
   key <- get.family.key(fam)
-
-  switch(key,
-         tw = mgcv::tw(),
-         nb = mgcv::nb(),
-         stop("fresh.family: no constructor registered for family '",
-              if (is.character(fam)) fam else fam$family,
-              "'. Add one here rather than reusing the supplied object, which ",
-              "would couple fits together."))
+  spec <- get.dsm.family(key,
+                         what = paste0("fresh.family: family '",
+                                       if (is.character(fam)) fam else fam$family,
+                                       "'"))
+  spec$constructor()
 }
 
 

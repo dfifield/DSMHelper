@@ -26,11 +26,11 @@ it, so every species and every fold in a run share the same \code{nb()}. In a
 sequential run over eleven species the first species failed three folds and
 every subsequent species then failed all five, 0 for 50.
 
-Rebuilds from the family key, so it covers whatever
-\code{\link{get.family.key}} recognises. A family carrying non-default
-arguments will not survive the round trip - hence the explicit error for
-anything unregistered, rather than a silent fallback that would quietly
-change the model.
+Rebuilds from the family key using the constructor registered for it, so it
+covers whatever has been passed to \code{\link{register.dsm.family}} rather
+than a fixed pair. A family carrying non-default arguments will not survive
+the round trip - hence the explicit error for anything unregistered, rather
+than a silent fallback that would quietly change the model.
 }
 \examples{
 f <- mgcv::nb()

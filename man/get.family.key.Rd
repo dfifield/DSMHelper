@@ -17,7 +17,8 @@ Normalises a family object's name so that fitted and unfitted objects agree
 (\code{"Tweedie"} and \code{"Tweedie(p=1.167)"} both give \code{"tw"}), and so
 that families beyond the two currently in \code{dsm.mod.specs} get a key of
 their own rather than an error. Nothing downstream should assume the set of
-keys is \code{c("tw", "nb")}.
+keys is \code{c("tw", "nb")}; the families the selection code can rebuild and
+simulate from are whatever \code{\link{register.dsm.family}} has been given.
 }
 \examples{
 get.family.key(mgcv::tw())
