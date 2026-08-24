@@ -53,7 +53,8 @@ reported.}
 }
 \value{
 A tibble, one row per finalist per fold: \code{species},
-\code{family_key}, \code{modname}, \code{fold}, \code{n_test}, \code{CRPS},
+\code{family_key}, \code{modname}, \code{fold}, \code{n_test},
+\code{n_blocks}, \code{CRPS},
 \code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{calib} (mean
 |1 - observed/expected| over the levels of \code{calib.covar}), one
 \code{OE_<level>} column per level, and \code{mins}.

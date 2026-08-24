@@ -17,7 +17,9 @@ projection units (metres).}
 \item{seed}{Random seed for block-to-fold assignment. The random number
 generator kind is pinned to Mersenne-Twister for the duration and restored
 afterwards, so the folds are the same whether or not the caller is running
-inside a \code{future} (which switches to L'Ecuyer-CMRG).}
+inside a \code{future} (which switches to L'Ecuyer-CMRG). Blocks are sorted
+before assignment, so the folds depend on the coordinates, the block size
+and the seed, and not on the row order of \code{segdata}.}
 }
 \value{
 Integer vector of fold membership, length \code{nrow(segdata)}, with
@@ -32,6 +34,21 @@ at random, so each fold holds out whole regions rather than scattered
 segments. Random hold-outs would leak neighbouring segments into training and
 flatter every model equally, because the residuals are spatially structured.
 }
+\section{Relation to the blockCV package}{
+
+This is a deliberately minimal hand-rolled equivalent of
+\code{blockCV::cv_spatial(hexagon = FALSE, selection = "random")}: a regular
+grid of square blocks on the analysis projection, assigned to folds at random.
+It is not a reimplementation of that package's features. blockCV additionally
+balances fold assignment by record count over repeated draws, offers hexagonal
+and systematic/checkerboard layouts, and can derive a block size from the
+empirical autocorrelation range; none of those are done here. The pairing does
+the work instead - every family is refitted and scored on identical folds - so
+fold-size imbalance cancels in the comparison rather than needing to be
+designed away. Weighting the fold means by \code{n_test} changed no family
+verdict on either SubProject tested.
+}
+
 \examples{
 assign.blocks(data.frame(x = runif(100, 0, 5e5), y = runif(100, 0, 5e5)),
               5, 1e5, 1)

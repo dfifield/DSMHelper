@@ -4980,7 +4980,22 @@ get.family.finalists <- function(mod.res, mod.specs) {
 #' @param seed Random seed for block-to-fold assignment. The random number
 #'   generator kind is pinned to Mersenne-Twister for the duration and restored
 #'   afterwards, so the folds are the same whether or not the caller is running
-#'   inside a \code{future} (which switches to L'Ecuyer-CMRG).
+#'   inside a \code{future} (which switches to L'Ecuyer-CMRG). Blocks are sorted
+#'   before assignment, so the folds depend on the coordinates, the block size
+#'   and the seed, and not on the row order of \code{segdata}.
+#'
+#' @section Relation to the blockCV package:
+#' This is a deliberately minimal hand-rolled equivalent of
+#' \code{blockCV::cv_spatial(hexagon = FALSE, selection = "random")}: a regular
+#' grid of square blocks on the analysis projection, assigned to folds at random.
+#' It is not a reimplementation of that package's features. blockCV additionally
+#' balances fold assignment by record count over repeated draws, offers hexagonal
+#' and systematic/checkerboard layouts, and can derive a block size from the
+#' empirical autocorrelation range; none of those are done here. The pairing does
+#' the work instead - every family is refitted and scored on identical folds - so
+#' fold-size imbalance cancels in the comparison rather than needing to be
+#' designed away. Weighting the fold means by \code{n_test} changed no family
+#' verdict on either SubProject tested.
 #' @return Integer vector of fold membership, length \code{nrow(segdata)}, with
 #'   an \code{"n_blocks"} attribute giving the number of occupied blocks. That
 #'   count is worth reporting: it is the real sample size behind the folds, and a
@@ -5008,8 +5023,21 @@ assign.blocks <- function(segdata, n_folds, block_size, seed) {
   set.seed(seed)
   block_id     <- paste(floor(segdata$x / block_size),
                         floor(segdata$y / block_size), sep = "_")
-  unique_block <- unique(block_id)
-  # rep_len then sample spreads folds as evenly as the block count allows.
+  # sort(), not bare unique(): the shuffled fold vector below is matched to this
+  # list positionally, so with unique() the folds depended on the ROW ORDER of
+  # segdata as well as on the seed. The same coordinates in a different order
+  # gave a different partition from the same seed - measured on Atl IMRP ATPU,
+  # 468,424 segments: 112404/111500/65212/89384/89924 as stored against
+  # 103136/138212/66388/89404/71284 permuted. Sorting makes the folds a function
+  # of the coordinates, block size and seed alone, which is what the seed was
+  # there to promise.
+  unique_block <- sort(unique(block_id))
+  # rep_len then sample spreads folds as evenly as the block COUNT allows, which
+  # is not the same as evenly by segment count: blocks hold anywhere from a
+  # handful to thousands of segments, so fold sizes still differ (1.4x on
+  # NL_EXPL_DRL_RA, 1.8x on Atl IMRP). That is tolerable because the comparison
+  # is paired - every family is scored on identical held-out segments - but it
+  # does mean the folds are not interchangeable samples.
   block_fold   <- stats::setNames(
     sample(rep_len(seq_len(n_folds), length(unique_block))), unique_block)
 
@@ -5182,7 +5210,8 @@ fresh.family <- function(fam) {
 #'   get a calibration score.
 #' @param progress If \code{TRUE}, report each fold as it completes.
 #' @return A tibble, one row per finalist per fold: \code{species},
-#'   \code{family_key}, \code{modname}, \code{fold}, \code{n_test}, \code{CRPS},
+#'   \code{family_key}, \code{modname}, \code{fold}, \code{n_test},
+#'   \code{n_blocks}, \code{CRPS},
 #'   \code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{calib} (mean
 #'   |1 - observed/expected| over the levels of \code{calib.covar}), one
 #'   \code{OE_<level>} column per level, and \code{mins}.
@@ -5302,6 +5331,10 @@ run.family.cv <- function(species, segdata, finalists,
         modname    = finalists$modname[i],
         fold       = k,
         n_test     = length(test_idx),
+        # Constant within a species, but carried per row so the block count -
+        # the real sample size behind the folds - survives into the results file
+        # and the report, which otherwise only see the fitting messages.
+        n_blocks   = attr(fold_id, "n_blocks"),
         CRPS       = mean(calc.crps(sim_mat, obs_y)),
         MAE        = mean(abs(obs_y - pred_mu)),
         RMSE       = sqrt(mean((obs_y - pred_mu)^2)),
