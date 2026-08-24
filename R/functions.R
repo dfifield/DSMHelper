@@ -5170,9 +5170,11 @@ fresh.family <- function(fam) {
 #' @param nthreads Passed to \code{mgcv::bam()}.
 #' @param allow.slow.refit If a fold still fails after a single-threaded retry,
 #'   whether to refit it with \code{discrete = FALSE}. Correct but very
-#'   expensive: measured at 474 minutes per fit against 1.7 for the discrete
-#'   path, so a handful of folds can dominate an entire run. Defaults to
-#'   \code{FALSE}, in which case the fold is dropped and reported.
+#'   expensive: roughly 280x the discrete path (474 min against 1.7 min per fit
+#'   on \code{NL_EXPL_DRL_RA}, 153,344 segments, 80 cores). Treat the ratio as
+#'   the transferable number; either way a handful of folds can dominate an
+#'   entire run. Defaults to \code{FALSE}, in which case the fold is dropped and
+#'   reported.
 #' @param calib.covar Column in \code{segdata} to aggregate the
 #'   observed-vs-expected calibration check over, or \code{NULL} to skip it.
 #'   Defaults to \code{"platform"}, which is present in the segment data whether
@@ -5237,8 +5239,9 @@ run.family.cv <- function(species, segdata, finalists,
       # The failure is intermittent and load-related, so retry single-threaded
       # first: it removes the non-determinism in the threaded accumulation and
       # costs roughly the same. Only then consider discrete = FALSE, which is
-      # correct but wildly expensive - measured at 474 min per fit against 1.7
-      # min for the discrete path on this data, so it is off unless asked for.
+      # correct but wildly expensive - roughly 280x the discrete path (474 min
+      # against 1.7 min per fit on NL_EXPL_DRL_RA, 153,344 segments, 80 cores),
+      # so it is off unless asked for.
       if (inherits(fit, "try-error") && nthreads != 1) {
         message(sprintf("run.family.cv: %s %s fold %d failed (%s); retrying single-threaded",
                         species, finalists$modname[i], k,
@@ -5440,7 +5443,9 @@ get.per.cell.var <- function(this.dsm,
     })
 
     # Need envir arg or else it won't find data objects when being rendered.
-    # takes about 1 min
+    # Cost is serialising the split prediction grid to every node, so it scales
+    # with grid rows x nodes rather than with anything about the model.
+    # ~1 min (unattributed: SubProject and node count not recorded).
     parallel::clusterExport(
       cl,
       c(

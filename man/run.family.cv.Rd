@@ -43,9 +43,11 @@ get a calibration score.}
 
 \item{allow.slow.refit}{If a fold still fails after a single-threaded retry,
 whether to refit it with \code{discrete = FALSE}. Correct but very
-expensive: measured at 474 minutes per fit against 1.7 for the discrete
-path, so a handful of folds can dominate an entire run. Defaults to
-\code{FALSE}, in which case the fold is dropped and reported.}
+expensive: roughly 280x the discrete path (474 min against 1.7 min per fit
+on \code{NL_EXPL_DRL_RA}, 153,344 segments, 80 cores). Treat the ratio as
+the transferable number; either way a handful of folds can dominate an
+entire run. Defaults to \code{FALSE}, in which case the fold is dropped and
+reported.}
 
 \item{progress}{If \code{TRUE}, report each fold as it completes.}
 }
