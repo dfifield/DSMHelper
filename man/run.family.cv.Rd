@@ -12,9 +12,13 @@ run.family.cv(
   block_size = 1e+05,
   n_sim = 200,
   seed = 1,
+  crs = NULL,
+  balance_column = NULL,
+  folds = NULL,
   nthreads = 1,
   calib.covar = "platform",
   allow.slow.refit = FALSE,
+  max.pred.ratio = 10000,
   progress = TRUE
 )
 }
@@ -33,6 +37,17 @@ segment.}
 \item{seed}{Seed for block assignment; predictive draws use \code{seed +
 fold}, so every finalist sees the same draws within a fold.}
 
+\item{crs}{Projected CRS of \code{segdata}'s coordinates, passed to
+\code{\link{assign.blocks}}. Required unless \code{folds} is supplied.}
+
+\item{balance_column}{Optional \code{segdata} column whose classes are
+balanced across folds, passed to \code{\link{assign.blocks}}.}
+
+\item{folds}{Optional precomputed fold vector, one entry per row of
+\code{segdata} and matched to it by position. Supply it to avoid repeating
+the balancing search across calls that share segment data; \code{NULL}
+computes it here.}
+
 \item{nthreads}{Passed to \code{mgcv::bam()}.}
 
 \item{calib.covar}{Column in \code{segdata} to aggregate the
@@ -48,6 +63,15 @@ on \code{NL_EXPL_DRL_RA}, 153,344 segments, 80 cores). Treat the ratio as
 the transferable number; either way a handful of folds can dominate an
 entire run. Defaults to \code{FALSE}, in which case the fold is dropped and
 reported.}
+
+\item{max.pred.ratio}{How many times the largest observed value a fold's
+largest prediction may reach before the fit is called diverged and the fold
+is dropped. Guards the simulation step: \code{mgcv::rTweedie} draws a
+Poisson count per observation and then that many gamma variates, so absurd
+fitted values ask for an absurd vector and the error is an allocation
+failure rather than anything catchable-looking. Complements
+\code{dsm.options$family.cv.diverged.ratio}, which screens scores after the
+fact; this screens predictions before a score exists at all.}
 
 \item{progress}{If \code{TRUE}, report each fold as it completes.}
 }
@@ -66,7 +90,10 @@ scores it on the held-out block, using criteria that compare across response
 families because they live on the response scale.
 }
 \details{
-Every finalist sees identical folds, so the comparison is paired. Models are
+Every finalist sees identical folds, so the comparison is paired -- but a fold
+can still be dropped for one family and not another when its fit fails or
+diverges, which breaks that pairing. The caller is responsible for excluding
+such folds from every family before averaging. Models are
 refitted with \code{mgcv::bam()} rather than through \code{dsm()} because the
 stored model already carries everything needed: \code{$data} holds the segment
 data including the \code{off.set} offset column, and \code{formula()} carries

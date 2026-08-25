@@ -4,7 +4,7 @@
 \alias{assign.blocks}
 \title{Assign segments to spatial-block cross-validation folds}
 \usage{
-assign.blocks(segdata, n_folds, block_size, seed)
+assign.blocks(segdata, n_folds, block_size, seed, crs, balance_column = NULL)
 }
 \arguments{
 \item{segdata}{Data frame with numeric \code{x} and \code{y} columns in
@@ -17,9 +17,19 @@ projection units (metres).}
 \item{seed}{Random seed for block-to-fold assignment. The random number
 generator kind is pinned to Mersenne-Twister for the duration and restored
 afterwards, so the folds are the same whether or not the caller is running
-inside a \code{future} (which switches to L'Ecuyer-CMRG). Blocks are sorted
-before assignment, so the folds depend on the coordinates, the block size
-and the seed, and not on the row order of \code{segdata}.}
+inside a \code{future} (which switches to L'Ecuyer-CMRG). blockCV calls
+\code{set.seed()} itself, and \code{set.seed()} resets whichever generator
+is current, so the pinning is still needed with the package doing the work.}
+
+\item{crs}{Coordinate reference system of \code{x} and \code{y}, in any form
+\code{sf::st_crs()} accepts. Must be projected: blockCV interprets
+\code{block_size} as metres, and for a geographic CRS it divides by
+\code{deg_to_metre} instead, which silently produces blocks of the wrong
+size. Rejected rather than converted.}
+
+\item{balance_column}{Optional column of \code{segdata} whose classes should
+be balanced across folds as well as the record count, e.g.
+\code{"SurveyType"}. \code{NULL} balances record counts only.}
 }
 \value{
 Integer vector of fold membership, length \code{nrow(segdata)}, with
@@ -29,27 +39,39 @@ block size close to the study area extent can leave too few blocks to spread
 across \code{n_folds}.
 }
 \description{
-Squares of \code{block_size} on the analysis projection are assigned to folds
-at random, so each fold holds out whole regions rather than scattered
-segments. Random hold-outs would leak neighbouring segments into training and
-flatter every model equally, because the residuals are spatially structured.
+A thin wrapper on \code{\link[blockCV]{cv_spatial}}. Squares of
+\code{block_size} on the analysis projection are assigned to folds at random,
+so each fold holds out whole regions rather than scattered segments. Random
+hold-outs would leak neighbouring segments into training and flatter every
+model equally, because the residuals are spatially structured.
 }
-\section{Relation to the blockCV package}{
+\details{
+Blocks are square rather than blockCV's default hexagon so that
+\code{block_size} keeps meaning an edge length, which is what
+\code{dsm.options$family.cv.block.size.m} and everything written about it
+assume.
 
-This is a deliberately minimal hand-rolled equivalent of
-\code{blockCV::cv_spatial(hexagon = FALSE, selection = "random")}: a regular
-grid of square blocks on the analysis projection, assigned to folds at random.
-It is not a reimplementation of that package's features. blockCV additionally
-balances fold assignment by record count over repeated draws, offers hexagonal
-and systematic/checkerboard layouts, and can derive a block size from the
-empirical autocorrelation range; none of those are done here. The pairing does
-the work instead - every family is refitted and scored on identical folds - so
-fold-size imbalance cancels in the comparison rather than needing to be
-designed away. Weighting the fold means by \code{n_test} changed no family
-verdict on either SubProject tested.
+Fold membership depends on the coordinates, the block size, the seed and the
+\strong{blockCV version} - the 4.0-0 release notes state that folds for a
+given seed may differ from earlier versions. Record the version alongside the
+seed in anything that has to be reproducible; \code{\link{run.family.cv}}'s
+caller does this in the results file header.
+}
+\section{Why blockCV rather than a grid of our own}{
+
+This was fifteen lines of \code{floor(x / block_size)} until issue #8. The
+construction is the same either way; what the package adds is fold balancing
+over repeated random draws, and a citable provenance (Valavi et al. 2019,
+Methods in Ecology & Evolution 10:225-232) for a step a reader would otherwise
+have to take on trust. Measured on \code{Atl IMRP} ATPU (468,424 segments,
+100 km blocks, 5 folds), balancing takes the largest-to-smallest fold ratio
+from 1.36 to 1.11, and balancing on \code{SurveyType} takes the aerial share
+of a fold from a 0.6-15.0\\% spread to 3.2-8.4\\%.
 }
 
 \examples{
+\dontrun{
 assign.blocks(data.frame(x = runif(100, 0, 5e5), y = runif(100, 0, 5e5)),
-              5, 1e5, 1)
+              n_folds = 5, block_size = 1e5, seed = 1, crs = 3347)
+}
 }

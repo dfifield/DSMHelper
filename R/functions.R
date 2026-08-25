@@ -4968,10 +4968,22 @@ get.family.finalists <- function(mod.res, mod.specs) {
 
 #' Assign segments to spatial-block cross-validation folds
 #'
-#' Squares of \code{block_size} on the analysis projection are assigned to folds
-#' at random, so each fold holds out whole regions rather than scattered
-#' segments. Random hold-outs would leak neighbouring segments into training and
-#' flatter every model equally, because the residuals are spatially structured.
+#' A thin wrapper on \code{\link[blockCV]{cv_spatial}}. Squares of
+#' \code{block_size} on the analysis projection are assigned to folds at random,
+#' so each fold holds out whole regions rather than scattered segments. Random
+#' hold-outs would leak neighbouring segments into training and flatter every
+#' model equally, because the residuals are spatially structured.
+#'
+#' Blocks are square rather than blockCV's default hexagon so that
+#' \code{block_size} keeps meaning an edge length, which is what
+#' \code{dsm.options$family.cv.block.size.m} and everything written about it
+#' assume.
+#'
+#' Fold membership depends on the coordinates, the block size, the seed and the
+#' \strong{blockCV version} - the 4.0-0 release notes state that folds for a
+#' given seed may differ from earlier versions. Record the version alongside the
+#' seed in anything that has to be reproducible; \code{\link{run.family.cv}}'s
+#' caller does this in the results file header.
 #'
 #' @param segdata Data frame with numeric \code{x} and \code{y} columns in
 #'   projection units (metres).
@@ -4980,69 +4992,104 @@ get.family.finalists <- function(mod.res, mod.specs) {
 #' @param seed Random seed for block-to-fold assignment. The random number
 #'   generator kind is pinned to Mersenne-Twister for the duration and restored
 #'   afterwards, so the folds are the same whether or not the caller is running
-#'   inside a \code{future} (which switches to L'Ecuyer-CMRG). Blocks are sorted
-#'   before assignment, so the folds depend on the coordinates, the block size
-#'   and the seed, and not on the row order of \code{segdata}.
+#'   inside a \code{future} (which switches to L'Ecuyer-CMRG). blockCV calls
+#'   \code{set.seed()} itself, and \code{set.seed()} resets whichever generator
+#'   is current, so the pinning is still needed with the package doing the work.
+#' @param crs Coordinate reference system of \code{x} and \code{y}, in any form
+#'   \code{sf::st_crs()} accepts. Must be projected: blockCV interprets
+#'   \code{block_size} as metres, and for a geographic CRS it divides by
+#'   \code{deg_to_metre} instead, which silently produces blocks of the wrong
+#'   size. Rejected rather than converted.
+#' @param balance_column Optional column of \code{segdata} whose classes should
+#'   be balanced across folds as well as the record count, e.g.
+#'   \code{"SurveyType"}. \code{NULL} balances record counts only.
 #'
-#' @section Relation to the blockCV package:
-#' This is a deliberately minimal hand-rolled equivalent of
-#' \code{blockCV::cv_spatial(hexagon = FALSE, selection = "random")}: a regular
-#' grid of square blocks on the analysis projection, assigned to folds at random.
-#' It is not a reimplementation of that package's features. blockCV additionally
-#' balances fold assignment by record count over repeated draws, offers hexagonal
-#' and systematic/checkerboard layouts, and can derive a block size from the
-#' empirical autocorrelation range; none of those are done here. The pairing does
-#' the work instead - every family is refitted and scored on identical folds - so
-#' fold-size imbalance cancels in the comparison rather than needing to be
-#' designed away. Weighting the fold means by \code{n_test} changed no family
-#' verdict on either SubProject tested.
+#' @section Why blockCV rather than a grid of our own:
+#' This was fifteen lines of \code{floor(x / block_size)} until issue #8. The
+#' construction is the same either way; what the package adds is fold balancing
+#' over repeated random draws, and a citable provenance (Valavi et al. 2019,
+#' Methods in Ecology & Evolution 10:225-232) for a step a reader would otherwise
+#' have to take on trust. Measured on \code{Atl IMRP} ATPU (468,424 segments,
+#' 100 km blocks, 5 folds), balancing takes the largest-to-smallest fold ratio
+#' from 1.36 to 1.11, and balancing on \code{SurveyType} takes the aerial share
+#' of a fold from a 0.6-15.0\% spread to 3.2-8.4\%.
+#'
 #' @return Integer vector of fold membership, length \code{nrow(segdata)}, with
 #'   an \code{"n_blocks"} attribute giving the number of occupied blocks. That
 #'   count is worth reporting: it is the real sample size behind the folds, and a
 #'   block size close to the study area extent can leave too few blocks to spread
 #'   across \code{n_folds}.
 #' @examples
+#' \dontrun{
 #' assign.blocks(data.frame(x = runif(100, 0, 5e5), y = runif(100, 0, 5e5)),
-#'               5, 1e5, 1)
+#'               n_folds = 5, block_size = 1e5, seed = 1, crs = 3347)
+#' }
 #' @export
-assign.blocks <- function(segdata, n_folds, block_size, seed) {
+assign.blocks <- function(segdata, n_folds, block_size, seed, crs,
+                          balance_column = NULL) {
   checkmate::expect_data_frame(segdata, min.rows = 1)
   checkmate::expect_numeric(segdata$x, any.missing = FALSE)
   checkmate::expect_numeric(segdata$y, any.missing = FALSE)
   checkmate::expect_count(n_folds, positive = TRUE)
   checkmate::expect_number(block_size, lower = 0)
+  checkmate::expect_string(balance_column, null.ok = TRUE)
+  if (!is.null(balance_column))
+    checkmate::expect_names(names(segdata), must.include = balance_column)
+
+  # A geographic CRS does not fail, it quietly rescales block_size by
+  # deg_to_metre and returns blocks of the wrong size. Refuse it.
+  crs <- sf::st_crs(crs)
+  if (is.na(crs))
+    stop("assign.blocks: crs is missing or unrecognised. blockCV needs a ",
+         "projected CRS in metres to interpret block_size.")
+  if (isTRUE(sf::st_is_longlat(crs)))
+    stop("assign.blocks: crs is geographic (long/lat). block_size is metres, ",
+         "and blockCV would rescale it by deg_to_metre. Pass the projected ",
+         "analysis CRS (segProj) instead.")
+
+  cols <- c("x", "y", balance_column)
+  pts  <- sf::st_as_sf(segdata[, cols, drop = FALSE], coords = c("x", "y"),
+                       crs = crs)
 
   # Pin the generator, not just the seed. Under furrr's seed = TRUE the workers
   # run L'Ecuyer-CMRG, and set.seed() on a different generator yields a
   # different sequence - which silently produced different folds inside workers
-  # than in the main process, from an identical seed.
+  # than in the main process, from an identical seed. blockCV seeds itself, but
+  # set.seed() resets the CURRENT generator, so this still applies.
   old_kind <- RNGkind()
   on.exit(RNGkind(old_kind[1], old_kind[2], old_kind[3]), add = TRUE)
   suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
 
-  set.seed(seed)
-  block_id     <- paste(floor(segdata$x / block_size),
-                        floor(segdata$y / block_size), sep = "_")
-  # sort(), not bare unique(): the shuffled fold vector below is matched to this
-  # list positionally, so with unique() the folds depended on the ROW ORDER of
-  # segdata as well as on the seed. The same coordinates in a different order
-  # gave a different partition from the same seed - measured on Atl IMRP ATPU,
-  # 468,424 segments: 112404/111500/65212/89384/89924 as stored against
-  # 103136/138212/66388/89404/71284 permuted. Sorting makes the folds a function
-  # of the coordinates, block size and seed alone, which is what the seed was
-  # there to promise.
-  unique_block <- sort(unique(block_id))
-  # rep_len then sample spreads folds as evenly as the block COUNT allows, which
-  # is not the same as evenly by segment count: blocks hold anywhere from a
-  # handful to thousands of segments, so fold sizes still differ (1.4x on
-  # NL_EXPL_DRL_RA, 1.8x on Atl IMRP). That is tolerable because the comparison
-  # is paired - every family is scored on identical held-out segments - but it
-  # does mean the folds are not interchangeable samples.
-  block_fold   <- stats::setNames(
-    sample(rep_len(seq_len(n_folds), length(unique_block))), unique_block)
+  blocks <- blockCV::cv_spatial(
+    x         = pts,
+    column    = balance_column,
+    size      = block_size,
+    k         = n_folds,
+    hexagon   = FALSE,          # squares: block_size stays an edge length
+    selection = "random",
+    # 100 attempts at an even split, against one draw before. Costs ~90 s at
+    # 468,424 points against ~4 s unbalanced (Atl IMRP, 80 cores) - which is
+    # why run.family.cv() takes a precomputed folds argument.
+    balance   = TRUE,
+    iteration = 100L,
+    seed      = seed,
+    biomod2   = FALSE,          # we do not use the biomod2 fold matrix
+    plot      = FALSE,
+    report    = FALSE,
+    progress  = FALSE)
 
-  structure(unname(block_fold[block_id]), n_blocks = length(unique_block))
+  # blockCV builds the grid to the data extent, so the block count can differ by
+  # one or two from a grid anchored at the projection origin (196 against 197 on
+  # Atl IMRP). Neither anchoring is more correct; the count is reported so the
+  # difference is visible rather than surprising.
+  ids <- blocks$folds_ids
+  if (anyNA(ids))
+    stop("assign.blocks: blockCV left ", sum(is.na(ids)), " segment(s) outside ",
+         "every block. Increase cv_spatial()'s extend argument.")
+
+  structure(as.integer(ids), n_blocks = nrow(blocks$blocks))
 }
+
 
 
 #' Continuous ranked probability score from predictive samples
@@ -5180,7 +5227,10 @@ fresh.family <- function(fam) {
 #' scores it on the held-out block, using criteria that compare across response
 #' families because they live on the response scale.
 #'
-#' Every finalist sees identical folds, so the comparison is paired. Models are
+#' Every finalist sees identical folds, so the comparison is paired -- but a fold
+#' can still be dropped for one family and not another when its fit fails or
+#' diverges, which breaks that pairing. The caller is responsible for excluding
+#' such folds from every family before averaging. Models are
 #' refitted with \code{mgcv::bam()} rather than through \code{dsm()} because the
 #' stored model already carries everything needed: \code{$data} holds the segment
 #' data including the \code{off.set} offset column, and \code{formula()} carries
@@ -5195,7 +5245,23 @@ fresh.family <- function(fam) {
 #'   segment.
 #' @param seed Seed for block assignment; predictive draws use \code{seed +
 #'   fold}, so every finalist sees the same draws within a fold.
+#' @param crs Projected CRS of \code{segdata}'s coordinates, passed to
+#'   \code{\link{assign.blocks}}. Required unless \code{folds} is supplied.
+#' @param balance_column Optional \code{segdata} column whose classes are
+#'   balanced across folds, passed to \code{\link{assign.blocks}}.
+#' @param folds Optional precomputed fold vector, one entry per row of
+#'   \code{segdata} and matched to it by position. Supply it to avoid repeating
+#'   the balancing search across calls that share segment data; \code{NULL}
+#'   computes it here.
 #' @param nthreads Passed to \code{mgcv::bam()}.
+#' @param max.pred.ratio How many times the largest observed value a fold's
+#'   largest prediction may reach before the fit is called diverged and the fold
+#'   is dropped. Guards the simulation step: \code{mgcv::rTweedie} draws a
+#'   Poisson count per observation and then that many gamma variates, so absurd
+#'   fitted values ask for an absurd vector and the error is an allocation
+#'   failure rather than anything catchable-looking. Complements
+#'   \code{dsm.options$family.cv.diverged.ratio}, which screens scores after the
+#'   fact; this screens predictions before a score exists at all.
 #' @param allow.slow.refit If a fold still fails after a single-threaded retry,
 #'   whether to refit it with \code{discrete = FALSE}. Correct but very
 #'   expensive: roughly 280x the discrete path (474 min against 1.7 min per fit
@@ -5222,15 +5288,29 @@ fresh.family <- function(fam) {
 #' @export
 run.family.cv <- function(species, segdata, finalists,
                           n_folds = 5, block_size = 1e5, n_sim = 200,
-                          seed = 1, nthreads = 1, calib.covar = "platform",
-                          allow.slow.refit = FALSE, progress = TRUE) {
+                          seed = 1, crs = NULL, balance_column = NULL,
+                          folds = NULL, nthreads = 1, calib.covar = "platform",
+                          allow.slow.refit = FALSE, max.pred.ratio = 1e4,
+                          progress = TRUE) {
   checkmate::expect_character(species, len = 1, any.missing = FALSE)
   checkmate::expect_data_frame(segdata, min.rows = 1)
   checkmate::expect_data_frame(finalists, min.rows = 1)
+  checkmate::expect_number(max.pred.ratio, lower = 1)
   if (!all(c("family_key", "modname", "formula", "family") %in% names(finalists)))
     stop("run.family.cv: finalists must come from get.family.finalists()")
 
-  fold_id <- assign.blocks(segdata, n_folds, block_size, seed)
+  # Reuse a precomputed assignment when the caller has one. Balancing costs
+  # ~90 s at 468,424 points (Atl IMRP, 80 cores), and the caller runs this
+  # function twice per species - once on the finalists, once on the matched
+  # formulation - over identical segdata.
+  fold_id <- if (is.null(folds)) {
+    assign.blocks(segdata, n_folds, block_size, seed, crs, balance_column)
+  } else {
+    # A fold vector is matched to segdata BY POSITION, so a caller passing one
+    # built from different rows would silently score the wrong segments.
+    checkmate::expect_integerish(folds, len = nrow(segdata), any.missing = FALSE)
+    folds
+  }
   if (isTRUE(progress))
     message(sprintf("%s: %d segments, %d occupied blocks, %d folds, sizes %s",
                     species, nrow(segdata), attr(fold_id, "n_blocks"),
@@ -5308,22 +5388,66 @@ run.family.cv <- function(species, segdata, finalists,
       # predictions could decide a verdict. discrete = FALSE predicts exactly and
       # is invariant to the composition of newdata; it also puts folds that fell
       # back to a non-discrete fit on the same footing as the rest.
-      pred_mu <- stats::predict(fit, newdata = segdata[test_idx, ],
-                                type = "response", discrete = FALSE)
-      obs_y   <- segdata[[resp]][test_idx]
+      pred_mu <- try(stats::predict(fit, newdata = segdata[test_idx, ],
+                                    type = "response", discrete = FALSE),
+                     silent = TRUE)
+      if (inherits(pred_mu, "try-error")) {
+        message(sprintf("run.family.cv: %s %s fold %d could not predict: %s",
+                        species, finalists$modname[i], k,
+                        sub("\n.*", "", pred_mu[1])))
+        next
+      }
+      obs_y <- segdata[[resp]][test_idx]
 
-      # Same reasoning as assign.blocks(): fix the generator as well as the seed,
-      # so scores are reproducible whether or not the caller is inside a future.
-      old_kind <- RNGkind()
-      suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
-      set.seed(seed + k)
-      sim_mat <- sim.response(fit, pred_mu, n_sim)
-      RNGkind(old_kind[1], old_kind[2], old_kind[3])
+      # A fit can converge to something mgcv returns without complaint and that
+      # is still useless: theta driven to an extreme, or training blocks that
+      # omit part of the covariate range. The tell is in the predictions, before
+      # any score exists to judge - so judge them here, against the data they are
+      # meant to predict.
+      #
+      # This is not defensive padding. Both known pathologies on Atl IMRP
+      # Shearwaters are caught by it: the nb fit that scored 3e17 (predictions of
+      # 8e18 birds per segment), and the tw fit that never produced a score at
+      # all, because mgcv::rTweedie draws a Poisson count per observation and
+      # then that many gamma variates - so absurd fitted values ask for an absurd
+      # vector. It asked for 1198.6 Gb and took a three-hour run down with it.
+      scale_ref <- max(c(obs_y[is.finite(obs_y)], 1))
+      if (!all(is.finite(pred_mu)) || max(pred_mu) > max.pred.ratio * scale_ref) {
+        message(sprintf("run.family.cv: %s %s fold %d diverged - largest prediction %.3g against a largest observed %.3g; dropping the fold",
+                        species, finalists$modname[i], k,
+                        suppressWarnings(max(pred_mu)), scale_ref))
+        next
+      }
 
-      # 90% predictive interval coverage: the direct check on whether a family's
-      # tails are too light to carry prediction variance downstream.
-      lower <- apply(sim_mat, 1, stats::quantile, 0.05)
-      upper <- apply(sim_mat, 1, stats::quantile, 0.95)
+      # Everything from here to the score is wrapped, for the same reason the
+      # fit is: a bad model should cost one fold, not the whole run.
+      scored <- try({
+        # Same reasoning as assign.blocks(): fix the generator as well as the
+        # seed, so scores are reproducible whether or not the caller is inside a
+        # future.
+        old_kind <- RNGkind()
+        on.exit(RNGkind(old_kind[1], old_kind[2], old_kind[3]), add = TRUE)
+        suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
+        set.seed(seed + k)
+        sim_mat <- sim.response(fit, pred_mu, n_sim)
+        RNGkind(old_kind[1], old_kind[2], old_kind[3])
+
+        # 90% predictive interval coverage: the direct check on whether a
+        # family's tails are too light to carry prediction variance downstream.
+        list(sim_mat = sim_mat,
+             lower   = apply(sim_mat, 1, stats::quantile, 0.05),
+             upper   = apply(sim_mat, 1, stats::quantile, 0.95))
+      }, silent = TRUE)
+
+      if (inherits(scored, "try-error")) {
+        message(sprintf("run.family.cv: %s %s fold %d could not be scored: %s",
+                        species, finalists$modname[i], k,
+                        sub("\n.*", "", scored[1])))
+        next
+      }
+      sim_mat <- scored$sim_mat
+      lower   <- scored$lower
+      upper   <- scored$upper
 
       row <- tibble::tibble(
         species    = species,
