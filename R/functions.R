@@ -2643,13 +2643,35 @@ dynamic.env.covar.names <- function(){
 #' \code{ddftype_to_platform}, and \code{ShapeDir} in the calling
 #' environment.
 #'
+#' The two side-effect arguments exist for consumers that want the seasonal
+#' covariate values without the products built for prediction.
+#' [assess.extrapolation()] is one: it needs the covariates the predictions
+#' were made on, but must not rewrite the shapefile that
+#' `Generic_3_prediction.Rmd` owns, and has no use for the platform copies
+#' because `platform` is a model term rather than an environmental covariate.
+#' Both default to `TRUE`, so the prediction path is unchanged.
+#'
 #' @param species Character string species code.
 #' @param predgrid \code{sf} data frame representing the prediction grid (one
 #'   row per cell, with monthly covariate columns).
+#' @param write.shapefile Logical. Write `[species]_predgrid.shp` to
+#'   \code{ShapeDir}? Defaults to \code{TRUE}.
+#' @param replicate.platform Logical. Replicate the grid once per level of
+#'   \code{ddftype_to_platform}, adding a \code{platform} column? Defaults to
+#'   \code{TRUE}.
 #' @return \code{sf} data frame with one row per (cell × season × platform)
-#'   combination, containing seasonal mean covariates.
+#'   combination, containing seasonal mean covariates. With
+#'   \code{replicate.platform = FALSE}, one row per (cell × season) and no
+#'   \code{platform} column.
 #' @export
-create.seasonal.predgrid <- function(species, predgrid) {
+create.seasonal.predgrid <- function(species, predgrid,
+                                     write.shapefile = TRUE,
+                                     replicate.platform = TRUE) {
+  checkmate::expect_string(species)
+  checkmate::expect_class(predgrid, "sf")
+  checkmate::expect_flag(write.shapefile)
+  checkmate::expect_flag(replicate.platform)
+
   # Get species-specific season setting and create predgrid.all.seas with 4 seasons
   season.spec <- seasons[[species]]
   ret <-
@@ -2680,20 +2702,22 @@ create.seasonal.predgrid <- function(species, predgrid) {
   # Save the seasonal prediction grid for GIS mapping. When doing multiple
   # species, there will be a separate predgrid for each species since it's
   # possible for the season boundaries to be species specific.
-  sf::st_write(ret,
-               dsn = ShapeDir,
-               layer = paste0(species, "_predgrid.shp"),
-               driver = "ESRI Shapefile",
-               delete_layer = TRUE
-  )
+  if (write.shapefile)
+    sf::st_write(ret,
+                 dsn = ShapeDir,
+                 layer = paste0(species, "_predgrid.shp"),
+                 driver = "ESRI Shapefile",
+                 delete_layer = TRUE
+    )
 
   # Make a copy for each value of platform in model (technically only needed by
   # factor and fs models but make copy anyways and run.dsm.pred will handle it
   # correctly for nofactor model).
-  ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
-    setNames(unique(ddftype_to_platform)) %>%
-    purrr::list_rbind(names_to = "platform") %>%
-    sf::st_sf()
+  if (replicate.platform)
+    ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
+      setNames(unique(ddftype_to_platform)) %>%
+      purrr::list_rbind(names_to = "platform") %>%
+      sf::st_sf()
 
 
   # From multiddf paper code:
@@ -5811,22 +5835,316 @@ do.generic.render <- function(species, file){
 }
 
 
-#' Render the extrapolation analysis report for one dataset
+#' Strip the ddftype suffix from a segment label
 #'
-#' @param spill Character string spill/project identifier used in the output
-#'   filename.
-#' @param dataset Character string dataset name passed as a render parameter.
-#' @param debug If \code{TRUE}, drop into \code{browser()} at the start.
-#' @return \code{invisible(NULL)}, called for its side-effect (HTML rendered).
+#' `Sample.Label` carries the ddftype as a trailing `_SWD` / `_SFD` / `_SWN` /
+#' `_SFN` / `_AWD` ... suffix, so it is unique per **row**, not per segment:
+#' `segdata` holds one row per (segment × ddftype) and every label differs.
+#' Deduplicating on `Sample.Label` is therefore a silent no-op — on Atl IMRP it
+#' leaves all 468,424 rows in place rather than the 117,106 segments they
+#' represent.
+#'
+#' @param sample.label Character vector of `Sample.Label` values.
+#' @return Character vector of segment identifiers, one per physical segment.
+#' @examples
+#' segment.id.from.label(c("ECSAS_shp_967841155_SWD", "ECSAS_shp_967841155_SFD"))
 #' @export
-do.extrapolation <- function(spill, dataset, debug = FALSE){
-  browser(expr = debug)
+segment.id.from.label <- function(sample.label) {
+  checkmate::expect_character(sample.label, any.missing = FALSE)
+  sub("_[A-Z]{3}$", "", sample.label)
+}
 
-  out.file <- file.path(here::here(), paste(spill, dataset, "0_extrapolation.html", sep = "_"))
-  message(sprintf("Rendering generic extrapolation  for %s to %s", dataset, out.file))
-  rmarkdown::render(file.path(here::here(), "Generic_0_extrapolation.Rmd"),
-                    params = list(spill = spill, dataset = dataset),
+
+#' Assess extrapolation for one species and season
+#'
+#' Runs [dsmextra::extrapolation_analysis()] to identify prediction-grid cells
+#' whose covariate values are novel relative to the segments the model was
+#' fitted on, and maps the result back onto the geometry of the prediction
+#' raster.
+#'
+#' ExDet (Mesgaran et al. 2014) is negative under **univariate** extrapolation
+#' (a covariate outside its sampled range), lies in 0-1 where conditions are
+#' **analogue** to the sample, and exceeds 1 under **combinatorial**
+#' extrapolation (each covariate in range, but the combination unobserved). The
+#' most influential covariate (MIC) names the covariate responsible.
+#'
+#' @section Why the result is resampled rather than joined:
+#' The prediction grid is not a complete lattice — it is the ocean-only subset
+#' of one, and 2.77 per cent of Atl IMRP's cells do not sit on the 10 km lattice
+#' at all. `dsmextra` therefore rasterises it onto a lattice of its own, whose
+#' origin is offset from the prediction raster's by half a cell. Joining on
+#' coordinates silently matches nothing. This function resamples
+#' (`method = "near"`) onto `pred.raster` instead, so every returned row is a
+#' cell of the surface being assessed. Cells `dsmextra` could not place come
+#' back `NA` and are counted in the return value rather than guessed at.
+#'
+#' @param species Character string species code.
+#' @param season Character string season name; must be one of `season.names`.
+#' @param segdata Segment data frame (or `sf`) for `species`, containing
+#'   `Season`, `Sample.Label` and every name in `covariate.names`.
+#' @param predgrid `sf` prediction grid with monthly covariate columns, as
+#'   loaded from `prediction_grids.rda`.
+#' @param pred.raster `SpatRaster` defining the target geometry — normally the
+#'   species/season prediction raster the assessment is about.
+#' @param covariate.names Character vector of covariates to assess. Defaults to
+#'   the project global `extrap.covars`.
+#' @param crs Projected coordinate system. Defaults to the project global
+#'   `segProj`.
+#' @param resolution Target raster resolution in map units, passed to
+#'   `dsmextra`. Required because the grid is irregular; defaults to
+#'   `predgridCellLength * 1000`.
+#' @param compute.nearby Logical. Also compute the Gower's-distance %N surface?
+#'   Costs roughly 30x the ExDet computation: on Atl IMRP HERG Spring (26,956
+#'   segments, 12,970 grid cells, 5 covariates, single-threaded) ExDet took
+#'   1.9 s and nearby 63 s, so the full 14 species x 4 seasons is about an hour.
+#' @param verbose Logical, passed through to `dsmextra`.
+#'
+#' @section Maps:
+#' Maps are **not** generated here. `extrapolation_analysis(map.generate =
+#' TRUE)` calls `print()` on each leaflet widget, which is the wrong behaviour
+#' inside a function and drops the widgets on the floor when it is called from
+#' a loop. The report calls [dsmextra::map_extrapolation()] itself on
+#' `$extrap$extrapolation` and `$extrap$nearby`, where it can pass the sightings
+#' and tracks overlays and control display.
+#' @return A list with `extrap` (a list holding the `dsmextra` objects:
+#'   `$extrapolation`, `$compare`, and `$nearby` when computed), `cells` (a tibble
+#'   with one row per non-`NA` cell of `pred.raster`: `cell`, `x`, `y`,
+#'   `ExDet`, `type`, `mic_name`), and `info` (a one-row tibble of counts:
+#'   samples used, cells assessed, cells unplaced, and the NA drops).
+#' @references Mesgaran MB, Cousens RD, Webber BL (2014). Here be dragons.
+#'   Diversity & Distributions 20:1147-1159.
+#' @examples
+#' \dontrun{
+#' res <- assess.extrapolation("HERG", "Spring", segdata, predgrid, pred.raster)
+#' subset(res$cells, type == "univariate" & mic_name == "depth.g")
+#' }
+#' @export
+assess.extrapolation <- function(species, season, segdata, predgrid,
+                                 pred.raster,
+                                 covariate.names = extrap.covars,
+                                 crs = segProj,
+                                 resolution = predgridCellLength * 1000,
+                                 compute.nearby = TRUE,
+                                 verbose = FALSE) {
+  checkmate::expect_string(species)
+  checkmate::expect_choice(season, season.names)
+  checkmate::expect_data_frame(segdata)
+  checkmate::expect_class(predgrid, "sf")
+  checkmate::expect_class(pred.raster, "SpatRaster")
+  checkmate::expect_character(covariate.names, min.len = 1, any.missing = FALSE)
+  checkmate::expect_number(resolution, lower = 0)
+  checkmate::expect_flag(compute.nearby)
+
+  seg <- sf::st_drop_geometry(segdata)
+  missing.cols <- setdiff(c(covariate.names, "Season", "Sample.Label"), names(seg))
+  if (length(missing.cols))
+    stop("assess.extrapolation: segdata is missing column(s): ",
+         paste(missing.cols, collapse = ", "))
+
+  # ---- samples: this season only, one row per segment -----------------------
+  seg <- seg[as.character(seg$Season) == season, , drop = FALSE]
+  if (!nrow(seg))
+    stop("assess.extrapolation: no ", species, " segments in season ", season)
+  seg$.seg_id <- segment.id.from.label(seg$Sample.Label)
+  samples <- seg[!duplicated(seg$.seg_id), covariate.names, drop = FALSE]
+  n.samples.raw <- nrow(samples)
+  samples <- samples[stats::complete.cases(samples), , drop = FALSE]
+  if (!nrow(samples))
+    stop("assess.extrapolation: every ", species, " ", season,
+         " segment has an NA in ", paste(covariate.names, collapse = "/"))
+
+  # ---- prediction grid: the same seasonal covariate values the predictions
+  # were made on. Neither side effect of create.seasonal.predgrid() is wanted
+  # here - see its documentation.
+  pgrid <- create.seasonal.predgrid(species, predgrid,
+                                    write.shapefile = FALSE,
+                                    replicate.platform = FALSE) %>%
+    sf::st_drop_geometry()
+  pgrid <- pgrid[as.character(pgrid$Season) == season, , drop = FALSE]
+  missing.cols <- setdiff(covariate.names, names(pgrid))
+  if (length(missing.cols))
+    stop("assess.extrapolation: seasonal prediction grid is missing column(s): ",
+         paste(missing.cols, collapse = ", "),
+         ". Check that they are covariates create.seasonal.predgrid() retains.")
+  pgrid <- pgrid[, covariate.names, drop = FALSE]
+  n.grid.raw <- nrow(pgrid)
+  # dsmextra drops NA rows silently; do it here so the count can be reported.
+  pgrid <- pgrid[stats::complete.cases(pgrid), , drop = FALSE]
+
+  message(sprintf(
+    "assess.extrapolation: %s %s - %d segments (%d before NA drop), %d grid cells (%d before)",
+    species, season, nrow(samples), n.samples.raw, nrow(pgrid), n.grid.raw))
+
+  # ---- dsmextra -------------------------------------------------------------
+  # compute_extrapolation/compute_nearby are called directly rather than through
+  # extrapolation_analysis(), which has no `resolution` argument and so cannot
+  # pass one down. This grid always needs one: it is the ocean-only subset of a
+  # lattice and 2.77% of Atl IMRP's cells are off that lattice entirely, so
+  # dsmextra always rasterises and errors out without a resolution.
+  extrap <- list()
+  extrap$extrapolation <- dsmextra::compute_extrapolation(
+    samples           = samples,
+    covariate.names   = covariate.names,
+    prediction.grid   = pgrid,
+    coordinate.system = crs,
+    resolution        = resolution,
+    verbose           = verbose)
+
+  extrap$compare <- dsmextra::compare_covariates(
+    extrapolation.type   = "both",
+    extrapolation.object = extrap$extrapolation,
+    n.covariates         = NULL,
+    create.plots         = FALSE,
+    display.percent      = TRUE,
+    verbose              = verbose)
+
+  if (compute.nearby)
+    extrap$nearby <- dsmextra::compute_nearby(
+      samples           = samples,
+      covariate.names   = covariate.names,
+      prediction.grid   = pgrid,
+      coordinate.system = crs,
+      nearby            = 1,
+      resolution        = resolution,
+      verbose           = verbose)
+
+  cells <- extrapolation.cells.on.raster(extrap$extrapolation, pred.raster,
+                                         covariate.names)
+
+  info <- tibble::tibble(
+    species          = species,
+    season           = season,
+    n_samples        = nrow(samples),
+    n_samples_nadrop = n.samples.raw - nrow(samples),
+    n_grid           = nrow(pgrid),
+    n_grid_nadrop    = n.grid.raw - nrow(pgrid),
+    n_cells          = nrow(cells),
+    n_cells_unplaced = sum(is.na(cells$ExDet)))
+
+  list(extrap = extrap, cells = cells, info = info)
+}
+
+
+#' Map a dsmextra result onto the geometry of a prediction raster
+#'
+#' Resamples the ExDet and MIC rasters returned by
+#' [dsmextra::compute_extrapolation()] onto `pred.raster` and returns one row
+#' per non-`NA` cell of that raster. See the *Why the result is resampled*
+#' section of [assess.extrapolation()] for why a coordinate join does not work.
+#'
+#' @param ex A `dsmextra` extrapolation object with a `$rasters` element.
+#' @param pred.raster `SpatRaster` defining the target geometry.
+#' @param covariate.names Character vector used to resolve the integer MIC
+#'   index to a covariate name.
+#' @return A tibble with `cell`, `x`, `y`, `ExDet`, `type`, `mic_name`. `type`
+#'   is `"univariate"`, `"analogue"`, `"combinatorial"`, or `NA` where
+#'   `dsmextra` placed no value.
+#' @export
+extrapolation.cells.on.raster <- function(ex, pred.raster, covariate.names) {
+  checkmate::expect_list(ex)
+  checkmate::expect_class(pred.raster, "SpatRaster")
+  checkmate::expect_character(covariate.names, min.len = 1, any.missing = FALSE)
+  if (is.null(ex$rasters$ExDet$all))
+    stop("extrapolation.cells.on.raster: no $rasters$ExDet$all in the dsmextra object.")
+
+  ExDet <- terra::resample(terra::rast(ex$rasters$ExDet$all), pred.raster,
+                           method = "near")
+  MIC   <- terra::resample(terra::rast(ex$rasters$mic$all), pred.raster,
+                           method = "near")
+
+  keep <- !is.na(terra::values(pred.raster)[, 1])
+  ev   <- terra::values(ExDet)[, 1]
+  mv   <- terra::values(MIC)[, 1]
+
+  # dsmextra codes "no MIC" as 0. Indexing a vector with 0 silently drops the
+  # element rather than returning NA, so map it out before subsetting.
+  mv[!is.na(mv) & mv == 0] <- NA_integer_
+
+  xy <- terra::xyFromCell(pred.raster, seq_along(ev))
+
+  tibble::tibble(
+    cell     = seq_along(ev),
+    x        = xy[, 1],
+    y        = xy[, 2],
+    ExDet    = ev,
+    type     = dplyr::case_when(is.na(ev) ~ NA_character_,
+                                ev < 0    ~ "univariate",
+                                ev > 1    ~ "combinatorial",
+                                TRUE      ~ "analogue"),
+    mic_name = ifelse(is.na(mv), NA_character_, covariate.names[mv]))[keep, ]
+}
+
+
+#' Summarise how much predicted abundance sits in extrapolated cells
+#'
+#' Joins an [assess.extrapolation()] result to a prediction surface and reports,
+#' per extrapolation type and per most-influential covariate, how many cells are
+#' involved and what share of the seasonal total they carry.
+#'
+#' ExDet is blind to the response: a cell can be wildly novel and hold no
+#' predicted birds, or be perfectly analogue and hold most of them. This is the
+#' function that tells the two apart, and it is the bridge between the
+#' extrapolation assessment and the concentration check in
+#' `03.70_Save_chosen_model_predictions.Rmd`.
+#'
+#' @param cells The `cells` tibble from [assess.extrapolation()].
+#' @param pred.raster `SpatRaster` of predicted abundance, on the same geometry
+#'   `cells` was built against.
+#' @return A list with `by_type` and `by_mic` tibbles (`cells`, `abundance`,
+#'   `pct_of_total`, most-concentrated first) and `total`, the summed surface.
+#' @export
+summarise.extrapolation.abundance <- function(cells, pred.raster) {
+  checkmate::expect_data_frame(cells)
+  checkmate::expect_class(pred.raster, "SpatRaster")
+
+  cells$pred <- terra::values(pred.raster)[, 1][cells$cell]
+  total <- sum(cells$pred, na.rm = TRUE)
+  pct   <- function(x) if (total > 0) 100 * sum(x, na.rm = TRUE) / total else NA_real_
+
+  by_type <- cells %>%
+    dplyr::group_by(type) %>%
+    dplyr::summarise(cells = dplyr::n(),
+                     abundance = sum(.data$pred, na.rm = TRUE),
+                     pct_of_total = pct(.data$pred),
+                     .groups = "drop") %>%
+    dplyr::arrange(dplyr::desc(.data$pct_of_total))
+
+  by_mic <- cells %>%
+    dplyr::filter(!is.na(.data$mic_name)) %>%
+    dplyr::group_by(type, mic_name) %>%
+    dplyr::summarise(cells = dplyr::n(),
+                     abundance = sum(.data$pred, na.rm = TRUE),
+                     pct_of_total = pct(.data$pred),
+                     .groups = "drop") %>%
+    dplyr::arrange(dplyr::desc(.data$pct_of_total))
+
+  list(by_type = by_type, by_mic = by_mic, total = total)
+}
+
+
+#' Render the extrapolation analysis report for one species
+#'
+#' @param species Character string species code, passed as a render parameter.
+#' @param debug If \code{TRUE}, drop into \code{browser()} at the start.
+#' @return The species code, invisibly; called for its side-effect (HTML
+#'   rendered to `Results/[SubProject]/[species]/`).
+#' @export
+do.extrapolation <- function(species, debug = FALSE) {
+  browser(expr = debug)
+  checkmate::expect_string(species)
+
+  out.file <- file.path(ResultsDir, species,
+                        paste0(species, "_0_extrapolation.html"))
+  if (!dir.exists(dirname(out.file)))
+    dir.create(dirname(out.file), recursive = TRUE)
+
+  message(sprintf("Rendering extrapolation analysis for %s to %s",
+                  species, out.file))
+  rmarkdown::render(here::here("R", "Generic_0_Extrapolation.Rmd"),
+                    params = list(species = species),
+                    intermediates_dir = tempdir(),
                     output_file = out.file)
+  invisible(species)
 }
 
 

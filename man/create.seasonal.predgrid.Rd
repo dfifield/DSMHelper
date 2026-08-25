@@ -4,17 +4,31 @@
 \alias{create.seasonal.predgrid}
 \title{Build a species-specific seasonal prediction grid}
 \usage{
-create.seasonal.predgrid(species, predgrid)
+create.seasonal.predgrid(
+  species,
+  predgrid,
+  write.shapefile = TRUE,
+  replicate.platform = TRUE
+)
 }
 \arguments{
 \item{species}{Character string species code.}
 
 \item{predgrid}{\code{sf} data frame representing the prediction grid (one
 row per cell, with monthly covariate columns).}
+
+\item{write.shapefile}{Logical. Write \verb{[species]_predgrid.shp} to
+\code{ShapeDir}? Defaults to \code{TRUE}.}
+
+\item{replicate.platform}{Logical. Replicate the grid once per level of
+\code{ddftype_to_platform}, adding a \code{platform} column? Defaults to
+\code{TRUE}.}
 }
 \value{
 \code{sf} data frame with one row per (cell × season × platform)
-combination, containing seasonal mean covariates.
+combination, containing seasonal mean covariates. With
+\code{replicate.platform = FALSE}, one row per (cell × season) and no
+\code{platform} column.
 }
 \description{
 Creates four seasonal copies of \code{predgrid}, computes seasonal mean
@@ -27,4 +41,12 @@ shapefile.
 Expects project globals \code{seasons}, \code{season.names},
 \code{ddftype_to_platform}, and \code{ShapeDir} in the calling
 environment.
+
+The two side-effect arguments exist for consumers that want the seasonal
+covariate values without the products built for prediction.
+\code{\link[=assess.extrapolation]{assess.extrapolation()}} is one: it needs the covariates the predictions
+were made on, but must not rewrite the shapefile that
+\code{Generic_3_prediction.Rmd} owns, and has no use for the platform copies
+because \code{platform} is a model term rather than an environmental covariate.
+Both default to \code{TRUE}, so the prediction path is unchanged.
 }

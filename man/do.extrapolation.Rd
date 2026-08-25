@@ -2,21 +2,19 @@
 % Please edit documentation in R/functions.R
 \name{do.extrapolation}
 \alias{do.extrapolation}
-\title{Render the extrapolation analysis report for one dataset}
+\title{Render the extrapolation analysis report for one species}
 \usage{
-do.extrapolation(spill, dataset, debug = FALSE)
+do.extrapolation(species, debug = FALSE)
 }
 \arguments{
-\item{spill}{Character string spill/project identifier used in the output
-filename.}
-
-\item{dataset}{Character string dataset name passed as a render parameter.}
+\item{species}{Character string species code, passed as a render parameter.}
 
 \item{debug}{If \code{TRUE}, drop into \code{browser()} at the start.}
 }
 \value{
-\code{invisible(NULL)}, called for its side-effect (HTML rendered).
+The species code, invisibly; called for its side-effect (HTML
+rendered to \verb{Results/[SubProject]/[species]/}).
 }
 \description{
-Render the extrapolation analysis report for one dataset
+Render the extrapolation analysis report for one species
 }
