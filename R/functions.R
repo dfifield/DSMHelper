@@ -3430,6 +3430,83 @@ compare_predictions <- function(
   invisible(list(stats = stats_df, files = saved_files, maps = maps))
 }
 
+#' How much of a predicted total comes from a handful of cells?
+#'
+#' A density surface can be finite, plausible cell by cell, and still have its
+#' seasonal total decided by one grid cell. That is not a numerical failure and
+#' nothing else in the pipeline flags it, because every value is well formed --
+#' it is a property of the data. Highly zero-inflated effort with rare enormous
+#' counts (a gull flock behind a trawler, say) gives a model one huge
+#' observation to honour, and honouring it puts most of the predicted abundance
+#' in a single place.
+#'
+#' Measured on \code{Atl IMRP}: the median species-season has 2.25 per cent of
+#' its total in its ten largest cells, so the check is quiet almost everywhere.
+#' Herring Gull in spring has \strong{94.5 per cent} -- 107,824 segments, only
+#' 1.4 per cent of them holding any bird at all, and one segment holding 3,106
+#' gulls. Its top cells run 44800, 637, 44.1, 32.3. Drop that one flock and the
+#' seasonal total falls from about 48,000 birds to about 2,600.
+#'
+#' Concentration is also where the response family stops being a detail: where
+#' one observation dominates, Tweedie and negative binomial disagree about how
+#' likely a huge count is, and the totals diverge accordingly. The four
+#' \code{Atl IMRP} species-seasons whose families disagree by more than 5x are
+#' the four most concentrated.
+#'
+#' @param paths Character vector of raster files, one per species-season.
+#' @param species,season Labels the same length as \code{paths}.
+#' @param top_n How many of the largest cells to accumulate. Default 10.
+#' @param map_limit Optional density above which the mapping code hides a cell,
+#'   i.e. \code{MAX_DENS_VALUE}. Worth passing, because that limit is applied
+#'   only when drawing leaflet maps -- "b/c they mess up the legend and swamp
+#'   everything else" -- and never to the rasters that get copied to the
+#'   versioned folder and shared. So the cells most likely to dominate a total
+#'   are exactly the ones absent from the map you would check it against.
+#' @return A tibble with one row per raster: \code{species}, \code{season},
+#'   \code{cells} (finite cells), \code{total}, \code{max_cell}, and
+#'   \code{pct_top_n}, sorted with the most concentrated first. With
+#'   \code{map_limit}, also \code{cells_over_map_limit} and
+#'   \code{pct_total_over_map_limit}: how much of the shipped total is invisible
+#'   on the maps. A raster totalling zero gets \code{NA} concentration rather
+#'   than a divide-by-zero.
+#' @examples
+#' \dontrun{
+#' summarise.prediction.concentration(files, comb$species, comb$season)
+#' }
+#' @export
+summarise.prediction.concentration <- function(paths, species, season, top_n = 10,
+                                               map_limit = NULL) {
+  checkmate::expect_character(paths, min.len = 1, any.missing = FALSE)
+  checkmate::expect_atomic(species, len = length(paths))
+  checkmate::expect_atomic(season, len = length(paths))
+  checkmate::expect_count(top_n, positive = TRUE)
+  checkmate::expect_number(map_limit, lower = 0, null.ok = TRUE)
+
+  out <- purrr::pmap_dfr(list(paths, species, season), function(p, sp, se) {
+    if (!file.exists(p))
+      return(tibble::tibble(species = as.character(sp), season = as.character(se),
+                            cells = NA_integer_, total = NA_real_,
+                            max_cell = NA_real_, pct_top_n = NA_real_,
+                            cells_over_map_limit = NA_integer_,
+                            pct_total_over_map_limit = NA_real_))
+    v <- terra::values(terra::rast(p))
+    v <- v[is.finite(v)]
+    tot <- sum(v)
+    top <- sum(utils::head(sort(v, decreasing = TRUE), top_n))
+    over <- if (is.null(map_limit)) v[0] else v[v > map_limit]
+    tibble::tibble(species = as.character(sp), season = as.character(se),
+                   cells = length(v), total = tot,
+                   max_cell = if (length(v)) max(v) else NA_real_,
+                   # A zero total is a legitimate answer for a species absent in
+                   # a season; it just has no concentration to report.
+                   pct_top_n = if (isTRUE(tot > 0)) 100 * top / tot else NA_real_,
+                   cells_over_map_limit = length(over),
+                   pct_total_over_map_limit =
+                     if (isTRUE(tot > 0)) 100 * sum(over) / tot else NA_real_)
+  })
+  dplyr::arrange(out, dplyr::desc(.data$pct_top_n))
+}
+
 #' Copy a species prediction HTML summary to the versioned predictions folder
 #'
 #' Copies the HTML report for the final model of \code{spec} into
