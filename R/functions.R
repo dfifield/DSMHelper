@@ -3492,7 +3492,10 @@ compare_predictions <- function(
 #'   \code{map_limit}, also \code{cells_over_map_limit} and
 #'   \code{pct_total_over_map_limit}: how much of the shipped total is invisible
 #'   on the maps. A raster totalling zero gets \code{NA} concentration rather
-#'   than a divide-by-zero.
+#'   than a divide-by-zero. \code{max_cell_x} and \code{max_cell_y} give the
+#'   coordinates of the largest cell, so a caller can ask what is special about
+#'   it -- `03.70_Save_chosen_model_predictions.Rmd` uses them to look up its
+#'   extrapolation status from [assess.extrapolation()].
 #' @examples
 #' \dontrun{
 #' summarise.prediction.concentration(files, comb$species, comb$season)
@@ -3512,12 +3515,20 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
                             cells = NA_integer_, total = NA_real_,
                             max_cell = NA_real_, pct_top_n = NA_real_,
                             cells_over_map_limit = NA_integer_,
-                            pct_total_over_map_limit = NA_real_))
-    v <- terra::values(terra::rast(p))
-    v <- v[is.finite(v)]
+                            pct_total_over_map_limit = NA_real_,
+                            max_cell_x = NA_real_, max_cell_y = NA_real_))
+    r <- terra::rast(p)
+    vall <- terra::values(r)[, 1]
+    keep <- is.finite(vall)
+    v <- vall[keep]
     tot <- sum(v)
     top <- sum(utils::head(sort(v, decreasing = TRUE), top_n))
     over <- if (is.null(map_limit)) v[0] else v[v > map_limit]
+    # Coordinates of the largest cell, so callers can ask what is special about
+    # it - 03.70 uses them to look up its extrapolation status.
+    imax <- if (length(v)) which(keep)[which.max(v)] else NA_integer_
+    xy <- if (is.na(imax)) c(NA_real_, NA_real_) else
+      as.numeric(terra::xyFromCell(r, imax))
     tibble::tibble(species = as.character(sp), season = as.character(se),
                    cells = length(v), total = tot,
                    max_cell = if (length(v)) max(v) else NA_real_,
@@ -3526,7 +3537,8 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
                    pct_top_n = if (isTRUE(tot > 0)) 100 * top / tot else NA_real_,
                    cells_over_map_limit = length(over),
                    pct_total_over_map_limit =
-                     if (isTRUE(tot > 0)) 100 * sum(over) / tot else NA_real_)
+                     if (isTRUE(tot > 0)) 100 * sum(over) / tot else NA_real_,
+                   max_cell_x = xy[1], max_cell_y = xy[2])
   })
   dplyr::arrange(out, dplyr::desc(.data$pct_top_n))
 }
@@ -6122,30 +6134,12 @@ summarise.extrapolation.abundance <- function(cells, pred.raster) {
 }
 
 
-#' Render the extrapolation analysis report for one species
-#'
-#' @param species Character string species code, passed as a render parameter.
-#' @param debug If \code{TRUE}, drop into \code{browser()} at the start.
-#' @return The species code, invisibly; called for its side-effect (HTML
-#'   rendered to `Results/[SubProject]/[species]/`).
-#' @export
-do.extrapolation <- function(species, debug = FALSE) {
-  browser(expr = debug)
-  checkmate::expect_string(species)
-
-  out.file <- file.path(ResultsDir, species,
-                        paste0(species, "_0_extrapolation.html"))
-  if (!dir.exists(dirname(out.file)))
-    dir.create(dirname(out.file), recursive = TRUE)
-
-  message(sprintf("Rendering extrapolation analysis for %s to %s",
-                  species, out.file))
-  rmarkdown::render(here::here("R", "Generic_0_Extrapolation.Rmd"),
-                    params = list(species = species),
-                    intermediates_dir = tempdir(),
-                    output_file = out.file)
-  invisible(species)
-}
+# do.extrapolation() used to live here. It was the Hibernia version, taking
+# spill/dataset and rendering a Generic_0_extrapolation.Rmd that does not exist
+# in this project, so it errored on any call. The replacement would have been a
+# near-copy of do.generic.render(), which already renders Generic_*.Rmd per
+# species to Results/[SubProject]/[species]/. 00.05_Assess_Extrapolation.Rmd
+# uses that instead.
 
 
 #' Comprehensive diagnostics for a fitted DSM

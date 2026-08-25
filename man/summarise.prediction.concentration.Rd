@@ -33,7 +33,10 @@ A tibble with one row per raster: \code{species}, \code{season},
 \code{map_limit}, also \code{cells_over_map_limit} and
 \code{pct_total_over_map_limit}: how much of the shipped total is invisible
 on the maps. A raster totalling zero gets \code{NA} concentration rather
-than a divide-by-zero.
+than a divide-by-zero. \code{max_cell_x} and \code{max_cell_y} give the
+coordinates of the largest cell, so a caller can ask what is special about
+it -- \verb{03.70_Save_chosen_model_predictions.Rmd} uses them to look up its
+extrapolation status from \code{\link[=assess.extrapolation]{assess.extrapolation()}}.
 }
 \description{
 A density surface can be finite, plausible cell by cell, and still have its
