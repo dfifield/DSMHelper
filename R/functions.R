@@ -7512,3 +7512,67 @@ fine.gradient <- function(src, coarse, coarse.km, mid.lat,
   names(x) <- names(src)
   list(covar = x, grad = g)
 }
+
+
+#' Refuse to delete a non-empty prediction version folder
+#'
+#' \code{03.70_Save_chosen_model_predictions.Rmd} and
+#' \code{04.70_Save_chosen_model_prediction_variance.Rmd} both begin by
+#' \code{unlink()}ing \code{predVersionDir} so that copied files get fresh
+#' dates.  That is correct when you are correcting a version in place, and
+#' destructive when you are not: those folders are shared outside the project
+#' and are not in git, so a version deleted here is gone.
+#'
+#' Keeping the previous version means setting \code{predVersionDir} to a NEW
+#' folder name in \code{analysis_settings.R} first.  Nothing enforced that -
+#' it was a manual step documented in CLAUDE.md and Notes.docx and nowhere in
+#' the code, which is to say it depended on remembering.  This function makes
+#' the code stop instead.
+#'
+#' Call it immediately before the \code{unlink()}.  It is a no-op when the
+#' folder does not exist or is empty, which is the normal case for a new
+#' version.
+#'
+#' @param dir Character path to the version folder, normally
+#'   \code{predVersionDir}.
+#' @param allow.overwrite Logical.  \code{TRUE} permits the delete and warns
+#'   instead of stopping.  Normally \code{ALLOW_PRED_VERSION_OVERWRITE} from
+#'   \code{analysis_settings.R}, which is tracked, so an override left switched
+#'   on shows up in \code{git diff}.
+#' @return \code{invisible(TRUE)} if an existing version is about to be
+#'   overwritten, \code{invisible(FALSE)} if there is nothing there.  Called
+#'   for its side effect of stopping.
+#' @examples
+#' # guard.version.dir(predVersionDir, ALLOW_PRED_VERSION_OVERWRITE)
+#' @export
+guard.version.dir <- function(dir, allow.overwrite) {
+  checkmate::expect_string(dir, min.chars = 1)
+  checkmate::expect_flag(allow.overwrite)
+
+  if (!dir.exists(dir))
+    return(invisible(FALSE))
+
+  n <- length(list.files(dir, all.files = TRUE, no.. = TRUE, recursive = TRUE))
+  if (n == 0)
+    return(invisible(FALSE))
+
+  if (allow.overwrite) {
+    warning(sprintf(
+      paste0("guard.version.dir: overwriting %d file(s) in an existing version ",
+             "folder because ALLOW_PRED_VERSION_OVERWRITE is TRUE:\n  %s"),
+      n, dir), immediate. = TRUE)
+    return(invisible(TRUE))
+  }
+
+  stop(sprintf(
+    paste0(
+      "predVersionDir already holds %d file(s) and this step deletes it:\n",
+      "  %s\n\n",
+      "These folders are shared outside the project and are not in git, so ",
+      "deleting one loses it.\n\n",
+      "To KEEP that version: set predVersionDir in analysis_settings.R to a new ",
+      "folder name (e.g. bump Version_N and the date), then re-run.\n",
+      "To REPLACE it deliberately: set ALLOW_PRED_VERSION_OVERWRITE <- TRUE in ",
+      "analysis_settings.R."),
+    n, dir), call. = FALSE)
+}
