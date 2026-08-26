@@ -4117,21 +4117,54 @@ do.env.covar <- function(env_covar_spec,
 
 #' Create the standard folder structure for a new subproject
 #'
+#' Creates every per-subproject folder the pipeline writes into, so that a new
+#' subproject can be run from \code{00.01} onwards without a step failing on a
+#' missing directory.  Safe to re-run: existing folders are left alone.
+#'
+#' Note that every path is built from \code{subproj}, never from the
+#' \code{SubProject} global.  Those are usually the same, but not while you are
+#' setting up a new subproject - which is the only time this function is
+#' called.
+#'
 #' Expects project globals \code{GenericRDataDir}, \code{GenericShapeDir},
-#' \code{predLayerDir}, \code{GISDir}, and \code{SubProject}.
+#' \code{predLayerDir} and \code{GISDir}.  These are not subproject-specific,
+#' unlike \code{predLayerStudyAreaDir} and \code{predLayerGridDir}, which is
+#' why the subproject-level paths are assembled here rather than taken from
+#' those globals.
 #'
 #' @param subproj Character string subproject identifier.
 #' @return \code{invisible(NULL)}, called for its side-effect (directories
 #'   created).
+#' @examples
+#' # create_subproject_folders("Atl IMRP")
 #' @export
 create_subproject_folders <- function(subproj) {
+  checkmate::expect_string(subproj, min.chars = 1)
+
   create.dir.if.needed(file.path(GenericRDataDir, subproj))
   create.dir.if.needed(file.path(GenericShapeDir, subproj))
   create.dir.if.needed(here::here("Results", subproj))
-  create.dir.if.needed(file.path(predLayerDir, "Study area resolution & extent", subproj))
-  create.dir.if.needed(file.path(GISDir, "Predictions", SubProject))
-  create.dir.if.needed(file.path(GISDir, "Rasters", SubProject))
+  create.dir.if.needed(file.path(GISDir, "Predictions", subproj))
+  create.dir.if.needed(file.path(GISDir, "Rasters", subproj))
 
+  # Covariate rasters on the analysis grid, masked to the study area. 00.02
+  # writes depth.img and depth.g.img at the top level, the individual monthly
+  # sst/sst.g layers into sst/, and the monthly climatology into Predgrid/.
+  # 00.03 and create.segdata() read them back from here.
+  sa.dir <- file.path(predLayerDir, "Study area resolution & extent", subproj)
+  create.dir.if.needed(sa.dir)
+  create.dir.if.needed(file.path(sa.dir, "sst"))
+  create.dir.if.needed(file.path(sa.dir, "Predgrid"))
+
+  # The same covariates unmasked and buffered, which is what the gradients in
+  # 00.02 are computed from and what use.env.raster.cache reads back. Same
+  # three-way layout.
+  grid.dir <- file.path(predLayerDir, "Analysis grid unmasked", subproj)
+  create.dir.if.needed(grid.dir)
+  create.dir.if.needed(file.path(grid.dir, "sst"))
+  create.dir.if.needed(file.path(grid.dir, "Predgrid"))
+
+  invisible(NULL)
 }
 
 
