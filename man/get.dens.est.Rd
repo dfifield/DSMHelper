@@ -9,13 +9,27 @@ get.dens.est(dsm_final, predgrid)
 \arguments{
 \item{dsm_final}{Fitted \code{dsm} object.}
 
-\item{predgrid}{Prediction grid data frame.}
+\item{predgrid}{Prediction grid with an \code{area} column in square km, as
+produced by \code{00.03_Create_prediction_grids.Rmd}.}
 }
 \value{
 Named list with elements \code{pred.est}, \code{CV}, \code{SE},
 and \code{CI} (a three-element vector giving the 5\%, mean, and 95\%
-lognormal confidence interval).
+lognormal confidence interval).  \code{pred.est} is a density, in
+individuals per square km.
 }
 \description{
-\strong{Note: not currently used.}
+\strong{Note: not currently used.}  \code{Generic_4_variance.Rmd} does this
+job, and does it per cell as well as in total.  Kept because the lognormal
+CI below is not available anywhere else.
+}
+\details{
+Both the offset and the divisor come from \code{predgrid$area}, not from the
+\code{predgridCellArea} global.  Those are not the same thing: cells clipped
+by the study area boundary are smaller than a whole cell (measured on
+\code{NL_EXPL_DRL_RA} at 2 km, 1,039 of 183,197 cells run down to 1.908 of
+3.996 sq km), and the nominal constant is itself a rounding of the real cell
+size, because \code{rast(resolution = )} adjusts the cell to fit the study
+area extent in whole cells.  Using the constant inflated the offset on every
+coastal cell and then divided the total by an area the grid does not cover.
 }

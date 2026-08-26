@@ -2673,6 +2673,8 @@ create.seasonal.predgrid <- function(species, predgrid,
   checkmate::expect_flag(replicate.platform)
 
   # Get species-specific season setting and create predgrid.all.seas with 4 seasons
+  # TODO: what if there's no data for some seasons? Should there still be
+  # 4 copies of season?
   season.spec <- seasons[[species]]
   ret <-
     rbind(predgrid, predgrid, predgrid, predgrid) %>%
@@ -5786,23 +5788,44 @@ get.per.cell.var <- function(this.dsm,
 
 #' Compute a density estimate with uncertainty from a DSM
 #'
-#' \strong{Note: not currently used.}
+#' \strong{Note: not currently used.}  \code{Generic_4_variance.Rmd} does this
+#' job, and does it per cell as well as in total.  Kept because the lognormal
+#' CI below is not available anywhere else.
+#'
+#' Both the offset and the divisor come from \code{predgrid$area}, not from the
+#' \code{predgridCellArea} global.  Those are not the same thing: cells clipped
+#' by the study area boundary are smaller than a whole cell (measured on
+#' \code{NL_EXPL_DRL_RA} at 2 km, 1,039 of 183,197 cells run down to 1.908 of
+#' 3.996 sq km), and the nominal constant is itself a rounding of the real cell
+#' size, because \code{rast(resolution = )} adjusts the cell to fit the study
+#' area extent in whole cells.  Using the constant inflated the offset on every
+#' coastal cell and then divided the total by an area the grid does not cover.
 #'
 #' @param dsm_final Fitted \code{dsm} object.
-#' @param predgrid Prediction grid data frame.
+#' @param predgrid Prediction grid with an \code{area} column in square km, as
+#'   produced by \code{00.03_Create_prediction_grids.Rmd}.
 #' @return Named list with elements \code{pred.est}, \code{CV}, \code{SE},
 #'   and \code{CI} (a three-element vector giving the 5%, mean, and 95%
-#'   lognormal confidence interval).
+#'   lognormal confidence interval).  \code{pred.est} is a density, in
+#'   individuals per square km.
 #' @export
 get.dens.est <- function(dsm_final, predgrid) {
+  checkmate::expect_multi_class(predgrid, c("sf", "data.frame"))
+  if (!"area" %in% names(predgrid))
+    stop("get.dens.est: predgrid has no 'area' column. It is added by ",
+         "00.03_Create_prediction_grids.Rmd and is the per-cell area in sq km.")
+  checkmate::expect_numeric(predgrid$area, lower = 0, any.missing = FALSE,
+                            min.len = 1)
 
   # use dsm.var.gam to get estimated abundance params
-  densEst <- summary(dsm::dsm.var.gam(dsm_final, predgrid, off.set = predgridCellArea))
+  densEst <- summary(dsm::dsm.var.gam(dsm_final, predgrid,
+                                      off.set = predgrid$area))
 
-  # The estimates in dsm.var.gam are summed for the entire predgrid study area
-  # so we need to divide by the number of predgrid cells * cellarea.
+  # The estimates in dsm.var.gam are summed over the entire predgrid, so divide
+  # by the total area the grid actually covers to get a density.
+  total.area <- sum(predgrid$area)
   densEst %<>%
-    purrr::map_at(c("pred.est", "se"), ~ .x/(predgridCellArea * nrow(predgrid)))
+    purrr::map_at(c("pred.est", "se"), ~ .x / total.area)
 
   #calculate a lognormal CI for the density est.
   cv.square <- densEst$cv^2
