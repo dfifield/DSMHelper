@@ -7385,3 +7385,107 @@ list.unfinished.ddfs <- function(folder, covars = dfCovars){
 create.failed.ddf.file <- function(mod, folder) {
   file.create(file.path(folder, paste0("failed_model_", mod$label, ".txt")))
 }
+
+
+#' Integer disaggregation factor for a covariate's gradient grid
+#'
+#' Chooses how many fine cells to divide each analysis cell into, so the fine
+#' cell is as close as possible to - but never finer than - the source raster's
+#' own cell size. Returns 1 when the analysis grid is already at or below
+#' source resolution, in which case no disaggregation happens and the gradient
+#' is computed on the analysis grid itself.
+#'
+#' The source spacing is the mean of the x and y cell size in km. For a lon/lat
+#' raster those differ - 0.01 deg is 1.112 km N-S everywhere but 0.758 km E-W
+#' at 47N - so the mean is a compromise between discarding real E-W detail and
+#' inventing N-S detail that is not there.
+#'
+#' @param src SpatRaster of the covariate at its source resolution.
+#' @param coarse.km numeric(1). Analysis grid cell length in km.
+#' @param mid.lat numeric(1). Latitude at which to convert degrees of longitude
+#'   to km; ignored when `src` is already projected.
+#' @return integer(1), at least 1.
+#' @examples
+#' # MUR sst, 0.01 deg, at 47N: 10 km grid -> 10, 2 km grid -> 2 (1 km cells)
+#' # ETOPO depth, 1 arc-min:    10 km grid -> 6,  2 km grid -> 1 (no disagg)
+#' @export
+gradient.disagg.factor <- function(src, coarse.km, mid.lat) {
+  checkmate::expect_class(src, "SpatRaster")
+  checkmate::expect_number(coarse.km, lower = 0, finite = TRUE)
+  checkmate::expect_number(mid.lat, lower = -90, upper = 90)
+
+  r <- terra::res(src)
+  src.km <- if (terra::is.lonlat(src)) {
+    mean(c(r[2] * 111.195, r[1] * 111.195 * cos(mid.lat * pi / 180)))
+  } else {
+    mean(r) / 1000
+  }
+  max(1L, as.integer(floor(coarse.km / src.km)))
+}
+
+#' Covariate and gradient on the analysis grid, differentiated at fine scale
+#'
+#' Projects `src` onto a fine grid nested inside `coarse`, optionally fills NA
+#' holes so the focal operator does not erode the coast, computes the Belkin &
+#' O'Reilly (2009) gradient there in units per km, and reduces both the
+#' covariate and the gradient back onto `coarse` with `GRADIENT_AGG_FUN`.
+#'
+#' @param src SpatRaster at source resolution, any CRS.
+#' @param coarse SpatRaster template - the buffered analysis grid (gradrast).
+#' @param coarse.km numeric(1). Cell length of `coarse` in km.
+#' @param mid.lat numeric(1). Study area centre latitude.
+#' @param clamp.lower numeric(1) or NULL. Values below this are clamped up to
+#'   it before differentiating. Used for depth, where land is clamped to the
+#'   waterline rather than removed.
+#' @param fill logical(1). Whether to NA-fill before differentiating. FALSE for
+#'   covariates with no gaps.
+#' @return list with `covar` and `grad`, both SpatRasters on `coarse`.
+#'
+#' @section Project globals:
+#' Reads \code{GRADIENT_NA_FILL_PASSES}, \code{SOBEL_KERNEL_GAIN} and
+#' \code{GRADIENT_AGG_FUN}, all defined in \code{analysis_settings.R} with
+#' the measurements that set them.  They are globals rather than arguments to
+#' match the rest of this package, and because they are properties of the
+#' analysis rather than of a single call.
+#' @export
+fine.gradient <- function(src, coarse, coarse.km, mid.lat,
+                          clamp.lower = NULL, fill = TRUE) {
+  checkmate::expect_class(src, "SpatRaster")
+  checkmate::expect_class(coarse, "SpatRaster")
+  checkmate::expect_number(coarse.km, lower = 0, finite = TRUE)
+  checkmate::expect_flag(fill)
+
+  n <- gradient.disagg.factor(src, coarse.km, mid.lat)
+  fine <- if (n > 1) terra::disagg(coarse, fact = n) else coarse
+  message(sprintf("  fine grid: factor %d, cell %.3f km", n, coarse.km / n))
+
+  x <- terra::project(src, fine, method = "average", threads = TRUE)
+  names(x) <- names(src)
+
+  g.in <- x
+  if (!is.null(clamp.lower))
+    g.in <- terra::clamp(g.in, lower = clamp.lower, values = TRUE)
+  if (fill)
+    for (i in seq_len(GRADIENT_NA_FILL_PASSES))
+      g.in <- terra::focal(g.in, w = 3, fun = mean, na.rm = TRUE,
+                           na.policy = "only")
+
+  g <- grec::getGradients(g.in, method = "BelkinOReilly2009") /
+    (SOBEL_KERNEL_GAIN * (coarse.km / n))
+
+  if (n > 1) {
+    x <- terra::aggregate(x, fact = n, fun = GRADIENT_AGG_FUN, na.rm = TRUE)
+    g <- terra::aggregate(g, fact = n, fun = GRADIENT_AGG_FUN, na.rm = TRUE)
+  }
+
+  # Confine the gradient to the covariate's own footprint. Without this the
+  # NA fill can leave a gradient in an analysis cell that is entirely land, so
+  # sst.g would be defined where sst is not - measured as exactly one cell on
+  # Atl IMRP, harmless because the dsm.covars.ns filter would drop that segment
+  # on sst anyway, but a covariate defined outside its own data is not
+  # something to leave lying around.
+  g <- terra::mask(g, x[[1]])
+
+  names(x) <- names(src)
+  list(covar = x, grad = g)
+}
