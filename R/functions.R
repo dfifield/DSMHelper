@@ -5946,14 +5946,31 @@ segment.id.from.label <- function(sample.label) {
 #' cell of the surface being assessed. Cells `dsmextra` could not place come
 #' back `NA` and are counted in the return value rather than guessed at.
 #'
+#' @section Running before the predictions exist:
+#' The assessment itself needs only the segments and the prediction grid, so it
+#' is run **before** `03.00_Do_all_prediction.Rmd` - its findings are an input to
+#' masking, not a commentary on predictions already made. `pred.raster` is
+#' therefore optional. When it is `NULL` the target geometry is rasterized from
+#' `predgrid` by [make.raster()], which is the same template
+#' [make.season.raster()] builds when the predictions are written, so the `cell`
+#' indices in the returned `cells` tibble address the prediction rasters that
+#' `03.00` will later write. Verified on Atl IMRP ATPU Fall: identical
+#' resolution, extent, CRS and 222 x 154 dimensions, 12,970 non-`NA` cells on
+#' each, and no cell non-`NA` in one but not the other.
+#'
+#' Passing a `pred.raster` explicitly is still supported and gives the same
+#' answer; it is worth doing only when assessing a surface that is not on the
+#' prediction grid's geometry.
+#'
 #' @param species Character string species code.
 #' @param season Character string season name; must be one of `season.names`.
 #' @param segdata Segment data frame (or `sf`) for `species`, containing
 #'   `Season`, `Sample.Label` and every name in `covariate.names`.
 #' @param predgrid `sf` prediction grid with monthly covariate columns, as
 #'   loaded from `prediction_grids.rda`.
-#' @param pred.raster `SpatRaster` defining the target geometry — normally the
-#'   species/season prediction raster the assessment is about.
+#' @param pred.raster `SpatRaster` defining the target geometry, or `NULL`
+#'   (the default) to build one from `predgrid`. See *Running before the
+#'   predictions exist*.
 #' @param covariate.names Character vector of covariates to assess. Defaults to
 #'   the project global `extrap.covars`.
 #' @param crs Projected coordinate system. Defaults to the project global
@@ -5988,7 +6005,7 @@ segment.id.from.label <- function(sample.label) {
 #' }
 #' @export
 assess.extrapolation <- function(species, season, segdata, predgrid,
-                                 pred.raster,
+                                 pred.raster = NULL,
                                  covariate.names = extrap.covars,
                                  crs = segProj,
                                  resolution = predgridCellLength * 1000,
@@ -5998,7 +6015,8 @@ assess.extrapolation <- function(species, season, segdata, predgrid,
   checkmate::expect_choice(season, season.names)
   checkmate::expect_data_frame(segdata)
   checkmate::expect_class(predgrid, "sf")
-  checkmate::expect_class(pred.raster, "SpatRaster")
+  if (!is.null(pred.raster))
+    checkmate::expect_class(pred.raster, "SpatRaster")
   checkmate::expect_character(covariate.names, min.len = 1, any.missing = FALSE)
   checkmate::expect_number(resolution, lower = 0)
   checkmate::expect_flag(compute.nearby)
@@ -6075,6 +6093,17 @@ assess.extrapolation <- function(species, season, segdata, predgrid,
       nearby            = 1,
       resolution        = resolution,
       verbose           = verbose)
+
+  # No prediction raster to resample onto - this normally runs before 03.00 has
+  # written any. Rasterizing the grid itself gives the same geometry those
+  # rasters will have; see "Running before the predictions exist" above.
+  if (is.null(pred.raster)) {
+    template.field <- intersect(c("area", "x", "depth"), names(predgrid))[1]
+    if (is.na(template.field))
+      stop("assess.extrapolation: predgrid has no column to build a raster ",
+           "template from (looked for area, x, depth). Pass pred.raster.")
+    pred.raster <- make.raster(predgrid, template.field)
+  }
 
   cells <- extrapolation.cells.on.raster(extrap$extrapolation, pred.raster,
                                          covariate.names)
@@ -6194,7 +6223,7 @@ summarise.extrapolation.abundance <- function(cells, pred.raster) {
 # spill/dataset and rendering a Generic_0_extrapolation.Rmd that does not exist
 # in this project, so it errored on any call. The replacement would have been a
 # near-copy of do.generic.render(), which already renders Generic_*.Rmd per
-# species to Results/[SubProject]/[species]/. 00.05_Assess_Extrapolation.Rmd
+# species to Results/[SubProject]/[species]/. 02.60_Assess_Extrapolation.Rmd
 # uses that instead.
 
 
