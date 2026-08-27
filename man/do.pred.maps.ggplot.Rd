@@ -4,7 +4,7 @@
 \alias{do.pred.maps.ggplot}
 \title{Produce a patchwork of four seasonal ggplot prediction maps}
 \usage{
-do.pred.maps.ggplot(dat, modname, species, subs = c("Combined", "F", "W"), ...)
+do.pred.maps.ggplot(dat, modname, species, subs = "Combined", ...)
 }
 \arguments{
 \item{dat}{\code{sf} prediction grid with \code{subset}, \code{Season},
@@ -14,8 +14,9 @@ and \code{Dens} columns.}
 
 \item{species}{Character string species code; used in messages.}
 
-\item{subs}{Platform subset: \code{"Combined"} (default), \code{"F"}, or
-\code{"W"}.}
+\item{subs}{Which platform subset to map: \code{"Combined"} (the default), or
+any single platform level present in \code{dat}. Validated against the data
+rather than a fixed list; see \code{\link[=do.pred.maps]{do.pred.maps()}}.}
 
 \item{...}{Additional arguments passed to \code{do.pred.map.ggplot}.}
 }

@@ -2633,15 +2633,33 @@ dynamic.env.covar.names <- function(){
 
 #' Build a species-specific seasonal prediction grid
 #'
-#' Creates four seasonal copies of \code{predgrid}, computes seasonal mean
-#' values for all dynamic covariates, drops the monthly columns, and then
-#' replicates the grid once per level of the \code{platform} factor (one copy
-#' per level of \code{ddftype_to_platform}).  The combined grid is saved as a
+#' Creates one seasonal copy of \code{predgrid} per entry in
+#' \code{season.names}, computes seasonal mean values for all dynamic
+#' covariates, drops the monthly columns, and then replicates the grid once per
+#' level of the \code{platform} factor.  The combined grid is saved as a
 #' shapefile.
 #'
 #' Expects project globals \code{seasons}, \code{season.names},
 #' \code{ddftype_to_platform}, and \code{ShapeDir} in the calling
 #' environment.
+#'
+#' @section Getting the platform levels right:
+#' The number of prediction-grid copies must equal the number of segment-table
+#' copies per segment, because [dsm.pred()] sums across them to get the combined
+#' surface. Miller et al. (2021) hold that by construction - `segs2 <-
+#' rbind(segs, segs)` and `pred2 <- rbind(pred, pred)` in their fulmar example -
+#' and here it holds as long as each platform level is carried by exactly one
+#' ddftype.
+#'
+#' The levels used to default to `unique(ddftype_to_platform)`, the declared
+#' global. That is wrong whenever a species' fitted model has fewer levels than
+#' the global declares - which happens routinely now that [create.dsm.data()]
+#' drops ddftypes with no observations. Predicting on a grid with more levels
+#' than the model has fails inside `mgcv` with "factor has new levels";
+#' predicting with FEWER fails silently, summing a subset of the components and
+#' under-reporting density with no error at all. So pass `platform.levels` from
+#' the fitted model (`model$xlevels$platform`) rather than relying on the
+#' default.
 #'
 #' The two side-effect arguments exist for consumers that want the seasonal
 #' covariate values without the products built for prediction.
@@ -2656,28 +2674,39 @@ dynamic.env.covar.names <- function(){
 #'   row per cell, with monthly covariate columns).
 #' @param write.shapefile Logical. Write `[species]_predgrid.shp` to
 #'   \code{ShapeDir}? Defaults to \code{TRUE}.
-#' @param replicate.platform Logical. Replicate the grid once per level of
-#'   \code{ddftype_to_platform}, adding a \code{platform} column? Defaults to
-#'   \code{TRUE}.
+#' @param replicate.platform Logical. Replicate the grid once per platform
+#'   level, adding a \code{platform} column? Defaults to \code{TRUE}.
+#' @param platform.levels Character vector of platform levels to replicate over,
+#'   normally \code{model$xlevels$platform} for the model being predicted.
+#'   Defaults to \code{unique(ddftype_to_platform)}; see *Getting the platform
+#'   levels right*.
 #' @return \code{sf} data frame with one row per (cell × season × platform)
-#'   combination, containing seasonal mean covariates. With
+#'   combination, containing seasonal mean covariates, with \code{platform} a
+#'   factor whose levels are \code{platform.levels} in the given order. With
 #'   \code{replicate.platform = FALSE}, one row per (cell × season) and no
 #'   \code{platform} column.
 #' @export
 create.seasonal.predgrid <- function(species, predgrid,
                                      write.shapefile = TRUE,
-                                     replicate.platform = TRUE) {
+                                     replicate.platform = TRUE,
+                                     platform.levels = unique(ddftype_to_platform)) {
   checkmate::expect_string(species)
   checkmate::expect_class(predgrid, "sf")
   checkmate::expect_flag(write.shapefile)
   checkmate::expect_flag(replicate.platform)
+  checkmate::expect_character(platform.levels, min.len = 1, any.missing = FALSE,
+                              unique = TRUE)
 
-  # Get species-specific season setting and create predgrid.all.seas with 4 seasons
+  # Get species-specific season setting and create one predgrid copy per season.
   # TODO: what if there's no data for some seasons? Should there still be
-  # 4 copies of season?
+  # a copy of every season?
   season.spec <- seasons[[species]]
+  # do.call(rbind, ...) rather than purrr::list_rbind(): rbind dispatches to
+  # rbind.sf and keeps the geometry column an sfc, which vctrs-based binding does
+  # not guarantee. This is the literal generalisation of the
+  # rbind(predgrid, predgrid, predgrid, predgrid) it replaces.
   ret <-
-    rbind(predgrid, predgrid, predgrid, predgrid) %>%
+    do.call(rbind, replicate(length(season.names), predgrid, simplify = FALSE)) %>%
     dplyr::mutate(Season = as.factor(rep(season.names, each = nrow(predgrid))))
 
   # Get seasonal means for dynamic variables
@@ -2712,13 +2741,19 @@ create.seasonal.predgrid <- function(species, predgrid,
                  delete_layer = TRUE
     )
 
-  # Make a copy for each value of platform in model (technically only needed by
-  # factor and fs models but make copy anyways and run.dsm.pred will handle it
-  # correctly for nofactor model).
+  # Make a copy for each platform level in the model. Ordered platform-major,
+  # season-major within platform, cell within season - dsm.pred() relies on that
+  # ordering when it peels off one platform block as the template for the
+  # combined surface.
+  #
+  # platform is made a factor with exactly platform.levels, in that order, so
+  # predict() cannot silently coerce a character column against the model's own
+  # level ordering.
   if (replicate.platform)
-    ret <- replicate(length(unique(ddftype_to_platform)), ret, simplify = FALSE) %>%
-      setNames(unique(ddftype_to_platform)) %>%
+    ret <- replicate(length(platform.levels), ret, simplify = FALSE) %>%
+      setNames(platform.levels) %>%
       purrr::list_rbind(names_to = "platform") %>%
+      dplyr::mutate(platform = factor(platform, levels = platform.levels)) %>%
       sf::st_sf()
 
 
@@ -2743,8 +2778,12 @@ create.seasonal.predgrid <- function(species, predgrid,
 #' @param modname Character string model name; used in messages.
 #' @param species Character string species code; used in messages and legend
 #'   titles.
-#' @param subs Which platform subset to map: \code{"Combined"} (default),
-#'   \code{"F"} (flying), or \code{"W"} (water).
+#' @param subs Which platform subset to map: \code{"Combined"} (the default and
+#'   the usual choice), or any single platform level present in \code{dat}.
+#'   The available levels come from the data rather than a fixed list, because
+#'   they depend on \code{ddftype_to_platform} and on which ddftypes the species
+#'   actually has - the old hardcoded \code{c("Combined", "F", "W")} silently
+#'   stopped matching when either changed.
 #' @param ... Additional arguments passed to \code{\link{do.pred.map}}.
 #' @return Named list of leaflet map objects, one per season.
 #' @export
@@ -2753,12 +2792,17 @@ do.pred.maps <-
            model,
            modname,
            species,
-           subs = c("Combined", "F", "W"),
+           subs = "Combined",
            ...) {
 
+    checkmate::expect_string(subs)
+    available <- unique(as.character(dat$subset))
+    if (!subs %in% available)
+      stop(sprintf(
+        "do.pred.maps: subset %s is not in these predictions. Available: %s.",
+        sQuote(subs), paste(sQuote(available), collapse = ", ")))
 
     # Get data subset
-    subs <- match.arg(subs)
     dat <- dplyr::filter(dat, subset == subs)
     segdata <- model$data %>%
       sf::st_as_sf()
@@ -3634,8 +3678,9 @@ save.map <- function(maps, modname, species) {
 #'   and \code{Dens} columns.
 #' @param modname Character string model name; used in the plot title.
 #' @param species Character string species code; used in messages.
-#' @param subs Platform subset: \code{"Combined"} (default), \code{"F"}, or
-#'   \code{"W"}.
+#' @param subs Which platform subset to map: \code{"Combined"} (the default), or
+#'   any single platform level present in \code{dat}. Validated against the data
+#'   rather than a fixed list; see [do.pred.maps()].
 #' @param ... Additional arguments passed to \code{do.pred.map.ggplot}.
 #' @return A \code{patchwork} ggplot object.
 #' @export
@@ -3643,12 +3688,18 @@ do.pred.maps.ggplot <-
   function(dat,
            modname,
            species,
-           subs = c("Combined", "F", "W"),
+           subs = "Combined",
            ...) {
 
+    checkmate::expect_string(subs)
+    available <- unique(as.character(dat$subset))
+    if (!subs %in% available)
+      stop(sprintf(
+        paste0("do.pred.maps.ggplot: subset %s is not in these predictions. ",
+               "Available: %s."),
+        sQuote(subs), paste(sQuote(available), collapse = ", ")))
 
     # Get data subset
-    subs <- match.arg(subs)
     dat <- dplyr::filter(dat, subset == subs)
 
     message(sprintf("%s, %s: Doing %s abundance prediction map for",
@@ -3668,7 +3719,8 @@ do.pred.maps.ggplot <-
 #'   columns.
 #' @param modname Character string model name; used in messages.
 #' @param species Character string species code; used in messages.
-#' @param subs Platform subset label.
+#' @param subs Platform subset label, used only for the plot title. Its caller
+#'   [do.pred.maps.ggplot()] has already done the filtering and validation.
 #' @param samp_n Integer; if not \code{NA}, plot a random sample of this many
 #'   polygons.
 #' @return A \code{ggplot} object.
@@ -3678,7 +3730,7 @@ do.pred.map.ggplot <-
            dat,
            modname,
            species,
-           subs = c("Combined", "F", "W"),
+           subs = "Combined",
            samp_n = NA) {
 
     message(sprintf("\t%s",season))
@@ -3808,6 +3860,103 @@ assign.dist.type <- function(dat) {
             immediate. = TRUE)
 
   DistType
+}
+
+
+#' Impute a distance for observations that should have had one
+#'
+#' There are two ways an observation ends up without a perpendicular distance,
+#' and they mean opposite things.
+#'
+#' The one that matters is **by design**: the watch's `DistMeth` says no
+#' perpendicular distances are taken for that behaviour - `lkpDistMeth` gives
+#' flying birds `None` under DistMeth 1 and 13 and `Radial` under 17 and 19, and
+#' DistMeth 17 was standard from mid-2008 to the end of 2011. Those observations
+#' are separate survey effort, they belong in the `_N` (strip/dummy) ddf, and
+#' this function leaves them alone.
+#'
+#' The other is an **observer omission**: the DistMeth says perpendicular
+#' distances are being recorded, and one simply was not. Those did not happen on
+#' separate effort, so putting them in the `_N` ddf misattributes them. They used
+#' to be swept up by a blanket `is.na(distance) ~ 0` fill, which is worse than
+#' either option - it fabricates a detection exactly on the trackline, biasing
+#' the detection function steeply toward zero distance.
+#'
+#' They are rare enough that the choice barely matters in aggregate - 8 rows of
+#' 47,307 perpendicular observations on NL_EXPL_DRL_RA, 0.017% - but "rare" is
+#' not "absent" and a silent zero is not a defensible value. Each gets the mean
+#' observed distance for its own (`SurveyType`, `FlySwim`, `DistMeth`) group,
+#' snapped to the nearest distance actually observed in that group.
+#'
+#' The snapping matters because these data are binned: ship observations carry
+#' the bin centre in `distance` (0.025, 0.075, 0.15, 0.25 km) and have `distbegin`
+#' / `distend` NA, since the binning happens at ddf-fitting time from the spec's
+#' `cutpoints`. Assigning a raw group mean would put a value on the pile that is
+#' not a bin centre; snapping keeps every distance one of the values the survey
+#' can actually produce. Where `distbegin`/`distend` ARE populated (the aerial
+#' path), the pair belonging to the chosen distance is copied across too.
+#'
+#' Deterministic - no RNG, so a rerun gives the same answer.
+#'
+#' @param distdata Data frame with `distance`, `DistType`, `SurveyType`,
+#'   `FlySwim` and `DistMeth` columns. `distbegin`/`distend` are used if present.
+#' @return `distdata` with imputable rows filled in. Rows whose `DistType` is not
+#'   `"Perp."`, and rows in a group with no observed distances to average, are
+#'   returned unchanged.
+#' @export
+impute.missing.perp.distances <- function(distdata) {
+  checkmate::expect_data_frame(distdata)
+  for (col in c("distance", "DistType", "SurveyType", "FlySwim", "DistMeth"))
+    if (is.null(distdata[[col]]))
+      stop("impute.missing.perp.distances: distdata has no '", col, "' column.")
+  has.bins <- !is.null(distdata$distbegin) && !is.null(distdata$distend)
+
+  target <- distdata$DistType == "Perp." & is.na(distdata$distance)
+  target[is.na(target)] <- FALSE
+  if (!any(target)) {
+    message("impute.missing.perp.distances: nothing to impute.")
+    return(distdata)
+  }
+
+  # Donors are the rows that DO have a distance, in the same group.
+  donor <- which(distdata$DistType == "Perp." & !is.na(distdata$distance))
+  key <- function(rows)
+    paste(distdata$SurveyType[rows], distdata$FlySwim[rows],
+          distdata$DistMeth[rows], sep = "\r")
+  donor.key <- key(donor)
+
+  n.done <- 0L
+  for (i in which(target)) {
+    pool <- donor[donor.key == key(i)]
+    if (length(pool) == 0) next
+
+    dists <- distdata$distance[pool]
+    observed <- sort(unique(dists))
+    chosen <- observed[which.min(abs(observed - mean(dists)))]
+
+    distdata$distance[i] <- chosen
+    if (has.bins) {
+      # Copy the bin edges of a donor sitting at the chosen distance, if it has
+      # any. Ship data has none; aerial does.
+      src <- pool[distdata$distance[pool] == chosen &
+                    !is.na(distdata$distbegin[pool])]
+      if (length(src) > 0) {
+        distdata$distbegin[i] <- distdata$distbegin[src[1]]
+        distdata$distend[i] <- distdata$distend[src[1]]
+      }
+    }
+    n.done <- n.done + 1L
+  }
+
+  message(sprintf(
+    paste0("impute.missing.perp.distances: imputed %d of %d observation(s) that ",
+           "should have had a perpendicular distance%s."),
+    n.done, sum(target),
+    if (n.done < sum(target))
+      sprintf(" (%d had no same-group observations to average)",
+              sum(target) - n.done) else ""))
+
+  distdata
 }
 
 #' Generate the canonical detection function model name
@@ -6759,6 +6908,104 @@ run.dsm.model <- function(mod.def,
 }
 
 
+#' Check that summing the platform levels reconstitutes the total density
+#'
+#' The multi-ddf design replicates the segment table once per ddftype, each copy
+#' carrying the segment's full area, and recovers the total by summing the
+#' per-platform predictions ([dsm.pred()]). That only works when each platform
+#' level is carried by exactly one segdata copy per segment. If several ddftypes
+#' share a level, the GAM has nothing to tell those copies apart, fits their mean
+#' rather than letting them sum, and every density comes out divided by the
+#' number of copies - silently.
+#'
+#' This compares the model-implied combined density against a design-based
+#' estimate over the surveyed area, using only the fitted model. It needs no
+#' predictions and is cheap, so it can run before the expensive steps.
+#'
+#' The two are not expected to agree exactly: the GAM is penalised and its fitted
+#' values need not sum to the observed total. A ratio near 1 is the pass; the
+#' failure this exists to catch is a ratio near \code{1 / copies.per.platform},
+#' which was 0.494 on NL_EXPL_DRL_RA ATPU before \code{ddftype_to_platform} gave
+#' each ddftype its own level.
+#'
+#' @param model Fitted \code{dsm} object with \code{control = list(keepData =
+#'   TRUE)}, so \code{model$data} carries \code{abundance.est},
+#'   \code{segment.area}, \code{platform}, \code{ddftype_orig} and
+#'   \code{Sample.Label}.
+#' @param tolerance Numeric; how far the ratio may sit from 1 before a warning is
+#'   issued. Defaults to 0.15.
+#' @return Invisibly, a one-row tibble with \code{copies.per.segment},
+#'   \code{copies.per.platform}, \code{surveyed.area.sqkm},
+#'   \code{design.density}, \code{model.density} and \code{ratio}.
+#' @export
+check.platform.combination <- function(model, tolerance = 0.15) {
+  checkmate::expect_class(model, "dsm")
+  checkmate::expect_number(tolerance, lower = 0)
+
+  dat <- model$data
+  if (is.null(dat) || is.null(dat$abundance.est))
+    stop("check.platform.combination: model$data has no abundance.est. Fit with ",
+         "control = list(keepData = TRUE).")
+  dat <- sf::st_drop_geometry(dat)
+  dat$.fit <- stats::fitted(model)
+
+  n.segments <- dplyr::n_distinct(segment.id.from.label(dat$Sample.Label))
+  copies.per.segment <- nrow(dat) / n.segments
+
+  # The count that matters. Anything above 1 means several ddftypes share a
+  # platform level and the sum below will under-report by that factor.
+  copies.per.platform <- dat %>%
+    dplyr::mutate(.seg = segment.id.from.label(Sample.Label)) %>%
+    dplyr::count(.seg, platform) %>%
+    dplyr::pull(n) %>%
+    max()
+
+  surveyed.area <- sum(dat$segment.area) / copies.per.segment
+  design.density <- sum(dat$abundance.est) / surveyed.area
+
+  # Each platform level's density is its fitted total over the area of ITS
+  # copies; summing across levels is what dsm.pred() does on the grid.
+  by.platform <- dat %>%
+    dplyr::group_by(platform) %>%
+    dplyr::summarise(fit = sum(.fit), area = sum(segment.area),
+                     .groups = "drop") %>%
+    dplyr::mutate(dens = fit / area)
+  model.density <- sum(by.platform$dens)
+
+  ratio <- model.density / design.density
+
+  message(sprintf(
+    paste0("Platform combination check: %d segment copies over %d platform ",
+           "level(s) (%s), %d copies per platform."),
+    copies.per.segment, nrow(by.platform),
+    paste(by.platform$platform, collapse = ", "), copies.per.platform))
+  message(sprintf(
+    "  design-based %.4f /sqkm, model-implied %.4f /sqkm, ratio %.3f",
+    design.density, model.density, ratio))
+
+  if (copies.per.platform > 1)
+    warning(sprintf(
+      paste0("check.platform.combination: %d segdata copies share each platform ",
+             "level, so the combined prediction is roughly 1/%d of the true ",
+             "density. Give each ddftype its own level in ddftype_to_platform."),
+      copies.per.platform, copies.per.platform), immediate. = TRUE)
+  else if (abs(ratio - 1) > tolerance)
+    warning(sprintf(
+      paste0("check.platform.combination: model-implied density is %.3f x the ",
+             "design-based estimate (tolerance %.2f). Copies per platform is 1, ",
+             "so this is not the platform-collapse failure - look at the fit."),
+      ratio, tolerance), immediate. = TRUE)
+
+  invisible(dplyr::tibble(
+    copies.per.segment = copies.per.segment,
+    copies.per.platform = copies.per.platform,
+    surveyed.area.sqkm = surveyed.area,
+    design.density = design.density,
+    model.density = model.density,
+    ratio = ratio))
+}
+
+
 #' Generate density predictions from a DSM model
 #'
 #' Calls \code{predict} on the model named \code{modname} from \code{mod.res}
@@ -6804,24 +7051,65 @@ dsm.pred <-
     #
     # These are derived independently: segdata$platform levels come from the
     # data (as.factor() in create.dsm.data), whereas the predgrid copies come
-    # from the *declared* global ddftype_to_platform in
-    # create.seasonal.predgrid(). They agree as long as every declared platform
-    # occurs in the data, but a study area covered by only one survey type (or
-    # a species never recorded in one behaviour class) can break that, and
-    # predict() would then fail deep inside mgcv with "factor has new levels".
-    # Fail here instead, where the cause is obvious.
+    # from whatever create.seasonal.predgrid() was given - which defaults to the
+    # *declared* global ddftype_to_platform. They agree only if every declared
+    # platform survives into the fitted data, and create.dsm.data() now drops
+    # ddftypes with no observations, so routinely they do not.
+    #
+    # Both directions are errors, for different reasons:
+    #
+    #   predgrid has a level the model lacks - predict() would fail deep inside
+    #     mgcv with "factor has new levels". Loud, but obscure.
+    #
+    #   model has a level the predgrid lacks - nothing fails. The combined
+    #     surface below would simply sum fewer components than the model has and
+    #     under-report density, silently. This is the dangerous one, and it is
+    #     exactly the failure that halved the predictions before ddftype_to_platform
+    #     was given one level per ddftype.
+    #
+    # Fail here for both, where the cause can be named.
+    if (is.null(predgrid$platform))
+      stop("dsm.pred: predgrid has no 'platform' column. It is added by ",
+           "create.seasonal.predgrid(replicate.platform = TRUE), which is the ",
+           "default; assess.extrapolation() is the only caller that turns it off.")
+    plat_levels <- levels(factor(predgrid$platform))
     mod_levels <- model$xlevels$platform
     if (!is.null(mod_levels)) {
-      extra <- setdiff(unique(as.character(predgrid$platform)), mod_levels)
+      extra <- setdiff(plat_levels, mod_levels)
       if (length(extra) > 0)
         stop(sprintf(
           paste0("dsm.pred: predgrid has platform level(s) %s that model '%s' ",
-                 "was not fitted with (model has %s). The predgrid is built ",
-                 "from the global ddftype_to_platform, so prune it to the ",
-                 "survey types actually present."),
+                 "was not fitted with (model has %s). Pass the model's own ",
+                 "levels to create.seasonal.predgrid(platform.levels = ...) ",
+                 "rather than relying on the global ddftype_to_platform."),
           paste(sQuote(extra), collapse = ", "), modname,
           paste(sQuote(mod_levels), collapse = ", ")))
+
+      missing <- setdiff(mod_levels, plat_levels)
+      if (length(missing) > 0)
+        stop(sprintf(
+          paste0("dsm.pred: model '%s' was fitted with platform level(s) %s ",
+                 "that the predgrid does not have (predgrid has %s). The ",
+                 "combined surface sums across platform levels, so predicting ",
+                 "without these would under-report density by roughly %d%% ",
+                 "with no error. Pass the model's own levels to ",
+                 "create.seasonal.predgrid(platform.levels = ...)."),
+          modname, paste(sQuote(missing), collapse = ", "),
+          paste(sQuote(plat_levels), collapse = ", "),
+          round(100 * length(missing) / length(mod_levels))))
     }
+
+    # One row per cell x season x platform, in that nesting. If this does not
+    # hold, the head()/split() arithmetic building the combined surface below is
+    # meaningless - it would silently mix cells across blocks.
+    n.cells <- nrow(predgrid) / (length(season.names) * length(plat_levels))
+    if (n.cells != round(n.cells))
+      stop(sprintf(
+        paste0("dsm.pred: predgrid has %d rows, which is not a whole number of ",
+               "cells x %d seasons x %d platform levels. It is not the grid ",
+               "create.seasonal.predgrid() builds."),
+        nrow(predgrid), length(season.names), length(plat_levels)))
+    stopifnot(all(table(predgrid$platform, predgrid$Season) == n.cells))
 
     ret <- predgrid %>%
       dplyr::mutate(subset = platform)
@@ -7247,50 +7535,52 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
 
   #### Create segdata --------------------
 
-  # Deal with ddfobj numbering when there are ddfs that had no observations
-  # Create a conversion vector, conv, which will be used to set the ddfobj variable
-  # below. There are two cases:
+  # Keep a segdata copy only for ddftypes that actually have observations.
   #
-  # 1) for segdata copies whose corresponding ddf actually had observations, the
-  # original ddfobj number (set from ddftype) may not be right if there were any
-  # preceding ddfs in df.mod.specs with no obs. Thus, we set the ddfobj to the
-  # matching renumbered ddfobj created in distdata processing above
+  # This used to emit a copy for every ddftype regardless, pointing the ones
+  # with no obs at min(newddfs) so dsm() would not trip over a ddfobj with no
+  # observations. Their abundance.est came out 0 (no Sample.Label matches), so
+  # they contributed a full study area of structural zeros. The long-standing
+  # "XXXX Does having all these 0's bias the gam????" note asked what that did.
   #
-  # 2) for segdata copies whose corresponding ddf had no observations, we need
-  # to change the ddfobj. Otherwise, dsm will get upset when it tries to find
-  # the observations forthese segments whose ddfobj points to a ddf (dummy or
-  # otherwise???) with no observations due to a sanity check in dsm which
-  # probably should be modified. To get around this, for segments whose ddfobj is
-  # currently a ddf with no obs, we change the ddfobj for those segments to
-  # point to any valid ddfobj which actually does have observations (for
-  # exammple, below I use the first good ddfobj min(ddfobj)). Then, the abundance.est
-  # in these segments (as computed by dsm:::make.data()) will still be 0 since
-  # none of the Sample.Labels in the fitted.distdata for that substituted ddfobj
-  # will match the Sample.Label in these segments (ie in this copy of segdata).
-  # (XXXX Does having all these 0's bias the gam???? See Notes.docx May 23, 2025).
+  # It halved the density, and it did so through ddftype_to_platform. While D
+  # and N shared a platform level, an all-zero copy sat beside a populated one
+  # with nothing in the model to tell them apart, so the GAM fitted their mean:
+  # on NL_EXPL_DRL_RA ATPU, fitted SWD = fitted SWN = 1109 against observed 2147
+  # and 0. Now that each ddftype has its own platform level (see
+  # ddftype_to_platform in analysis_settings.R) an empty ddftype would instead
+  # become an all-zero LEVEL, whose intercept a log link cannot fit sensibly.
   #
-  # Note it might be better just to these segdata copies with no obs altogether
-  # but I'm not sure this is valied (nor am I sure keeping them is valid). Also,
-  # that would mean that the number of init.segdata copies in the final segdata
-  # would vary dynamically and this would need to be kept track of so that
-  # downstream code (ie. in prediction step) would know how to parse out the
-  # rows properly. Not sure what would be best
+  # Either way the copy carries no information, so drop it. The same note
+  # worried that this makes the number of copies vary per species and that
+  # "downstream code (ie. in prediction step) would know how to parse out the
+  # rows properly" - which is why create.seasonal.predgrid() now takes its
+  # platform levels from the fitted model rather than from the global.
   #
-  # conv can then be indexed by the original ddftype  to get the correct ddfobj
-  # for each segment.
-  nddfs <- length(def.ddf.list)
+  # Note this drops only ddftypes with NO observations at all. A ddftype with
+  # few observations is kept and warned about below: the _N types are
+  # strip/dummy ddfs (generic.strip.ddf.spec) so nothing is estimated from those
+  # observations, and the exposure is the DSM intercept, not the ddf.
   origddfs <- sort(unique(distdata$ddfobj.orig))
+  kept <- purrr::map_int(df.mod.specs, ~ as.integer(.x$ddftype)) %in% origddfs
+  if (any(!kept))
+    message(sprintf(
+      "create.dsm.data: dropping segdata %s for ddftype %s - no observations.",
+      ifelse(sum(!kept) == 1, "copy", "copies"),
+      paste(purrr::map_chr(df.mod.specs[!kept], ~ as.character(.x$ddftype)),
+            collapse = ", ")))
+  df.mod.specs <- df.mod.specs[kept]
+
+  # Every surviving ddftype has observations, so conv just renumbers the
+  # original ddfobj values sequentially to match the renumbering done in
+  # distdata above. conv is indexed by the original ddftype integer.
+  nddfs <- length(def.ddf.list)
   newddfs <- sort(unique(distdata$ddfobj))
-  conv <- rep(NA, nddfs)
+  conv <- rep(NA_integer_, nddfs)
   conv[origddfs] <- newddfs
-  conv[is.na(conv)] <- min(newddfs)
 
   # Cylce through the list of ddf model specs adding a copy of segdata for each.
   segdata <- df.mod.specs %>%
-    # Insert a copy of the right segdata (ship vs aerial) for each ddf spec.
-    # regardless of whether there were any obs in that ddf. If there weren't
-    # then all segments for this ddf spec will end up with zero obs in the
-    # response variable created by dsm:::make_data()
     purrr::map(create.segdata.copy, init_segdata = init_segdata) %>%
     purrr::map_dfr(~ .) %>% # Convert to one large dataframe
     assign.season(seasons[[species]], datefield = "Date") %>%
@@ -7338,58 +7628,72 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
     augment.segdata(distdata)
 
   ##### Make sure assignment of ddfobj went properly
-  # of each segdata copy (either aerial of ship) and making sure
-  # get ddfs with no obs
-  mingood <- min(newddfs)
-  conv[mingood] <- NA # ignore the actuall good ddf that the others point to
-  no_obs_ddfs <- which(conv == mingood)
+  #
+  # Every ddftype that reaches here has observations, so each one contributes
+  # exactly one copy of its survey type's segments and every segment gets a real
+  # ddfobj. That is a stronger and much simpler statement than the arithmetic
+  # this replaced, which existed only to account for the orphan copies that are
+  # no longer created.
+  stopifnot(!anyNA(segdata$ddfobj))
 
   # Get survey type of each ddf. This requires that the order of ddftype_levels
   # and def.ddf.list have the same order.
-  survey_type_index <- substr(ddftype_levels, 1,1)
+  survey_type_index <- substr(ddftype_levels, 1, 1)
 
   # get aerial and ship initial segdata sizes and name them "A" and "S".
   #
   # NB: table() only returns entries for survey types actually present in the
   # data, so a study area covered by only one survey type (eg. one with no
-  # aerial coverage at all) leaves sizes["A"] as NA. That NA propagates through
-  # sum() into tot_no_obs_ddf_segs, making the check below evaluate to NA and
-  # abort with "missing value where TRUE/FALSE needed". Build the vector over
-  # every survey type implied by ddftype_levels so absent ones are 0, not NA.
+  # aerial coverage at all) leaves sizes["A"] as NA. Build the vector over every
+  # survey type implied by ddftype_levels so absent ones are 0, not NA.
   expected_types <- unique(survey_type_index)
   sizes <- table(init_segdata$SurveyType) %>%
-    setNames(names(.) %>% substr(1,1))
+    setNames(names(.) %>% substr(1, 1))
   sizes <- setNames(as.vector(sizes[expected_types]), expected_types)
   sizes[is.na(sizes)] <- 0
 
-  # Get the number of segments that had a ddf with no obs that have used
-  # min(newddfs) as their ddfobj.
-  tot_no_obs_ddf_segs<- sum(sizes[survey_type_index[no_obs_ddfs]])
+  expected_rows <- sizes[survey_type_index[origddfs]]
+  actual_rows <- as.vector(table(segdata$ddfobj)[as.character(newddfs)])
+  if (!isTRUE(all.equal(as.vector(expected_rows), actual_rows)))
+    stop(sprintf(
+      paste0("create.dsm.data: segdata copy sizes are wrong for '%s'. ddftype ",
+             "%s should contribute %s segments respectively but contributed %s."),
+      species, paste(ddftype_levels[origddfs], collapse = ", "),
+      paste(expected_rows, collapse = ", "),
+      paste(actual_rows, collapse = ", ")))
 
-  # The number of segments with ddfobj equal to mingodd should equal the number
-  # it would normally have had if no others from no_obs ddfs pointed to it
-  # plus the number no_obs_ddf segments that are pointing to it. If not, something
-  # went wrong.
-  if (table(segdata$ddfobj)[mingood] !=
-      sizes[survey_type_index[mingood]] + tot_no_obs_ddf_segs) {
-    message(
-      "Something went wrong assigning ddfobjs. Number of segments with ",
-      mingood,
-      " for ddfobj is ",
-      table(segdata$ddfobj)[mingood],
-      " but should be ",
-      sizes[survey_type_index[mingood]] + tot_no_obs_ddf_segs
-    )
-    stop()
-  }
+  # Warn about a platform level resting on very few observations. It is not an
+  # error and nothing is dropped: the _N ddftypes are strip/dummy ddfs so their
+  # observation count does not threaten a detection function. What it threatens
+  # is the DSM, where each ddftype now carries its own platform intercept. On
+  # NL_EXPL_DRL_RA, SWN is empty for nine of eleven species and rests on 1 (BLKI)
+  # and 3 (NOFU) observations for the other two, because lkpDistMeth gives water
+  # birds perpendicular distances under almost every DistMeth in use.
+  sparse <- table(distdata$ddfobj.orig)
+  sparse <- sparse[sparse < SPARSE_PLATFORM_LEVEL_OBS]
+  if (length(sparse) > 0)
+    warning(sprintf(
+      paste0("create.dsm.data: '%s' has platform level(s) resting on very few ",
+             "observations: %s. Kept, but check that the level's fitted ",
+             "intercept and its contribution to the combined prediction are ",
+             "sensible."),
+      species,
+      paste(sprintf("%s (n=%d)",
+                    ddftype_to_platform[as.integer(names(sparse))],
+                    as.vector(sparse)), collapse = ", ")),
+      immediate. = TRUE)
 
   ### Create ddfs ----------------------------------------
 
-  # Extract ddfs from df.mod.specs and drop any which don't have any observations
-  # or else dsm() will get upset. Note we use the original ddfobj numbering
-  # before it was recoded since this extracts the correct ddfs.
-  ddfs <- purrr::map(df.mod.specs, "fitted.model") %>%
-    magrittr::extract(unique(distdata$ddfobj.orig))
+  # df.mod.specs is already filtered to the ddftypes with observations, in
+  # ddftype_levels order, and distdata$ddfobj was dense-ranked over the same
+  # ascending order - so element i here is ddfobj i. Indexing by
+  # unique(distdata$ddfobj.orig) would be wrong now, since those are positions in
+  # the UNFILTERED list.
+  stopifnot(identical(unname(purrr::map_int(df.mod.specs,
+                                            ~ as.integer(.x$ddftype))),
+                      as.integer(origddfs)))
+  ddfs <- purrr::map(df.mod.specs, "fitted.model")
 
   ### TODO: need to deal with segments where WhatCount was something funky
   ### like only counting gannets. In that case, if we are doing a different species

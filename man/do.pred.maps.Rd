@@ -4,7 +4,7 @@
 \alias{do.pred.maps}
 \title{Produce leaflet prediction maps for all four seasons}
 \usage{
-do.pred.maps(dat, model, modname, species, subs = c("Combined", "F", "W"), ...)
+do.pred.maps(dat, model, modname, species, subs = "Combined", ...)
 }
 \arguments{
 \item{dat}{\code{sf} data frame of prediction grid cells with columns
@@ -18,8 +18,12 @@ add estimated abundance circles.}
 \item{species}{Character string species code; used in messages and legend
 titles.}
 
-\item{subs}{Which platform subset to map: \code{"Combined"} (default),
-\code{"F"} (flying), or \code{"W"} (water).}
+\item{subs}{Which platform subset to map: \code{"Combined"} (the default and
+the usual choice), or any single platform level present in \code{dat}.
+The available levels come from the data rather than a fixed list, because
+they depend on \code{ddftype_to_platform} and on which ddftypes the species
+actually has - the old hardcoded \code{c("Combined", "F", "W")} silently
+stopped matching when either changed.}
 
 \item{...}{Additional arguments passed to \code{\link{do.pred.map}}.}
 }
