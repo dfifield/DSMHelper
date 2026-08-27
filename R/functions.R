@@ -6928,6 +6928,22 @@ run.dsm.model <- function(mod.def,
 #' which was 0.494 on NL_EXPL_DRL_RA ATPU before \code{ddftype_to_platform} gave
 #' each ddftype its own level.
 #'
+#' @section Projects with both survey types:
+#' Ship and aerial contribute different numbers of segments, and a ddftype can
+#' survive for one survey type and not the other, so the levels need not all rest
+#' on the same segments. Two consequences:
+#'
+#' \code{copies.per.platform} is unaffected and remains the structural test. It
+#' is a maximum over per-(segment, platform) counts, and a segment belongs to one
+#' survey type, so it can only exceed 1 when two ddftypes of the *same* survey
+#' type share a level - the collapse being tested for.
+#'
+#' \code{ratio} is weaker when the levels cover different segments, because
+#' \code{design.density} spreads every bird over the whole surveyed area while a
+#' level present for only one survey type is fitted over that survey type's part
+#' of it. The message says so when it happens; read
+#' \code{copies.per.platform} rather than the ratio in that case.
+#'
 #' @param model Fitted \code{dsm} object with \code{control = list(keepData =
 #'   TRUE)}, so \code{model$data} carries \code{abundance.est},
 #'   \code{segment.area}, \code{platform}, \code{ddftype_orig} and
@@ -6948,19 +6964,48 @@ check.platform.combination <- function(model, tolerance = 0.15) {
          "control = list(keepData = TRUE).")
   dat <- sf::st_drop_geometry(dat)
   dat$.fit <- stats::fitted(model)
+  dat$.seg <- segment.id.from.label(dat$Sample.Label)
 
-  n.segments <- dplyr::n_distinct(segment.id.from.label(dat$Sample.Label))
+  n.segments <- dplyr::n_distinct(dat$.seg)
   copies.per.segment <- nrow(dat) / n.segments
 
   # The count that matters. Anything above 1 means several ddftypes share a
   # platform level and the sum below will under-report by that factor.
+  #
+  # This one is safe in a project with both survey types even though they may
+  # contribute different numbers of segments: it is a maximum over per-(segment,
+  # platform) counts, so how many segments each survey type has cannot affect it.
+  # A ship segment appears in the S ddftypes only and an aerial segment in the A
+  # ddftypes only, so neither can reach 2 unless two ddftypes of the SAME survey
+  # type share a platform level - which is exactly the collapse being tested for.
   copies.per.platform <- dat %>%
-    dplyr::mutate(.seg = segment.id.from.label(Sample.Label)) %>%
     dplyr::count(.seg, platform) %>%
     dplyr::pull(n) %>%
     max()
 
-  surveyed.area <- sum(dat$segment.area) / copies.per.segment
+  # Surveyed area is the area of the DISTINCT segments.
+  #
+  # It used to be sum(segment.area) / copies.per.segment, which is right only
+  # when every segment has the same number of copies. That fails in a project
+  # with both survey types where the two keep different numbers of ddftypes -
+  # say ship keeps all four and aerial loses AWN for want of observations. Then
+  # copies.per.segment is a count-weighted average while the numerator is an
+  # area-weighted sum, and the two do not cancel. With 200 ship segments of
+  # 0.30 km2 and 50 aerial of 0.80, copies.per.segment is 3.8 and the old
+  # expression returns 94.74 km2 for a true 100 - and sprintf("%d", 3.8) then
+  # errors outright. Taking the distinct segments' area is exact however the
+  # copies fall.
+  seg.area <- dat %>%
+    dplyr::group_by(.seg) %>%
+    dplyr::summarise(area = dplyr::first(segment.area),
+                     n_areas = dplyr::n_distinct(segment.area),
+                     .groups = "drop")
+  if (any(seg.area$n_areas > 1))
+    stop("check.platform.combination: segment.area differs between copies of ",
+         "the same segment, so there is no single surveyed area to compare ",
+         "against. create.segdata.copy() carries it through unchanged, so this ",
+         "means something downstream has altered it.")
+  surveyed.area <- sum(seg.area$area)
   design.density <- sum(dat$abundance.est) / surveyed.area
 
   # Each platform level's density is its fitted total over the area of ITS
@@ -6974,14 +7019,38 @@ check.platform.combination <- function(model, tolerance = 0.15) {
 
   ratio <- model.density / design.density
 
+  # Whether the levels rest on the same ground. They do whenever every segment
+  # appears in every level, which is the usual case. They do not when a ddftype
+  # survives for one survey type but not the other: that level is then estimated
+  # over a subset of the study area while design.density spreads its birds over
+  # all of it, so the ratio mixes two spatial supports and loses precision as a
+  # calibration measure. copies.per.platform is unaffected and remains the
+  # structural test.
+  mixed.support <- !isTRUE(all.equal(range(by.platform$area)[1],
+                                     range(by.platform$area)[2]))
+
+  copies.txt <- if (isTRUE(all.equal(copies.per.segment,
+                                     round(copies.per.segment))))
+    sprintf("%g", copies.per.segment)
+  else
+    sprintf("%.2f on average (levels do not all cover the same segments)",
+            copies.per.segment)
+
   message(sprintf(
-    paste0("Platform combination check: %d segment copies over %d platform ",
+    paste0("Platform combination check: %s segment copies over %d platform ",
            "level(s) (%s), %d copies per platform."),
-    copies.per.segment, nrow(by.platform),
+    copies.txt, nrow(by.platform),
     paste(by.platform$platform, collapse = ", "), copies.per.platform))
   message(sprintf(
     "  design-based %.4f /sqkm, model-implied %.4f /sqkm, ratio %.3f",
     design.density, model.density, ratio))
+
+  if (mixed.support)
+    message("  NB: platform levels cover different segments (areas ",
+            paste(sprintf("%s %.0f", by.platform$platform, by.platform$area),
+                  collapse = ", "),
+            " sqkm), so the ratio mixes spatial supports - read ",
+            "copies.per.platform, not the ratio.")
 
   if (copies.per.platform > 1)
     warning(sprintf(
@@ -6989,7 +7058,7 @@ check.platform.combination <- function(model, tolerance = 0.15) {
              "level, so the combined prediction is roughly 1/%d of the true ",
              "density. Give each ddftype its own level in ddftype_to_platform."),
       copies.per.platform, copies.per.platform), immediate. = TRUE)
-  else if (abs(ratio - 1) > tolerance)
+  else if (abs(ratio - 1) > tolerance && !mixed.support)
     warning(sprintf(
       paste0("check.platform.combination: model-implied density is %.3f x the ",
              "design-based estimate (tolerance %.2f). Copies per platform is 1, ",
@@ -6999,6 +7068,7 @@ check.platform.combination <- function(model, tolerance = 0.15) {
   invisible(dplyr::tibble(
     copies.per.segment = copies.per.segment,
     copies.per.platform = copies.per.platform,
+    mixed.support = mixed.support,
     surveyed.area.sqkm = surveyed.area,
     design.density = design.density,
     model.density = model.density,

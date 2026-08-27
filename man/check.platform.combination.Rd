@@ -40,3 +40,21 @@ failure this exists to catch is a ratio near \code{1 / copies.per.platform},
 which was 0.494 on NL_EXPL_DRL_RA ATPU before \code{ddftype_to_platform} gave
 each ddftype its own level.
 }
+\section{Projects with both survey types}{
+
+Ship and aerial contribute different numbers of segments, and a ddftype can
+survive for one survey type and not the other, so the levels need not all rest
+on the same segments. Two consequences:
+
+\code{copies.per.platform} is unaffected and remains the structural test. It
+is a maximum over per-(segment, platform) counts, and a segment belongs to one
+survey type, so it can only exceed 1 when two ddftypes of the \emph{same} survey
+type share a level - the collapse being tested for.
+
+\code{ratio} is weaker when the levels cover different segments, because
+\code{design.density} spreads every bird over the whole surveyed area while a
+level present for only one survey type is fitted over that survey type's part
+of it. The message says so when it happens; read
+\code{copies.per.platform} rather than the ratio in that case.
+}
+
