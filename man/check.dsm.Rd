@@ -37,3 +37,14 @@ mgcv \code{\link[mgcv]{gam.check}}, DHARMa residual tests, spatial
 autocorrelation tests, observed vs expected plots, and (optionally)
 concurvity checks and variograms.
 }
+\section{Reproducibility under parallelism}{
+
+Safe to call from a \code{future}/\code{furrr} worker: the generator is
+pinned to Mersenne-Twister for the duration and restored afterwards, so the
+seeded steps give the same numbers as a serial run. Without that pin they
+do not - measured on ATPU, an unpinned worker returned a k-index of 0.833
+against 0.896 serial and a Moran's I of -0.00216 against 0.000964, from
+identical seeds, because furrr's workers run L'Ecuyer-CMRG and
+\code{set.seed()} resets whichever generator is current.
+}
+

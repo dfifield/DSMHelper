@@ -6488,6 +6488,14 @@ summarise.extrapolation.abundance <- function(cells, pred.raster) {
 #'   mainly for its side-effects: the printing and plotting are unchanged, and
 #'   the statistics are captured as they are produced rather than recomputed,
 #'   because \code{DHARMa::simulateResiduals()} is the slowest thing here.
+#' @section Reproducibility under parallelism:
+#'   Safe to call from a \code{future}/\code{furrr} worker: the generator is
+#'   pinned to Mersenne-Twister for the duration and restored afterwards, so the
+#'   seeded steps give the same numbers as a serial run. Without that pin they
+#'   do not - measured on ATPU, an unpinned worker returned a k-index of 0.833
+#'   against 0.896 serial and a Moran's I of -0.00216 against 0.000964, from
+#'   identical seeds, because furrr's workers run L'Ecuyer-CMRG and
+#'   \code{set.seed()} resets whichever generator is current.
 #' @export
 check.dsm <- function(dsm_final,
                       modname,
@@ -6498,6 +6506,18 @@ check.dsm <- function(dsm_final,
   # accessing columns with segdata[, termlab] below doesn't work with tbls or
   # sf objects.
   segdata <- as.data.frame(segdata)
+
+  # Pin the generator, not just the seed. Three things in here are stochastic
+  # and seeded - k.check(), the DHARMa simulations that follow it, and the
+  # location subsample for the spatial test - and set.seed() resets whichever
+  # generator is CURRENT. Under furrr's future.seed = TRUE the workers run
+  # L'Ecuyer-CMRG, so the same seed yields a different sequence there than in
+  # the main process, and the k-index and Moran's I would silently differ
+  # between a serial and a parallel run of identical code. This is the same
+  # trap assign.blocks() documents, where it produced different CV folds.
+  old_kind <- RNGkind()
+  on.exit(RNGkind(old_kind[1], old_kind[2], old_kind[3]), add = TRUE)
+  suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
 
   # Several dsm-package functions do partial matching so turn off and re-enable
   # at end.
