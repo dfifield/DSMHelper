@@ -19,13 +19,18 @@ get.per.cell.var(
 
 \item{df}{Prediction grid data frame.}
 
-\item{nchunks}{Integer number of chunks to split \code{df} into.}
+\item{nchunks}{Integer number of chunks to split \code{df} into. Set it
+well above \code{nodes} when running in parallel - the chunks are
+dispatched with load balancing, so \code{nchunks == nodes} leaves nothing
+to balance and the step runs as long as its slowest chunk. Smaller chunks
+also cap per-worker memory. \code{nchunks} does not change the answer when
+\code{exact.predict} is \code{TRUE}.}
 
 \item{off.set}{Numeric offset (cell area): either a scalar or a vector the
 same length as \code{nrow(df)}.}
 
 \item{parallel}{If \code{TRUE}, process chunks in parallel with
-\code{parLapply}.}
+\code{parLapplyLB}.}
 
 \item{nodes}{Integer number of cluster nodes for parallel processing.}
 
@@ -38,7 +43,9 @@ separately and a cell's variance depends on which chunk it fell in, meaning
 coefficients and \code{Vp} are untouched.}
 }
 \value{
-List of per-chunk results from \code{\link{apply.dsm.var}}.
+List of per-chunk results from \code{\link{apply.dsm.var}}, in the
+order of the chunks, each carrying a \code{chunk.stats} attribute.
+\code{\link{report.chunk.stats}} is called on the way out and prints them.
 }
 \description{
 Splits the prediction grid into \code{nchunks} pieces, applies

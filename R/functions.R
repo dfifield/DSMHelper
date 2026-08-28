@@ -5798,12 +5798,36 @@ run.family.cv <- function(species, segdata, finalists,
 #'   \code{.my.off.set} column.
 #' @param this.dsm Fitted \code{dsm} object.
 #' @return Named list with elements \code{pred.var} (per-cell variance) and
-#'   \code{pred} (numeric prediction vector).
+#'   \code{pred} (numeric prediction vector), carrying a \code{chunk.stats}
+#'   attribute: \code{cells}, \code{mins} and \code{peak.gb} for this chunk.
+#'   \code{\link{get.per.cell.var}} summarises those across chunks. They exist
+#'   because one ATPU chunk of 220,000 rows ran 5x slower than nine others of
+#'   the same size and reached a 31.7 GB working set, which nothing in the code
+#'   explains (issue #46); without per-chunk numbers the next long run would
+#'   again only be diagnosable from outside, with \code{tasklist}.
 #' @export
 apply.dsm.var <- function(dat, this.dsm){
+  t0 <- proc.time()[["elapsed"]]
+
   res <- dsm::dsm_var_gam(this.dsm, dat, purrr::map(dat, ".my.off.set"))
 
-  list(pred.var = res$pred.var, pred = unlist(res$pred))
+  out <- list(pred.var = res$pred.var, pred = unlist(res$pred))
+
+  # gc() here both reports memory and returns the chunk's, which the serial
+  # path used to do with a bare gc() call - see get.per.cell.var().
+  #
+  # Column 6 of the gc() matrix is "max used (Mb)", summed over Ncells/Vcells.
+  # It is the high-water mark of this R process, not of this chunk alone, so
+  # across chunks on one worker it only ever rises. That is the number wanted:
+  # what made issue #46 visible from outside was one worker process holding
+  # 31.7 GB while nine held 172 MB.
+  attr(out, "chunk.stats") <- c(
+    cells   = length(dat),
+    mins    = (proc.time()[["elapsed"]] - t0) / 60,
+    peak.gb = sum(gc()[, 6]) / 1024
+  )
+
+  out
 }
 
 #' Compute per-cell variance for a DSM in memory-safe chunks
@@ -5815,7 +5839,12 @@ apply.dsm.var <- function(dat, this.dsm){
 #'
 #' @param this.dsm Fitted \code{dsm} object.
 #' @param df Prediction grid data frame.
-#' @param nchunks Integer number of chunks to split \code{df} into.
+#' @param nchunks Integer number of chunks to split \code{df} into. Set it
+#'   well above \code{nodes} when running in parallel - the chunks are
+#'   dispatched with load balancing, so \code{nchunks == nodes} leaves nothing
+#'   to balance and the step runs as long as its slowest chunk. Smaller chunks
+#'   also cap per-worker memory. \code{nchunks} does not change the answer when
+#'   \code{exact.predict} is \code{TRUE}.
 #' @param exact.predict If \code{TRUE} (default) and the model was fitted with
 #'   \code{discrete = TRUE}, drop its \code{$dinfo} so that \code{dsm_var_gam()}
 #'   predicts exactly. \code{dsm_var_gam()} takes no \code{discrete} argument, so
@@ -5826,9 +5855,11 @@ apply.dsm.var <- function(dat, this.dsm){
 #' @param off.set Numeric offset (cell area): either a scalar or a vector the
 #'   same length as \code{nrow(df)}.
 #' @param parallel If \code{TRUE}, process chunks in parallel with
-#'   \code{parLapply}.
+#'   \code{parLapplyLB}.
 #' @param nodes Integer number of cluster nodes for parallel processing.
-#' @return List of per-chunk results from \code{\link{apply.dsm.var}}.
+#' @return List of per-chunk results from \code{\link{apply.dsm.var}}, in the
+#'   order of the chunks, each carrying a \code{chunk.stats} attribute.
+#'   \code{\link{report.chunk.stats}} is called on the way out and prints them.
 #' @export
 get.per.cell.var <- function(this.dsm,
                              df,
@@ -5888,6 +5919,7 @@ get.per.cell.var <- function(this.dsm,
   if (parallel) {
 
     cl <- parallel::makeCluster(nodes)
+    on.exit(parallel::stopCluster(cl), add = TRUE)
 
     # Could just execute the things we need instead.
     # parallel::clusterEvalQ(cl, source(here::here("R/analysis_settings.R")))
@@ -5896,42 +5928,98 @@ get.per.cell.var <- function(this.dsm,
       library(purrr)
     })
 
-    # Need envir arg or else it won't find data objects when being rendered.
-    # Cost is serialising the split prediction grid to every node, so it scales
-    # with grid rows x nodes rather than with anything about the model.
-    # ~1 min (unattributed: SubProject and node count not recorded).
-    parallel::clusterExport(
-      cl,
-      c(
-        "apply.dsm.var",
-        "dat.split",
-        "this.dsm"
-      ),
-      envir = environment()
-    )
+    # Export the model and the worker function - not dat.split, which used to
+    # be here too. That sent every chunk to every worker on top of the chunk
+    # the dispatcher already delivers: on NL_EXPL_DRL_RA, 2.2 million single-row
+    # data frames per worker, each needing 220,000 of them (issue #46).
+    #
+    # The model goes by export rather than as a parLapplyLB argument because an
+    # argument is serialised once per task: with nchunks > nodes the model would
+    # be shipped repeatedly, which is the same mistake in a different place.
+    #
+    # apply.dsm.var is exported by name rather than reached as
+    # DSMHelper::apply.dsm.var so the workers run whatever the driver is
+    # running. That matters when the package is being developed by sourcing
+    # functions.R, where the installed version is a different, older one.
+    parallel::clusterExport(cl, c("apply.dsm.var", "this.dsm"),
+                            envir = environment())
 
-    # Run the function
-    system.time(res <- parallel::parLapply(
-      cl,
-      dat.split,
-      apply.dsm.var,
-      this.dsm = this.dsm
-    )
-    )
+    # environment(worker) <- globalenv() is load-bearing, not tidiness. A
+    # closure defined here carries this frame, and this frame holds df and
+    # dat.split - so leaving it attached would ship the whole prediction grid
+    # again, by the back door, and undo the fix above. Detached, both names
+    # resolve to the copies clusterExport put in each worker's global env.
+    worker <- function(chunk) apply.dsm.var(chunk, this.dsm)
+    environment(worker) <- globalenv()
 
-    parallel::stopCluster(cl)
-  } else {  # non-parallel version
-    # apply the function to the chunks serially with map
+    # parLapplyLB with chunk.size = 1 rather than parLapply: static scheduling
+    # made the step as slow as its slowest chunk, and on ATPU nine workers sat
+    # idle for over five hours while the tenth finished. Load balancing needs
+    # nchunks > nodes to have anything to balance - see the argument docs.
+    # Results still come back in the order of dat.split.
     print(system.time(
-      res <- purrr::map(dat.split, \(chunk) {
-        apply.dsm.var(chunk, this.dsm)
-        gc()
-      }
-      )
+      res <- parallel::parLapplyLB(cl, dat.split, worker, chunk.size = 1)
+    ))
+
+  } else {  # non-parallel version
+    # apply the function to the chunks serially with map.
+    #
+    # This used to end each iteration with a bare gc(), which is what map()
+    # then returned - so the serial path handed back gc() matrices instead of
+    # results and map(res, "pred.var") came out empty. apply.dsm.var() now
+    # calls gc() itself, for the chunk stats, so the collection still happens.
+    print(system.time(
+      res <- purrr::map(dat.split, apply.dsm.var, this.dsm = this.dsm)
     ))
   }
 
+  report.chunk.stats(res)
+
   res
+}
+
+#' Summarise the per-chunk cost of a get.per.cell.var() run
+#'
+#' Prints the \code{chunk.stats} attribute that \code{\link{apply.dsm.var}}
+#' attaches to each chunk result: cells, minutes and peak memory, plus the
+#' spread across chunks. A single slow chunk is the failure mode this exists to
+#' make visible (issue #46), and it is invisible in a wall-clock total.
+#'
+#' @param res List of chunk results from \code{\link{get.per.cell.var}}.
+#' @return \code{invisible(NULL)}; called for the printed summary.
+#' @examples
+#' \dontrun{
+#' res <- get.per.cell.var(m, predgrid, nchunks = 40, parallel = TRUE, nodes = 10)
+#' report.chunk.stats(res)
+#' }
+#' @export
+report.chunk.stats <- function(res) {
+  checkmate::expect_list(res, min.len = 1)
+
+  stats <- purrr::map(res, ~ attr(.x, "chunk.stats"))
+  if (any(purrr::map_lgl(stats, is.null))) return(invisible(NULL))
+
+  st <- as.data.frame(do.call(rbind, stats))
+  st$chunk <- seq_len(nrow(st))
+
+  message(sprintf(
+    "get.per.cell.var: %d chunks, %s cells, %.1f min of chunk time",
+    nrow(st), format(sum(st$cells), big.mark = ","), sum(st$mins)))
+  message(sprintf(
+    "  slowest chunk %d at %.1f min vs median %.1f (%.1fx), peak %.1f GB",
+    st$chunk[which.max(st$mins)], max(st$mins), stats::median(st$mins),
+    max(st$mins) / stats::median(st$mins), max(st$peak.gb)))
+
+  # The ATPU run that prompted this was 5x. Anything near that is the same
+  # unexplained thing, not a rough edge in the chunking.
+  if (max(st$mins) > 2 * stats::median(st$mins))
+    warning(sprintf(paste0(
+      "get.per.cell.var: chunk %d took %.1fx the median. Chunks are equal ",
+      "sized, so this is not the split. See issue #46."),
+      st$chunk[which.max(st$mins)], max(st$mins) / stats::median(st$mins)),
+      call. = FALSE)
+
+  invisible(NULL)
 }
 
 
