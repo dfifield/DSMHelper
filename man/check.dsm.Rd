@@ -21,8 +21,15 @@ plots.}
 (concurvity, autocorrelogram, variograms).}
 }
 \value{
-\code{invisible(NULL)}, called for its side-effects (plots and
-printed output).
+Invisibly, a named list of the statistics computed along the way -
+\code{k.check}, \code{residuals}, \code{zeroinflation}, \code{spatial},
+\code{overdispersion}, \code{oe.platform}, \code{oe.depth}, and with
+\code{brief = FALSE} also \code{concurvity} and \code{variogram}. Entries
+that could not be computed hold the \code{try-error}. Pass it to
+\code{\link{interpret.dsm.checks}} for plain-English verdicts. Still called
+mainly for its side-effects: the printing and plotting are unchanged, and
+the statistics are captured as they are produced rather than recomputed,
+because \code{DHARMa::simulateResiduals()} is the slowest thing here.
 }
 \description{
 Runs a full suite of checks including smooth plots, gratia appraise,

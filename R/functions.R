@@ -6391,8 +6391,15 @@ summarise.extrapolation.abundance <- function(cells, pred.raster) {
 #'   plots.
 #' @param brief If \code{TRUE} (default), skip the more expensive diagnostics
 #'   (concurvity, autocorrelogram, variograms).
-#' @return \code{invisible(NULL)}, called for its side-effects (plots and
-#'   printed output).
+#' @return Invisibly, a named list of the statistics computed along the way -
+#'   \code{k.check}, \code{residuals}, \code{zeroinflation}, \code{spatial},
+#'   \code{overdispersion}, \code{oe.platform}, \code{oe.depth}, and with
+#'   \code{brief = FALSE} also \code{concurvity} and \code{variogram}. Entries
+#'   that could not be computed hold the \code{try-error}. Pass it to
+#'   \code{\link{interpret.dsm.checks}} for plain-English verdicts. Still called
+#'   mainly for its side-effects: the printing and plotting are unchanged, and
+#'   the statistics are captured as they are produced rather than recomputed,
+#'   because \code{DHARMa::simulateResiduals()} is the slowest thing here.
 #' @export
 check.dsm <- function(dsm_final,
                       modname,
@@ -6468,18 +6475,90 @@ check.dsm <- function(dsm_final,
   message("dsm::rqgam_check():")
   dsm::rqgam_check(dsm_final)
 
+  # Everything worth interpreting is collected into `checks` as it is computed,
+  # and returned. Recomputing it afterwards would mean a second
+  # DHARMa::simulateResiduals(), which is the slowest thing in here.
+  checks <- list(modname = modname, n = nrow(segdata),
+                 family = dsm_final$family$family)
+
+  # Basis dimension adequacy. my.gam.check() prints this but does not return it;
+  # k.check() is what it calls internally, so take it from there.
+  #
+  # Seeded, because k.check() is stochastic - it compares the residual
+  # autocorrelation against randomly resampled neighbours, so successive calls on
+  # the SAME model give different answers. Three calls on ATPU's
+  # dsm_tw_allpred_abund_factor returned k-index 0.884, 0.789 and 0.897 for
+  # s(x,y), which straddles the threshold this check reads. Without a seed the
+  # verdict would not reproduce from one run to the next.
+  set.seed(get0("K_CHECK_SEED", ifnotfound = 20260828))
+  checks$k.check <- try(mgcv::k.check(dsm_final), silent = TRUE)
+
   # Remove "dsm" class to make DHARMa happy
   message("DHARMa checks")
   simmod <- dsm_final
   class(simmod) <- class(simmod)[-1] # Simulate residuals doesn't like dsm class
   sims <- DHARMa::simulateResiduals(fittedModel = simmod)
   plot(sims)
-  print(DHARMa::testResiduals(sims))
-  print(DHARMa::testZeroInflation(sims))
-  # May fail if x,y locations are not unique
-  res <- try(DHARMa::testSpatialAutocorrelation(sims, segdata$x, segdata$y))
-  if (!inherits(res, "try-error"))
-    print(res)
+  print(checks$residuals <- DHARMa::testResiduals(sims))
+  print(checks$zeroinflation <- DHARMa::testZeroInflation(sims))
+
+  # Spatial autocorrelation.
+  #
+  # This has never once run. DHARMa needs unique coordinates and the multi-ddf
+  # design guarantees the opposite: every segment appears once per ddftype at
+  # the same x,y, so the call failed with "requires unique x,y values" on all 22
+  # models of the last NL_EXPL_DRL_RA run - and, being wrapped in try(), failed
+  # quietly enough that the report simply had no spatial test in it.
+  #
+  # recalculateResiduals() aggregates to one residual per group, which is what
+  # the commented-out block below was reaching for.
+  #
+  # The group has to be the LOCATION, not the segment. Aggregating by segment is
+  # the obvious reading of "one residual per sample unit" and it is not enough:
+  # transects revisit places, so ATPU's 38,443 segments sit on only 38,147
+  # distinct coordinates, with 277 locations shared by up to 7 segments each.
+  # That leaves duplicate x,y and the test refuses exactly as before - tested,
+  # and it does.
+  #
+  # The earlier attempt grouped by location correctly and died allocating
+  # memory. It would: the test builds a dense n x n distance matrix, so 38,147
+  # locations need ~11.6 GB and Atl IMRP's would need ~110 GB. So cap it - a
+  # random sample tests the same hypothesis with slightly less power, at ~200 MB
+  # for the default 5,000.
+  checks$spatial <- try({
+    seg.id <- segment.id.from.label(segdata$Sample.Label)
+    loc.id <- paste(segdata$x, segdata$y, sep = "_")
+    recal <- DHARMa::recalculateResiduals(sims, group = loc.id)
+    # recalculateResiduals returns groups in the order of factor(group) levels.
+    locs <- data.frame(loc = loc.id, x = segdata$x, y = segdata$y) %>%
+      dplyr::group_by(loc) %>%
+      dplyr::summarise(x = dplyr::first(x), y = dplyr::first(y),
+                       .groups = "drop") %>%
+      dplyr::arrange(match(loc, levels(factor(loc.id))))
+    resids <- recal$scaledResiduals
+    stopifnot(length(resids) == nrow(locs))
+    cap <- get0("SPATIAL_AUTOCORR_MAX_N", ifnotfound = 5000)
+    n.locs <- nrow(locs)
+    if (n.locs > cap) {
+      set.seed(get0("SPATIAL_AUTOCORR_SEED", ifnotfound = 20260828))
+      keep <- sort(sample(n.locs, cap))
+      message(sprintf(
+        "Spatial autocorrelation: %d locations, testing a random %d of them.",
+        n.locs, cap))
+      locs <- locs[keep, ]; resids <- resids[keep]
+    }
+    out <- DHARMa::testSpatialAutocorrelation(resids, locs$x, locs$y,
+                                              plot = FALSE)
+    out$n.tested <- nrow(locs)
+    out$n.locations <- n.locs
+    out$n.segments <- dplyr::n_distinct(seg.id)
+    out
+  }, silent = TRUE)
+  if (!inherits(checks$spatial, "try-error"))
+    print(checks$spatial)
+  else
+    message("Spatial autocorrelation test failed: ",
+            conditionMessage(attr(checks$spatial, "condition")))
 
   # If more than one resid at a given location.
   # Note still use try() since this may fail to allocate enough memory if
@@ -6512,11 +6591,16 @@ check.dsm <- function(dsm_final,
   if (!brief) {
     # Concurvity
     message("Concurvity checks\nEach term with whole of rest of model")
-    try(print(mgcv::concurvity(dsm_final) %>% round(digits = 3)))
+    checks$concurvity <- try(mgcv::concurvity(dsm_final), silent = TRUE)
+    if (!inherits(checks$concurvity, "try-error"))
+      print(round(checks$concurvity, digits = 3))
     message(
       "Concurvity of pairwise terms ('estimate' measure presented)\nEach row shows how terms in columns depend on the term in that row."
     )
-    try(print(mgcv::concurvity(dsm_final, full = FALSE)[["estimate"]] %>% round(digits = 3)))
+    checks$concurvity.pairwise <-
+      try(mgcv::concurvity(dsm_final, full = FALSE)[["estimate"]], silent = TRUE)
+    if (!inherits(checks$concurvity.pairwise, "try-error"))
+      print(round(checks$concurvity.pairwise, digits = 3))
     message("Plot is non-symmetric, showing how terms on y-axis depend on terms on the x-axis")
     try(dsm::vis_concurvity(dsm_final))
   }
@@ -6526,10 +6610,14 @@ check.dsm <- function(dsm_final,
   # reccommendation to use the "platform" variable to aggregate
   # by.
   message("Observed vs expected plot")
-  try(print(oe.dens(dsm_final, covar = "platform", plotit = T)))
+  checks$oe.platform <- try(oe.dens(dsm_final, covar = "platform", plotit = T),
+                            silent = TRUE)
+  if (!inherits(checks$oe.platform, "try-error")) print(checks$oe.platform)
   # depth is continuous, so bin it - without cut, oe.dens aggregates by every
   # unique depth value, giving one point (and one table column) per segment.
-  try(print(oe.dens(dsm_final, covar = "depth", cut = 10, plotit = T)))
+  checks$oe.depth <- try(oe.dens(dsm_final, covar = "depth", cut = 10, plotit = T),
+                         silent = TRUE)
+  if (!inherits(checks$oe.depth, "try-error")) print(checks$oe.depth)
   # oe.dens(dsm_final, covar = "depth.g", plotit = T)
   # oe.dens(dsm_final, covar = "sst", plotit = T)
   # oe.dens(dsm_final, covar = "sst.g", plotit = T)
@@ -6541,7 +6629,8 @@ check.dsm <- function(dsm_final,
   # Note the scale parameter is estimated (not fixed at 1) for the Tweedie and
   # negative binomial families used here, so treat this as a rough guide.
   message("Overdispersion statistic (Pearson chi-sq / resid df)")
-  print(OD_dsm_final <- sum(resid(dsm_final, type = "pearson")^2)/dsm_final$df.res)
+  print(checks$overdispersion <- OD_dsm_final <-
+          sum(resid(dsm_final, type = "pearson")^2)/dsm_final$df.res)
 
   # Bubble plot
   message("Doing bubbleplot")
@@ -6604,6 +6693,29 @@ check.dsm <- function(dsm_final,
       cex = 2 * V$np / max(V$np)
     )
 
+    # Fit the full-extent variogram so there is something to interpret. The five
+    # plots below are the same empirical variogram at different cutoffs and V is
+    # overwritten by each, so nothing used to survive this block. nugget/sill is
+    # the number that matters: near 1 means the residuals are spatially
+    # structureless, which is what a well-specified spatial model should leave
+    # behind.
+    checks$variogram <- try({
+      fit <- gstat::fit.variogram(V, gstat::vgm("Exp"), warn.if.neg = FALSE)
+      nug <- if ("Nug" %in% fit$model) fit$psill[fit$model == "Nug"] else 0
+      part <- sum(fit$psill[fit$model != "Nug"])
+      list(nugget = nug, partial.sill = part, sill = nug + part,
+           range = max(fit$range), nugget.ratio = nug / (nug + part),
+           model = as.character(fit$model[fit$model != "Nug"])[1])
+    }, silent = TRUE)
+    if (!inherits(checks$variogram, "try-error"))
+      message(sprintf(
+        "  fitted %s variogram: nugget %.3g, sill %.3g, range %.3g km, nugget/sill %.2f",
+        checks$variogram$model, checks$variogram$nugget, checks$variogram$sill,
+        checks$variogram$range, checks$variogram$nugget.ratio))
+    else
+      message("  variogram fit failed: ",
+              conditionMessage(attr(checks$variogram, "condition")))
+
     V <- (gstat::variogram(E ~ 1, mydata, cutoff = 100))
     plot(
       x = V$dist,
@@ -6647,6 +6759,325 @@ check.dsm <- function(dsm_final,
   }
   # Turn partial match warnings back on
   options(warnPartialMatchDollar = TRUE)
+
+  checks$brief <- brief
+  invisible(checks)
+}
+
+
+#' Default thresholds for interpreting DSM checking results
+#'
+#' Every boundary the interpretation uses, in one place so it can be seen and
+#' overridden. Pass a partial list to \code{\link{interpret.dsm.checks}} to
+#' change individual entries.
+#'
+#' Each entry is \code{c(watch, problem)} and is read as "ok below the first,
+#' watch between, problem above" unless the check says otherwise.
+#'
+#' @return Named list of thresholds.
+#' @export
+default.check.thresholds <- function() {
+  list(
+    dispersion.hi   = c(1.1, 1.5),   # DHARMa ratio, above 1
+    dispersion.lo   = c(0.9, 0.7),   # and below 1 - under-dispersion
+    uniformity.d    = c(0.02, 0.05), # KS statistic
+    zeroinfl        = c(1.05, 1.2),  # ratio of observed to simulated zeros
+    outliers        = c(1.5, 3),     # observed / expected outlier frequency
+    kindex          = c(0.9, 0.8),   # k-index, lower is worse
+    edf.ratio       = c(0.5, 0.8),   # edf/k', only damning together with kindex
+    concurvity      = c(0.5, 0.8),   # "worst" measure
+    morans.i        = c(0.05, 0.15), # residual spatial autocorrelation
+    nugget.ratio    = c(0.9, 0.7)    # nugget/sill, lower is worse
+  )
+}
+
+
+#' Turn DSM checking results into plain-English verdicts
+#'
+#' Reads the list returned by \code{\link{check.dsm}} and says, for each
+#' diagnostic, what the number means and whether it is a problem. One row per
+#' check, with a verdict of \code{"ok"}, \code{"watch"} or \code{"problem"}.
+#'
+#' @section Why p-values are reported but never scored:
+#' These models are fitted to 100,000+ segment rows, and at that size a
+#' significance test detects departures far too small to matter - ATPU's
+#' dispersion is 1.22 with p < 2.2e-16, which is a 22% effect reported as
+#' overwhelming evidence. Every verdict below is therefore taken from the effect
+#' size. The p-values are printed alongside because they are what the underlying
+#' tests report, not because they carry the decision.
+#'
+#' @section Basis size needs two numbers, not one:
+#' \code{gam.check}'s advice is "low p-value (k-index < 1) may indicate that k is
+#' too low, **especially if edf is close to k'**", and the second half is the half
+#' that matters. ATPU's \code{s(x,y)} smooths have k-index 0.76 with p < 2e-16,
+#' which reads as a clear problem until you notice edf is 16-27 against a k' of
+#' 99 - the basis is nowhere near saturated and there is nothing to fix. So a
+#' smooth is only flagged when the k-index is low *and* the basis is being used
+#' up. That is the specific wrong answer this function exists to avoid.
+#'
+#' @param checks List returned by \code{\link{check.dsm}}.
+#' @param thresholds Named list overriding \code{\link{default.check.thresholds}};
+#'   only the entries given are replaced.
+#' @return A tibble with columns \code{check}, \code{statistic}, \code{value},
+#'   \code{verdict} and \code{comment}, with the model name in the
+#'   \code{"modname"} attribute.
+#' @export
+interpret.dsm.checks <- function(checks, thresholds = list()) {
+  checkmate::expect_list(checks)
+  checkmate::expect_list(thresholds)
+  th <- utils::modifyList(default.check.thresholds(), thresholds)
+
+  rows <- list()
+  add <- function(check, statistic, value, verdict, comment)
+    rows[[length(rows) + 1]] <<- dplyr::tibble(
+      check = check, statistic = statistic, value = value,
+      verdict = verdict, comment = comment)
+
+  ok <- function(x) !is.null(x) && !inherits(x, "try-error")
+  # "ok below watch, problem above problem", for a statistic where bigger is worse
+  band.hi <- function(v, t) if (v >= t[2]) "problem" else if (v >= t[1]) "watch" else "ok"
+  # and where smaller is worse
+  band.lo <- function(v, t) if (v <= t[2]) "problem" else if (v <= t[1]) "watch" else "ok"
+
+  ## ---- dispersion ----------------------------------------------------------
+  if (ok(checks$residuals$dispersion)) {
+    d <- unname(checks$residuals$dispersion$statistic)
+    p <- checks$residuals$dispersion$p.value
+    v <- if (d >= 1) band.hi(d, th$dispersion.hi) else band.lo(d, th$dispersion.lo)
+    add("Dispersion", "DHARMa ratio", sprintf("%.3f", d), v, sprintf(
+      "Residual spread is %.0f%% %s than the fitted model implies%s. (p = %s, not used - see note on n.)",
+      abs(d - 1) * 100, if (d >= 1) "wider" else "narrower",
+      switch(v, ok = ", which is within tolerance",
+             watch = " - worth noting but not disqualifying",
+             problem = " - the mean-variance relationship is wrong"),
+      format.pval(p, digits = 2)))
+  }
+
+  ## ---- uniformity ----------------------------------------------------------
+  if (ok(checks$residuals$uniformity)) {
+    D <- unname(checks$residuals$uniformity$statistic)
+    v <- band.hi(D, th$uniformity.d)
+    add("Uniformity", "KS D", sprintf("%.4f", D), v, sprintf(
+      "The largest gap between the residual distribution and uniform is %.1f%%%s.",
+      D * 100,
+      switch(v, ok = ", so the residuals are distributed as they should be",
+             watch = ", a mild departure from uniform",
+             problem = ", so the distributional assumption is not holding")))
+  }
+
+  ## ---- outliers ------------------------------------------------------------
+  if (ok(checks$residuals$outliers)) {
+    o <- checks$residuals$outliers
+    ratio <- unname(o$estimate) / unname(o$null.value)
+    v <- band.hi(ratio, th$outliers)
+    add("Outliers", "observed / expected", sprintf("%.2f", ratio), v, sprintf(
+      "%.2f%% of points fall outside the simulated range against %.2f%% expected%s.",
+      unname(o$estimate) * 100, unname(o$null.value) * 100,
+      switch(v, ok = " - unremarkable", watch = " - a mild excess",
+             problem = " - a real excess of extreme values")))
+  }
+
+  ## ---- zero inflation ------------------------------------------------------
+  if (ok(checks$zeroinflation)) {
+    z <- unname(checks$zeroinflation$statistic)
+    v <- band.hi(z, th$zeroinfl)
+    add("Zero inflation", "obs / sim zeros", sprintf("%.3f", z), v, sprintf(
+      "The data hold %.1f%% %s zeros than the model simulates%s.",
+      abs(z - 1) * 100, if (z >= 1) "more" else "fewer",
+      switch(v, ok = " - the zero behaviour is captured",
+             watch = " - a mild excess of zeros",
+             problem = " - consider a zero-inflated or hurdle formulation")))
+  }
+
+  ## ---- basis size ----------------------------------------------------------
+  if (ok(checks$k.check) && is.matrix(checks$k.check)) {
+    kc <- as.data.frame(checks$k.check)
+    names(kc) <- c("kprime", "edf", "kindex", "pvalue")[seq_len(ncol(kc))]
+    kc$ratio <- kc$edf / kc$kprime
+    # Only a problem when the basis is BOTH poorly fitting and nearly used up.
+    kc$v <- mapply(function(ki, r) {
+      if (ki <= th$kindex[2] && r >= th$edf.ratio[2]) "problem"
+      else if (ki <= th$kindex[1] && r >= th$edf.ratio[1]) "watch"
+      else "ok"
+    }, kc$kindex, kc$ratio)
+    # Worst verdict first, then the most-used basis within it. Sorting by lowest
+    # k-index instead would report a smooth penalised to 0 edf as the worst case,
+    # which is exactly the row where a low k-index cannot matter.
+    worst <- kc[order(match(kc$v, c("problem", "watch", "ok")), -kc$ratio), ][1, ]
+    v <- worst$v
+    add("Basis size (k)", "worst k-index [edf/k']",
+        sprintf("%.2f [%.2f]", worst$kindex, worst$ratio), v, sprintf(
+      "Lowest k-index is %.2f on %s, using %.0f of %.0f available df (%.0f%%)%s.",
+      worst$kindex, rownames(worst), worst$edf, worst$kprime, worst$ratio * 100,
+      switch(v,
+        ok = ". A low k-index alone is not evidence of too-small k when the basis is barely used, which is the case here",
+        watch = ". Worth watching - the basis is moderately used and fitting imperfectly",
+        problem = ". The basis is nearly exhausted and fitting badly, so k is genuinely too low")))
+  }
+
+  ## ---- concurvity ----------------------------------------------------------
+  #
+  # Reported, not scored, and the reason is structural rather than a matter of
+  # picking a kinder threshold.
+  #
+  # Every smooth in these formulae is a by = Season smooth, and a factor-by
+  # smooth is zero outside its own level, so the other levels plus the intercept
+  # can always partly mimic it. That inflates all three concurvity measures
+  # whatever the data say. On ATPU the "worst" measure is 0.96-1.00 for every
+  # single term, which would flag all 22 models as a problem and discriminate
+  # nothing; "estimate", the measure mgcv recommends reading, still runs to 0.985.
+  #
+  # It is also useless for the finalist comparison this feeds, because the two
+  # family finalists share a formula - concurvity depends on the model matrix,
+  # not the family, so the two are identical by construction.
+  if (ok(checks$concurvity) && is.matrix(checks$concurvity)) {
+    keep <- colnames(checks$concurvity) != "para"
+    if (any(keep)) {
+      est <- checks$concurvity["estimate", keep]
+      wrst <- checks$concurvity["worst", keep]
+      add("Concurvity", "worst estimate", sprintf("%.3f", max(est, na.rm = TRUE)),
+          "reference", sprintf(paste(
+            "Most entangled term is %s (estimate %.2f, worst %.2f). Reported,",
+            "not scored: every smooth here is a by = Season smooth, which is zero",
+            "outside its own level, so the other levels can always partly mimic",
+            "it and all three measures come out high whatever the data say. It",
+            "also cannot separate the two finalists, which share a formula."),
+            names(est)[which.max(est)], max(est, na.rm = TRUE),
+            wrst[which.max(est)]))
+    }
+  }
+
+  ## ---- spatial autocorrelation ---------------------------------------------
+  if (ok(checks$spatial)) {
+    I <- unname(checks$spatial$statistic["observed"])
+    v <- band.hi(abs(I), th$morans.i)
+    tested <- checks$spatial$n.tested
+    total <- checks$spatial$n.locations
+    add("Spatial autocorrelation", "Moran's I", sprintf("%.4f", I), v, sprintf(
+      "Residual spatial correlation is %.3f%s%s.", I,
+      switch(v, ok = ", effectively none - the spatial smooth has absorbed the structure",
+             watch = " - some structure remains unmodelled",
+             problem = " - substantial structure remains, so the spatial term is not capturing it"),
+      if (!is.null(tested) && !is.null(total) && tested < total)
+        sprintf(" (a random %s of %s survey locations)",
+                format(tested, big.mark = ","), format(total, big.mark = ",")) else ""))
+  } else {
+    add("Spatial autocorrelation", "Moran's I", NA_character_, "not run",
+        "The test could not be computed for this model.")
+  }
+
+  ## ---- variogram -----------------------------------------------------------
+  if (ok(checks$variogram)) {
+    nr <- checks$variogram$nugget.ratio
+    v <- band.lo(nr, th$nugget.ratio)
+    add("Variogram", "nugget / sill", sprintf("%.2f", nr), v, sprintf(
+      "%.0f%% of residual variance is at zero distance, with a range of %.3g km%s.",
+      nr * 100, checks$variogram$range,
+      switch(v, ok = " - essentially no spatial structure left",
+             watch = " - a modest amount of spatial structure remains",
+             problem = " - much of the residual variance is spatially structured")))
+  }
+
+  ## ---- Pearson overdispersion (reported, never scored) ---------------------
+  if (ok(checks$overdispersion))
+    add("Pearson overdispersion", "chi-sq / df",
+        sprintf("%.2f", checks$overdispersion), "reference", paste(
+      "Reported for continuity, not scored. The scale parameter is estimated",
+      "rather than fixed at 1 for the tw() and nb() families used here, so this",
+      "is not on the same footing as DHARMa's dispersion ratio above and the two",
+      "routinely disagree."))
+
+  out <- dplyr::bind_rows(rows)
+  attr(out, "modname") <- checks$modname
+  attr(out, "n") <- checks$n
+  out
+}
+
+
+#' Compare two family finalists on their diagnostics
+#'
+#' The model selection step (\code{02.05}) chooses the family by spatial-block
+#' cross-validation, and where the families are indistinguishable it keeps
+#' whatever \code{final.dsm.models} already names. This looks at the two
+#' finalists' diagnostics and says whether the one that was not chosen is
+#' materially better - evidence that could overturn a tie.
+#'
+#' @section What it will and will not overturn:
+#' A decisive cross-validation verdict is an out-of-sample result and is not
+#' overturned by in-sample diagnostics: where \code{decisive} is \code{TRUE} this
+#' reports the disagreement and recommends nothing. Only \code{[tie-break]} and
+#' \code{[kept]} entries - where CV could not separate the families - are open to
+#' being changed.
+#'
+#' The rule is deliberately a stated comparison rather than a weighted score, so
+#' that a recommendation can be argued with: the challenger wins only if it has
+#' strictly fewer \code{problem} verdicts and no more \code{watch} verdicts, or
+#' the same number of \code{problem} and at least \code{watch.margin} fewer
+#' \code{watch}. Checks marked \code{reference} never count - see
+#' \code{\link{interpret.dsm.checks}} for why concurvity and Pearson
+#' overdispersion are among them.
+#'
+#' @param incumbent Tibble from \code{\link{interpret.dsm.checks}} for the model
+#'   \code{final.dsm.models} currently names.
+#' @param challenger Tibble from \code{\link{interpret.dsm.checks}} for the other
+#'   family finalist.
+#' @param decisive Logical; was the CV verdict decisive for this species?
+#' @param watch.margin Integer; how many fewer \code{watch} verdicts the
+#'   challenger needs when the \code{problem} counts are equal. Default 2.
+#' @return A one-row tibble: \code{recommend} (logical), \code{winner},
+#'   \code{reason}, and the two verdict tallies.
+#' @export
+compare.dsm.finalists <- function(incumbent, challenger, decisive,
+                                  watch.margin = 2) {
+  checkmate::expect_data_frame(incumbent)
+  checkmate::expect_data_frame(challenger)
+  checkmate::expect_flag(decisive)
+  checkmate::expect_count(watch.margin)
+
+  tally <- function(x, what) sum(x$verdict == what, na.rm = TRUE)
+  inc <- c(problem = tally(incumbent, "problem"), watch = tally(incumbent, "watch"))
+  cha <- c(problem = tally(challenger, "problem"), watch = tally(challenger, "watch"))
+  inc.name <- attr(incumbent, "modname")
+  cha.name <- attr(challenger, "modname")
+
+  better <- (cha["problem"] < inc["problem"] && cha["watch"] <= inc["watch"]) ||
+            (cha["problem"] == inc["problem"] &&
+               cha["watch"] <= inc["watch"] - watch.margin)
+
+  tallies <- sprintf("%s has %d problem / %d watch, %s has %d problem / %d watch",
+                     inc.name, inc["problem"], inc["watch"],
+                     cha.name, cha["problem"], cha["watch"])
+
+  if (decisive) {
+    rec <- FALSE
+    reason <- if (better)
+      sprintf(paste("CV was decisive for %s, so the model stands. Note the",
+                    "diagnostics disagree: %s. Worth a look, but an out-of-sample",
+                    "result is not overturned by in-sample diagnostics."),
+              inc.name, tallies)
+    else
+      sprintf("CV was decisive and the diagnostics agree: %s.", tallies)
+  } else if (better) {
+    rec <- TRUE
+    reason <- sprintf(paste("%s [chosen]: CV could not separate the families, and",
+                            "%s has the better diagnostics - %s."),
+                      get0("DSM_DIAGNOSTIC_TAG", ifnotfound = "diag-override"),
+                      cha.name, tallies)
+  } else {
+    rec <- FALSE
+    reason <- sprintf(paste("CV could not separate the families and the",
+                            "diagnostics do not either: %s. Existing entry stands."),
+                      tallies)
+  }
+
+  dplyr::tibble(
+    recommend = rec,
+    winner = if (rec) cha.name else inc.name,
+    incumbent = inc.name, challenger = cha.name,
+    inc.problem = unname(inc["problem"]), inc.watch = unname(inc["watch"]),
+    cha.problem = unname(cha["problem"]), cha.watch = unname(cha["watch"]),
+    decisive = decisive,
+    reason = reason)
 }
 
 
