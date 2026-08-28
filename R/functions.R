@@ -6917,19 +6917,28 @@ interpret.dsm.checks <- function(checks, thresholds = list()) {
 
   ## ---- concurvity ----------------------------------------------------------
   #
-  # Reported, not scored, and the reason is structural rather than a matter of
-  # picking a kinder threshold.
+  # High, real, and reported rather than scored - but not for the reason it
+  # first looks like.
   #
-  # Every smooth in these formulae is a by = Season smooth, and a factor-by
-  # smooth is zero outside its own level, so the other levels plus the intercept
-  # can always partly mimic it. That inflates all three concurvity measures
-  # whatever the data say. On ATPU the "worst" measure is 0.96-1.00 for every
-  # single term, which would flag all 22 models as a problem and discriminate
-  # nothing; "estimate", the measure mgcv recommends reading, still runs to 0.985.
+  # The tempting explanation is that a by = Season smooth is zero outside its own
+  # level, so the other levels can mimic it and inflate the measure structurally.
+  # That is wrong, and measurably so: the pairwise concurvity between a smooth
+  # and its own siblings in other seasons is exactly 0.000 for every term on
+  # ATPU, which it must be, since they are supported on disjoint rows.
   #
-  # It is also useless for the finalist comparison this feeds, because the two
-  # family finalists share a formula - concurvity depends on the model matrix,
-  # not the family, so the two are identical by construction.
+  # What is actually entangled is different covariates within the SAME season.
+  # Every term's worst partner is one of those, and the reason is geography:
+  # depth is a smooth function of position, so s(depth):SeasonX and
+  # s(x,y):SeasonX compete for one signal. Regressing the covariates on location
+  # for ATPU gives depth 98.4% of deviance explained, depth.g 50.2%, sst 35.2% -
+  # and the concurvity ranks the same way, s(x,y) vs s(depth) at 0.978 down to
+  # s(depth.g):SeasonWinter at 0.524.
+  #
+  # So this is a genuine caveat: the individual shapes of the depth, depth.g and
+  # sst smooths cannot be read as separate effects. It is not scored because it
+  # is a property of the covariate set rather than of a fitted model - it says
+  # nothing about whether this model is adequate, and it cannot separate the two
+  # family finalists, which share a formula and therefore a model matrix.
   if (ok(checks$concurvity) && is.matrix(checks$concurvity)) {
     keep <- colnames(checks$concurvity) != "para"
     if (any(keep)) {
@@ -6937,11 +6946,12 @@ interpret.dsm.checks <- function(checks, thresholds = list()) {
       wrst <- checks$concurvity["worst", keep]
       add("Concurvity", "worst estimate", sprintf("%.3f", max(est, na.rm = TRUE)),
           "reference", sprintf(paste(
-            "Most entangled term is %s (estimate %.2f, worst %.2f). Reported,",
-            "not scored: every smooth here is a by = Season smooth, which is zero",
-            "outside its own level, so the other levels can always partly mimic",
-            "it and all three measures come out high whatever the data say. It",
-            "also cannot separate the two finalists, which share a formula."),
+            "Most entangled term is %s (estimate %.2f, worst %.2f). Real, and",
+            "driven by depth being close to a function of position, so the depth",
+            "and location smooths compete for one signal - read their individual",
+            "shapes with that in mind. Not scored: it describes the covariate",
+            "set, not this model's adequacy, and it cannot separate two finalists",
+            "that share a formula."),
             names(est)[which.max(est)], max(est, na.rm = TRUE),
             wrst[which.max(est)]))
     }
