@@ -6788,12 +6788,31 @@ check.dsm <- function(dsm_final,
     # structureless, which is what a well-specified spatial model should leave
     # behind.
     checks$variogram <- try({
-      fit <- gstat::fit.variogram(V, gstat::vgm("Exp"), warn.if.neg = FALSE)
+      # Capture the fit's own warnings rather than letting them scroll past.
+      # fit.variogram() reports non-convergence as a warning and returns a
+      # value anyway, so without this a failed fit is indistinguishable from a
+      # good one - and on NL_EXPL_DRL_RA that mattered: nugget/sill piled up on
+      # exactly 0.00 and exactly 1.00 while Moran's I said 0.001 on the same
+      # residuals. Those are boundary solutions, not measurements.
+      warns <- character(0)
+      fit <- withCallingHandlers(
+        gstat::fit.variogram(V, gstat::vgm("Exp"), warn.if.neg = FALSE),
+        warning = function(w) {
+          warns <<- c(warns, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        })
       nug <- if ("Nug" %in% fit$model) fit$psill[fit$model == "Nug"] else 0
       part <- sum(fit$psill[fit$model != "Nug"])
       list(nugget = nug, partial.sill = part, sill = nug + part,
            range = max(fit$range), nugget.ratio = nug / (nug + part),
-           model = as.character(fit$model[fit$model != "Nug"])[1])
+           model = as.character(fit$model[fit$model != "Nug"])[1],
+           singular = isTRUE(attr(fit, "singular")),
+           converged = !any(grepl("convergence", warns, ignore.case = TRUE)),
+           warnings = warns,
+           # The lag geometry, so the fitted range can be judged against the
+           # distances the empirical variogram actually saw. A range outside
+           # them is extrapolation, not a measurement.
+           first.lag = min(V$dist), last.lag = max(V$dist), n.lags = nrow(V))
     }, silent = TRUE)
     if (!inherits(checks$variogram, "try-error"))
       message(sprintf(
@@ -6874,8 +6893,9 @@ default.check.thresholds <- function() {
     kindex          = c(0.9, 0.8),   # k-index, lower is worse
     edf.ratio       = c(0.5, 0.8),   # edf/k', only damning together with kindex
     concurvity      = c(0.5, 0.8),   # "worst" measure
-    morans.i        = c(0.05, 0.15), # residual spatial autocorrelation
-    nugget.ratio    = c(0.9, 0.7)    # nugget/sill, lower is worse
+    morans.i        = c(0.05, 0.15)  # residual spatial autocorrelation
+    # No nugget.ratio: the variogram is reported, never scored - see the
+    # variogram block of interpret.dsm.checks() for the measurements.
   )
 }
 
@@ -7064,16 +7084,50 @@ interpret.dsm.checks <- function(checks, thresholds = list()) {
         "The test could not be computed for this model.")
   }
 
-  ## ---- variogram -----------------------------------------------------------
+  ## ---- variogram (reported, never scored) ---------------------------------
+  # Reference-only, for the same reason as concurvity: it describes the data
+  # geometry rather than this model's adequacy, and at this design it is not
+  # identified. Measured on NL_EXPL_DRL_RA, 22 models over 38,147 locations:
+  #
+  #   - the empirical variogram is flat and noisy (gamma 5.08, 5.88, 6.43,
+  #     6.01, 4.99 ... 3.63 over 15 lags), which is what Moran's I ~ 0.001 on
+  #     the same residuals says: there is no residual structure to fit
+  #   - so fit.variogram() wanders to the parameter boundaries. 7 of 22 were
+  #     singular, 13 of 22 did not converge, 18 of 22 were one or the other
+  #   - 7 fitted a range of 5-11 km when the FIRST lag centre is 19.4 km and
+  #     bins are 30 km wide, so nugget and structure cannot be separated at
+  #     all; 5 fitted 2,155-3,507 km against a last lag of 465 km
+  #   - 21 of 22 were degenerate or out of range. Scoring them produced 10
+  #     "problem" verdicts that contradicted the spatial test on the same
+  #     residuals, and the single survivor scored "watch" on the luck of a fit
+  #
+  # A check that resolves 1 of 22 is not a check. Moran's I answers the same
+  # question directly, with a permutation reference, and is scored. The five
+  # variogram plots stay, because reading them by eye is still worth doing.
   if (ok(checks$variogram)) {
-    nr <- checks$variogram$nugget.ratio
-    v <- band.lo(nr, th$nugget.ratio)
-    add("Variogram", "nugget / sill", sprintf("%.2f", nr), v, sprintf(
-      "%.0f%% of residual variance is at zero distance, with a range of %.3g km%s.",
-      nr * 100, checks$variogram$range,
-      switch(v, ok = " - essentially no spatial structure left",
-             watch = " - a modest amount of spatial structure remains",
-             problem = " - much of the residual variance is spatially structured")))
+    vg  <- checks$variogram
+    nr  <- vg$nugget.ratio
+    # first.lag/last.lag are absent from assessments saved before this check.
+    have.lags <- !is.null(vg$first.lag)
+    flags <- c(
+      if (isTRUE(vg$singular)) "the fit is singular",
+      if (identical(vg$converged, FALSE)) "the fit did not converge",
+      if (have.lags && vg$range < vg$first.lag)
+        sprintf("the fitted range (%.3g km) is below the first lag (%.3g km)",
+                vg$range, vg$first.lag),
+      if (have.lags && vg$range > vg$last.lag)
+        sprintf("the fitted range (%.3g km) is beyond the last lag (%.3g km)",
+                vg$range, vg$last.lag))
+
+    add("Variogram", "nugget / sill", sprintf("%.2f", nr), "reference", paste(
+      sprintf("%.0f%% of residual variance is at zero distance, range %.3g km.",
+              nr * 100, vg$range),
+      if (length(flags))
+        sprintf("Not identified here - %s.", paste(flags, collapse = "; ")) else
+        "This fit is identified, which is the exception.",
+      "Reported, not scored: the exponential fit is unidentified for almost",
+      "every model at this design. Read the Moran's I row above for the",
+      "residual spatial structure question, and the plots by eye."))
   }
 
   ## ---- Pearson overdispersion (reported, never scored) ---------------------
