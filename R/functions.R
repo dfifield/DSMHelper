@@ -2422,12 +2422,43 @@ create.segdata <- function(the.data,
   depth.g <- terra::rast(file.path(predLayerStudyAreaDir, "depth.g.img"))
 
   # SST
-  files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.", dates.needed, ".img"))
-  sst <- terra::rast(files)
+  #
+  # A month with no raster is dropped here rather than being allowed to error.
+  # terra::rast() on a missing file stops the whole run, which is a poor way to
+  # find out that four watches fall outside the SST download - and the data can
+  # widen without warning: a study-area buffer keeps effort that used to be
+  # clipped away (issue #33), a new SOMEC delivery arrives with later dates, the
+  # ECSAS year range moves. Those rows get NA sst and sst.g, and the NA filter in
+  # Generic_2_dsm.Rmd then drops them exactly as it drops a segment with no
+  # depth. Loud, because the right fix is usually to download the missing month.
+  sst.available <- dates.needed[
+    file.exists(file.path(predLayerStudyAreaDir, "sst",
+                          paste0("sst.", dates.needed, ".img"))) &
+    file.exists(file.path(predLayerStudyAreaDir, "sst",
+                          paste0("sst.g.", dates.needed, ".img")))]
+
+  sst.missing <- setdiff(dates.needed, sst.available)
+  if (length(sst.missing)) {
+    n.affected <- sum(paste0(segdata$MonthYear, "-16") %in% sst.missing)
+    warning(sprintf(
+      paste0("create.segdata: no SST raster for %d of %d months needed (%s). ",
+             "%d of %d segments get NA sst/sst.g and will be dropped by the ",
+             "NA filter before fitting. Download the missing month(s) if those ",
+             "segments matter."),
+      length(sst.missing), length(dates.needed),
+      paste(sub("-16$", "", sst.missing), collapse = ", "),
+      n.affected, nrow(segdata)), immediate. = TRUE)
+  }
+
+  if (!length(sst.available))
+    stop("create.segdata: no SST raster exists for any month in the segment data.")
+
+  sst <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
+                               paste0("sst.", sst.available, ".img")))
 
   # SST gradient
-  files <- file.path(predLayerStudyAreaDir, "sst", paste0("sst.g.", dates.needed, ".img"))
-  sst.g <- terra::rast(files)
+  sst.g <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
+                                 paste0("sst.g.", sst.available, ".img")))
 
   ###---------------------------------------------------------------------------
   ### Extract raster values at segdata locations
@@ -2452,33 +2483,45 @@ create.segdata <- function(the.data,
     ) %>%
     sf::st_as_sf()
 
-  ### Extract SST values
-  if (verbose) message("Extracting sst at watch locations")
-  needed.layers <- paste0("sst.", segdata$MonthYear, "-16")
-  segdata <-
-    terra::extract(
-      sst,
-      terra::vect(segdata),
-      layer = needed.layers,
-      bind = TRUE
-    ) %>%
-    sf::st_as_sf() %>%
-    dplyr::rename(sst = value) %>%
-    dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
+  ### Extract SST and SST gradient values
+  #
+  # Rows whose month has no raster are held out of the extract and given NA,
+  # because terra::extract(layer = ) errors on a layer name it does not hold.
+  # Both covariates use the same set of months, so one split serves both.
+  # Ordering is restored explicitly rather than assumed.
+  has.sst <- paste0(segdata$MonthYear, "-16") %in% sst.available
 
-  ### Extract SST gradient values
-  if (verbose) message("Extracting sst gradient at watch locations")
-  needed.layers <- paste0("sst.g.", segdata$MonthYear, "-16")
-  segdata <-
-    terra::extract(
-      sst.g,
-      terra::vect(segdata),
-      layer = needed.layers,
+  extract.by.month <- function(dat, rast, prefix, out.name) {
+    if (all(!has.sst)) {
+      dat[[out.name]] <- NA_real_
+      return(dat)
+    }
+    keep <- dat[has.sst, ]
+    got <- terra::extract(
+      rast,
+      terra::vect(keep),
+      layer = paste0(prefix, keep$MonthYear, "-16"),
       bind = TRUE
     ) %>%
-    sf::st_as_sf() %>%
-    dplyr::rename(sst.g = value) %>%
-    dplyr::select(-layer) # Note that layer is off by one even though the sst values is correct
+      sf::st_as_sf() %>%
+      dplyr::rename(!!out.name := value) %>%
+      dplyr::select(-layer) # layer is off by one, though the value is correct
+
+    if (all(has.sst)) return(got)
+
+    drop <- dat[!has.sst, ]
+    drop[[out.name]] <- NA_real_
+    out <- rbind(got, drop[, names(got)])
+    # Back into the incoming row order - rbind put the held-out rows last.
+    out[order(c(which(has.sst), which(!has.sst))), ]
+  }
+
+  if (verbose) message("Extracting sst at watch locations")
+  segdata <- extract.by.month(segdata, sst, "sst.", "sst")
+
+  if (verbose) message("Extracting sst gradient at watch locations")
+  has.sst <- paste0(segdata$MonthYear, "-16") %in% sst.available
+  segdata <- extract.by.month(segdata, sst.g, "sst.g.", "sst.g")
 
   ###---------------------------------------------------------------------------
   ## Add scaled versions of all preds.
