@@ -291,15 +291,359 @@ check.problem.data = function(alldat,
 
 
 
+#' Measure how much survey effort a study-area clip discards, by buffer width
+#'
+#' \code{\link{create.survey.data}} clips effort to a polygon. Where that
+#' polygon's boundary is a straight administrative line drawn through surveyed
+#' water, the clip cuts continuous coverage dead and leaves the DSM's spatial
+#' smooth unconstrained across the cut; on a log link that has produced
+#' predictions of 1.7e10 birds/km^2 (issue #33). The remedy is to clip to a
+#' \emph{buffered} study area and predict on the exact one, which raises the
+#' question this function exists to answer: how wide should the buffer be?
+#'
+#' It answers with two measurements rather than a rule of thumb.
+#'
+#' \strong{Recovery.} For each candidate width, how many watches and how many
+#' kilometres of effort sit in the ring - outside the study area, inside the
+#' buffer - reported \emph{by season}, because the failure this addresses is
+#' seasonal and an annual total hides it. The marginal column is the one to
+#' read: the width to choose is where recovery stops growing, not where it
+#' stops.
+#'
+#' \strong{Boundary classification.} A buffer is only needed where the boundary
+#' cuts through water that was surveyed on both sides. Points are sampled along
+#' the boundary every \code{boundary.spacing.km} and each is classified by
+#' whether there is effort within the width on the inside, the outside, or
+#' both. Both is a \emph{cut}, and cuts are what run away. Inside-only is a
+#' boundary the survey simply stopped at; neither is unsurveyed boundary. A
+#' study area whose edge is all coastline should come back with no cuts at all,
+#' and can honestly take a buffer of zero.
+#'
+#' Give it the watch table \strong{as it stands immediately before
+#' \code{create.survey.data()}} - filtered, but not yet clipped. Measuring the
+#' unfiltered database pull would count effort the analysis would never have
+#' used; measuring anything after the clip cannot see past the cut at all.
+#'
+#' The widths worth exploring are bounded by what the database query retrieved.
+#' The project derives its extraction bounding box from the study area expanded
+#' by \code{BUFFER_MEASURE_MAX_KM} for exactly this reason - asking here for a
+#' width beyond that measures the edge of the query, not the edge of the data.
+#'
+#' @param watches Data frame of watches, filtered but \strong{not} clipped,
+#'   carrying longitude, latitude, effort and date columns (see the
+#'   \code{*.col} arguments).
+#' @param study.area \code{sf} polygon of the exact study area, any CRS.
+#' @param widths.km Ascending numeric vector of candidate buffer widths, km.
+#' @param season.def Named list of season definitions in the project's
+#'   \code{month * 100 + day} form, i.e. one element of the \code{seasons} list
+#'   (e.g. \code{seasons[["Petrels"]]}). \code{NULL} skips the seasonal split.
+#' @param proj.crs A CRS in metres to do the geometry in. \code{NULL} (default)
+#'   uses \code{study.area}'s own CRS, which must then be projected.
+#' @param boundary.spacing.km Spacing of the points sampled along the boundary
+#'   for the cut classification.
+#' @param min.width.km Floor on the recommended width. Defaults to 25 - the
+#'   distance within which residual variograms on this project reach 95\% of
+#'   their plateau for four of five species (see the note beside
+#'   \code{family.cv.block.size.m}). A buffer shorter than the range over which
+#'   residuals stay correlated cannot anchor the smooth.
+#' @param saturation.frac Recovery is called saturated at the first width from
+#'   which onward every step recovers less than this fraction of the most
+#'   productive step's per-km rate. Judged on \code{rel_per_km}, and it requires
+#'   the condition to hold for every wider step as well - a single quiet step in
+#'   the middle of a rising trend is not saturation.
+#' @param lon.col,lat.col,effort.col,date.col Column names in \code{watches}.
+#' @param watch.id.col Column identifying a watch. \code{watches} is reduced to
+#'   one row per distinct value before anything is counted, because the natural
+#'   thing to hand this function - \code{ecsas.ship.dat} - is the
+#'   \emph{observation}-level table, where a watch appears once per observation
+#'   recorded on it. Summing \code{effort.col} over that would multiply each
+#'   watch's effort by its bird count, which is both wrong and biased towards
+#'   exactly the busy watches a buffer question cares about. \code{NULL} skips
+#'   the reduction, for a table that is already one row per watch.
+#' @param lonlat.crs CRS of \code{lon.col}/\code{lat.col}. Default 4326.
+#' @return Invisibly, a list with \code{widths} (one row per width per season),
+#'   \code{boundary} (one row per sampled boundary point per width),
+#'   \code{cuts} (contiguous runs of cut boundary, longest first),
+#'   \code{cut.fraction}, \code{boundary.length.km}, \code{saturating.km} and
+#'   \code{recommended.km}. Prints a summary.
+#' @examples
+#' \dontrun{
+#' # In 00.01_Extract_data.Rmd, immediately before create.survey.data():
+#' measure.study.area.buffer(ecsas.ship.dat, study.area,
+#'                           season.def = seasons[["Petrels"]])
+#' }
+#' @export
+measure.study.area.buffer <- function(watches,
+                                      study.area,
+                                      widths.km = seq(0, 150, by = 10),
+                                      season.def = NULL,
+                                      proj.crs = NULL,
+                                      boundary.spacing.km = 10,
+                                      min.width.km = 25,
+                                      saturation.frac = 0.05,
+                                      lon.col = "LongStart",
+                                      lat.col = "LatStart",
+                                      effort.col = "WatchLenKm",
+                                      date.col = "Date",
+                                      watch.id.col = "WatchID",
+                                      lonlat.crs = 4326) {
+
+  coll <- checkmate::makeAssertCollection()
+  checkmate::assert_data_frame(watches, add = coll)
+  checkmate::assert_class(study.area, "sf", add = coll)
+  checkmate::assert_numeric(widths.km, lower = 0, min.len = 1, any.missing = FALSE,
+                            sorted = TRUE, unique = TRUE, add = coll)
+  checkmate::assert_list(season.def, null.ok = TRUE, add = coll)
+  checkmate::assert_number(boundary.spacing.km, lower = 0.1, add = coll)
+  checkmate::assert_number(min.width.km, lower = 0, add = coll)
+  checkmate::assert_number(saturation.frac, lower = 0, upper = 1, add = coll)
+  checkmate::assert_string(lon.col, add = coll)
+  checkmate::assert_string(lat.col, add = coll)
+  checkmate::assert_string(effort.col, add = coll)
+  checkmate::assert_string(date.col, add = coll)
+  checkmate::assert_string(watch.id.col, null.ok = TRUE, add = coll)
+  checkmate::assert_subset(c(lon.col, lat.col, effort.col), names(watches), add = coll)
+  checkmate::reportAssertions(coll)
+
+  ###--------------------------------------------------------------------------
+  ### Reduce to one row per watch
+  #
+  # See ?watch.id.col: the table this is normally handed is observation-level,
+  # so without this every watch's effort is counted once per bird seen on it.
+  if (!is.null(watch.id.col) && watch.id.col %in% names(watches)) {
+    n.before <- nrow(watches)
+    watches <- watches[!duplicated(watches[[watch.id.col]]), , drop = FALSE]
+    if (nrow(watches) < n.before)
+      message(sprintf(
+        "measure.study.area.buffer: %d rows reduced to %d distinct %s.",
+        n.before, nrow(watches), watch.id.col))
+  }
+
+  ###--------------------------------------------------------------------------
+  ### Geometry set-up
+  #
+  # Everything below is metres, so the working CRS must be projected:
+  # st_buffer() and st_line_sample() do not behave on a geographic one.
+  if (is.null(proj.crs)) proj.crs <- sf::st_crs(study.area)
+  sa <- sf::st_transform(study.area, proj.crs)
+  if (isTRUE(sf::st_is_longlat(sa)))
+    stop("measure.study.area.buffer: proj.crs must be a projected CRS in metres; ",
+         "study.area is geographic and no proj.crs was given.")
+  # st_zm() because a study area read from a shapefile can carry Z or M
+  # coordinates - NL_EXPL_DRL_RA's does - and every GEOS predicate below then
+  # fails with "GEOS does not support XYM or XYZM geometries".
+  sa <- sf::st_union(sf::st_zm(sf::st_geometry(sa)))
+
+  keep <- !is.na(watches[[lon.col]]) & !is.na(watches[[lat.col]])
+  if (sum(keep) < nrow(watches))
+    message(sprintf(
+      "measure.study.area.buffer: dropping %d of %d watches with no position.",
+      sum(!keep), nrow(watches)))
+  w <- watches[keep, , drop = FALSE]
+
+  pts <- w %>%
+    sf::st_as_sf(coords = c(lon.col, lat.col), crs = sf::st_crs(lonlat.crs),
+                 remove = FALSE) %>%
+    sf::st_transform(proj.crs)
+
+  effort <- w[[effort.col]]
+  effort[is.na(effort)] <- 0
+
+  if (!is.null(season.def) && date.col %in% names(w)) {
+    # season.levels explicitly, so this does not depend on a season.names
+    # global being in scope - it is a diagnostic and gets run from odd places.
+    season <- assign.season(sf::st_drop_geometry(pts), season.def,
+                            datefield = date.col,
+                            season.levels = names(season.def))$Season
+    season <- as.character(season)
+  } else {
+    season <- rep("All", nrow(pts))
+  }
+  season[is.na(season)] <- "unassigned"
+
+  ###--------------------------------------------------------------------------
+  ### Distance of every watch to the study area
+  #
+  # st_distance() to the polygon is 0 for anything inside it, so a single
+  # distance vector answers every width at once. That is why the widths are not
+  # looped over st_buffer(): each buffer would cost a full geometry operation
+  # to learn something this already knows.
+  inside <- lengths(sf::st_intersects(pts, sa)) > 0
+  dist.m <- rep(0, nrow(pts))
+  if (any(!inside))
+    dist.m[!inside] <- as.numeric(sf::st_distance(pts[!inside, ], sa))
+
+  message(sprintf(
+    "measure.study.area.buffer: %d watches, %d inside the study area, %d outside.",
+    nrow(pts), sum(inside), sum(!inside)))
+
+  ###--------------------------------------------------------------------------
+  ### Recovery by width and season
+  seasons.seen <- sort(unique(season))
+  widths <- purrr::map_dfr(widths.km, function(km) {
+    ring <- !inside & dist.m <= km * 1000
+    purrr::map_dfr(c("All", seasons.seen), function(s) {
+      sel <- ring & (s == "All" | season == s)
+      tibble::tibble(width_km  = km,
+                     season    = s,
+                     n_watches = sum(sel),
+                     effort_km = sum(effort[sel]))
+    })
+  }) %>%
+    dplyr::arrange(season, width_km) %>%
+    dplyr::group_by(season) %>%
+    dplyr::mutate(step_km          = width_km - dplyr::lag(width_km),
+                  marginal_watches = n_watches - dplyr::lag(n_watches, default = 0),
+                  marginal_effort  = effort_km - dplyr::lag(effort_km, default = 0),
+                  # Per km of extra buffer, NOT per step. A step's raw gain is
+                  # proportional to its width, so comparing raw gains across an
+                  # uneven width grid says only which steps were widest - it
+                  # showed a false saturation at 30 km on NL_EXPL_DRL_RA purely
+                  # because the steps either side of it were 5 km and 10 km.
+                  effort_per_km    = marginal_effort / step_km,
+                  # As a fraction of the strongest per-km recovery seen. This is
+                  # what saturation is judged on: recovery has saturated when
+                  # widening further buys little compared with what widening
+                  # bought at its most productive.
+                  rel_per_km       = effort_per_km / max(effort_per_km, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+
+  ###--------------------------------------------------------------------------
+  ### Boundary classification
+  #
+  # Cast to LINESTRING first: a multi-ring study area is one MULTILINESTRING,
+  # and sampling it as a single feature would space the points by total length
+  # rather than per ring. density = points per metre handles rings of different
+  # lengths without any arithmetic here.
+  bnd <- sf::st_cast(sf::st_boundary(sa), "LINESTRING")
+  bnd.len.m <- sum(as.numeric(sf::st_length(bnd)))
+  bpts <- bnd %>%
+    sf::st_line_sample(density = 1 / (boundary.spacing.km * 1000)) %>%
+    sf::st_cast("POINT") %>%
+    sf::st_sf(geometry = .)
+  bpts$bid <- seq_len(nrow(bpts))
+  bll <- sf::st_coordinates(sf::st_transform(bpts, 4326))
+  bpts$lon <- bll[, "X"]
+  bpts$lat <- bll[, "Y"]
+
+  pts.in  <- pts[inside, ]
+  pts.out <- pts[!inside, ]
+
+  boundary <- purrr::map_dfr(widths.km[widths.km > 0], function(km) {
+    d <- km * 1000
+    tibble::tibble(
+      width_km  = km,
+      bid       = bpts$bid,
+      lon       = bpts$lon,
+      lat       = bpts$lat,
+      n_inside  = lengths(sf::st_is_within_distance(bpts, pts.in,  dist = d)),
+      n_outside = lengths(sf::st_is_within_distance(bpts, pts.out, dist = d))) %>%
+      dplyr::mutate(is_cut = n_inside > 0 & n_outside > 0)
+  })
+
+  # Contiguous runs, so one long cut is reported as one cut rather than as a
+  # scatter of points. NB runs are contiguous in sampling order, which follows
+  # each ring in turn - a run spanning two rings would be split, which is the
+  # conservative direction.
+  #
+  # watches_outside is a sum over the run's sample points, so a watch within
+  # reach of several of them is counted several times. It ranks runs against
+  # each other and nothing else; the recovery table is where the real counts
+  # are.
+  runs <- boundary %>%
+    dplyr::group_by(width_km) %>%
+    dplyr::arrange(bid, .by_group = TRUE) %>%
+    dplyr::mutate(run = cumsum(is_cut != dplyr::lag(is_cut, default = FALSE))) %>%
+    dplyr::filter(is_cut) %>%
+    dplyr::group_by(width_km, run) %>%
+    dplyr::summarise(n_points        = dplyr::n(),
+                     length_km       = dplyr::n() * boundary.spacing.km,
+                     lon_min         = min(lon),
+                     lon_max         = max(lon),
+                     lat_min         = min(lat),
+                     lat_max         = max(lat),
+                     watches_outside = sum(n_outside),
+                     .groups = "drop") %>%
+    dplyr::arrange(width_km, dplyr::desc(length_km))
+
+  cut.frac <- boundary %>%
+    dplyr::group_by(width_km) %>%
+    dplyr::summarise(pct_boundary_cut = 100 * mean(is_cut),
+                     km_boundary_cut  = sum(is_cut) * boundary.spacing.km,
+                     .groups = "drop")
+
+  ###--------------------------------------------------------------------------
+  ### Recommendation
+  #
+  # The smallest width past which recovery stops growing materially, floored at
+  # min.width.km. This is a reading of the table, not a decision - the constant
+  # is set by hand in analysis_settings.R with the numbers written beside it.
+  # Saturated means every width from here out recovers little per km, not just
+  # this one - a single quiet step in the middle of a rising trend is not
+  # saturation, and on NL_EXPL_DRL_RA there is one.
+  all.w <- dplyr::filter(widths, season == "All", width_km > 0)
+  quiet <- !is.na(all.w$rel_per_km) & all.w$rel_per_km < saturation.frac
+  stays.quiet <- rev(cumprod(rev(as.numeric(quiet)))) > 0
+  saturating.km  <- if (any(stays.quiet)) min(all.w$width_km[stays.quiet]) else NA_real_
+  recommended.km <- if (is.na(saturating.km)) NA_real_ else
+    max(saturating.km, min.width.km)
+
+  ###--------------------------------------------------------------------------
+  ### Report
+  cat(sprintf("\nStudy area boundary: %.0f km, sampled every %.0f km (%d points).\n",
+              bnd.len.m / 1000, boundary.spacing.km, nrow(bpts)))
+  cat("\nEffort recovered in the ring (outside the study area, inside the buffer):\n\n")
+  print(as.data.frame(dplyr::filter(widths, season == "All")), row.names = FALSE)
+  if (length(seasons.seen) > 1) {
+    cat("\nBy season:\n\n")
+    print(as.data.frame(dplyr::filter(widths, season != "All")), row.names = FALSE)
+  }
+  cat("\nBoundary classified as a cut (effort within the width on BOTH sides):\n\n")
+  print(as.data.frame(cut.frac), row.names = FALSE)
+  if (nrow(runs)) {
+    cat("\nLongest contiguous cuts, per width:\n\n")
+    print(as.data.frame(dplyr::slice_head(dplyr::group_by(runs, width_km), n = 3)),
+          row.names = FALSE)
+  } else {
+    cat("\nNo stretch of boundary has effort on both sides at any width tried.\n",
+        "This study area does not have the failure mode issue #33 is about,\n",
+        "and a buffer of 0 is defensible for it.\n", sep = "")
+  }
+  cat(sprintf("\nRecovery saturates at %s km (marginal gain < %.0f%%); recommended %s km, floor %.0f km.\n",
+              ifelse(is.na(saturating.km), "no width tried", format(saturating.km)),
+              100 * saturation.frac,
+              ifelse(is.na(recommended.km), "undetermined", format(recommended.km)),
+              min.width.km))
+  cat("Set STUDY_AREA_BUFFER_KM by hand from the tables above, not from that line.\n\n")
+
+  invisible(list(widths             = widths,
+                 boundary           = boundary,
+                 cuts               = runs,
+                 cut.fraction       = cut.frac,
+                 boundary.length.km = bnd.len.m / 1000,
+                 saturating.km      = saturating.km,
+                 recommended.km     = recommended.km))
+}
+
+
 #' Build observation and watch tables from raw ECSAS data
 #'
 #' Takes raw ECSAS data, filters observations, clips both watches and
-#' observations to the study area, and optionally assembles watches into
+#' observations to \code{clip.area}, and optionally assembles watches into
 #' transects.  Returns a list with elements \code{distdata}, \code{watches},
 #' and (if \code{create_transects = TRUE}) \code{transects}.
 #'
-#' Expects \code{study.area} (an \code{sf} polygon) to exist in the calling
-#' environment.
+#' \strong{The area effort is clipped to need not be the area results are
+#' reported over, and deliberately is not on some SubProjects.} Where a study
+#' area boundary is a straight administrative line through surveyed water,
+#' clipping at it cuts continuous coverage dead and leaves the spatial smooth
+#' unconstrained across the cut - on a log link that has produced predictions
+#' of 1.7e10 birds/km^2 (issue #33). Passing a buffered polygon here keeps the
+#' effort just outside the boundary, which anchors the smooth, while the
+#' prediction grid stays on the exact study area so totals still describe the
+#' assessment area. See the study-area buffer section of the project
+#' \code{CLAUDE.md}, and \code{\link{measure.study.area.buffer}} for choosing
+#' the width.
 #'
 #' @param raw.dat Data frame of raw ECSAS records.
 #' @param dataset Character string identifying the dataset (e.g.
@@ -315,6 +659,9 @@ check.problem.data = function(alldat,
 #'   ship, observer, and direction into transects.
 #' @param intransect.only If \code{TRUE} (default), retain only observations
 #'   where \code{InTransect == TRUE}.
+#' @param clip.area \code{sf} polygon that watches and observations are clipped
+#'   to.  \code{NULL} (the default) falls back to \code{study.area} from the
+#'   calling environment, which is the historical behaviour.
 #' @return Named list with elements \code{distdata}, \code{watches}, and
 #'   optionally \code{transects}.
 #' @export
@@ -325,13 +672,23 @@ create.survey.data <- function(raw.dat = NULL,
                                outproj = segProj,
                                saveshp = TRUE,
                                create_transects = FALSE,
-                               intransect.only = TRUE) {
+                               intransect.only = TRUE,
+                               clip.area = NULL) {
 
+  # Fall back to the caller's study.area so existing callers are unaffected.
+  # Resolved before validation so the assertion reports on what is actually
+  # used, whichever it came from.
+  if (is.null(clip.area)) {
+    if (!exists("study.area", envir = parent.frame()))
+      stop("create.survey.data: clip.area is NULL and there is no study.area ",
+           "in the calling environment to fall back to.")
+    clip.area <- get("study.area", envir = parent.frame())
+  }
 
   coll = checkmate::makeAssertCollection()
   checkmate::assert_data_frame(raw.dat, add = coll)
   checkmate::assert(
-    checkmate::check_class(study.area, "sf"),
+    checkmate::check_class(clip.area, "sf"),
     add = coll
   )
   checkmate::assert(
@@ -407,21 +764,22 @@ create.survey.data <- function(raw.dat = NULL,
     watches <- dplyr::filter(watches, !(WatchID %in% dups))
   }
 
-  # clip to study area
+  # clip to clip.area, which is the study area buffered by
+  # STUDY_AREA_BUFFER_KM where the SubProject sets one - see the roxygen above.
   #
   # NB: rmapshaper::ms_clip() throws "Not compatible with STRSXP: [type=list]"
   # rather than returning an empty result when nothing overlaps, so check for
-  # overlap first. This happens for a whole dataset when the study area has no
+  # overlap first. This happens for a whole dataset when the clip area has no
   # coverage by this survey type at all.
   watch_pts <- watches %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
     sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
     dplyr::select(WatchID) # just keep WatchID
-  study_area_4326 <- study.area %>% sf::st_transform(sf::st_crs(4326))
+  clip_area_4326 <- clip.area %>% sf::st_transform(sf::st_crs(4326))
 
-  if (nrow(sf::st_filter(watch_pts, study_area_4326)) == 0) {
+  if (nrow(sf::st_filter(watch_pts, clip_area_4326)) == 0) {
     warning(sprintf(
-      "create.survey.data: no %s watches overlap study.area - returning no watches",
+      "create.survey.data: no %s watches overlap clip.area - returning no watches",
       dataset), immediate. = TRUE)
     watches <- watch_pts %>%
       dplyr::slice(0) %>%
@@ -429,7 +787,7 @@ create.survey.data <- function(raw.dat = NULL,
       sf::st_transform(outproj)
   } else {
     watches <- watch_pts %>%
-      rmapshaper::ms_clip(study_area_4326) %>%   # do the clipping -
+      rmapshaper::ms_clip(clip_area_4326) %>%   # do the clipping -
       dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
       sf::st_transform(outproj)
   }
@@ -581,22 +939,22 @@ create.survey.data <- function(raw.dat = NULL,
   if (nrow(obs) == 0)
     warning("No observations left after filtering!", immediate. = TRUE)
 
-  # Clip to study area
+  # Clip to clip.area, exactly as the watches were above.
   #
   # NB: see the note on the watches clip above - ms_clip() errors rather than
   # returning an empty result when nothing overlaps, so check for overlap
   # first. Unlike the watches case this can fire even when the survey type does
-  # cover the study area, if it simply recorded no in-transect observations
+  # cover the clip area, if it simply recorded no in-transect observations
   # inside it.
   obs_pts <- obs %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
     sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
     dplyr::select(object) # just keep object
-  study_area_4326 <- study.area %>% sf::st_transform(sf::st_crs(4326))
+  clip_area_4326 <- clip.area %>% sf::st_transform(sf::st_crs(4326))
 
-  if (nrow(sf::st_filter(obs_pts, study_area_4326)) == 0) {
+  if (nrow(sf::st_filter(obs_pts, clip_area_4326)) == 0) {
     warning(sprintf(
-      "create.survey.data: no %s observations overlap study.area - returning no observations",
+      "create.survey.data: no %s observations overlap clip.area - returning no observations",
       dataset), immediate. = TRUE)
     obs <- obs_pts %>%
       dplyr::slice(0) %>%
@@ -604,7 +962,7 @@ create.survey.data <- function(raw.dat = NULL,
       sf::st_transform(outproj)
   } else {
     obs <- obs_pts %>%
-      rmapshaper::ms_clip(study_area_4326) %>%   # do the clipping -
+      rmapshaper::ms_clip(clip_area_4326) %>%   # do the clipping -
       dplyr::left_join(obs, by = "object") %>%  # add other cols back in
       sf::st_transform(outproj)
   }
@@ -1716,9 +2074,21 @@ sf.pts.to.lines <- function(df, names=c("LongStart","LatStart","LongEnd","LatEnd
 #'   as \code{MMDD} integers.
 #' @param datefield Character string giving the name of the date column in
 #'   \code{dat}.
+#' @param season.levels Factor levels for the returned \code{Season} column.
+#'   \code{NULL} (the default) reproduces the historical behaviour exactly: the
+#'   project global \code{season.names}, which this function used to reach for
+#'   by lexical scope with no way for a caller to say otherwise, and which
+#'   therefore made it unusable from any context that had not sourced
+#'   \code{analysis_settings.R}. Falls back to \code{names(season.def)} when no
+#'   such global exists.
 #' @return \code{dat} with a \code{Season} factor column added.
 #' @export
-assign.season <- function(dat, season.def, datefield = "Date"){
+assign.season <- function(dat, season.def, datefield = "Date",
+                          season.levels = NULL){
+
+  if (is.null(season.levels))
+    season.levels <- tryCatch(get("season.names", envir = globalenv()),
+                              error = function(e) names(season.def))
 
   if (is.null(season.def)) {
     stop("assign.season: season.def is NULL. Could not find a season definition for this species!")
@@ -1757,7 +2127,7 @@ assign.season <- function(dat, season.def, datefield = "Date"){
   # Assign season
   dat$Season <- factor(
     names(season.def)[season.index],
-    levels = season.names,
+    levels = season.levels,
   )
 
   if(any(is.na(dat$Season)))
@@ -1990,9 +2360,20 @@ copy.env <- function(src, dst) {
 #' Expects project globals \code{predLayerStudyAreaDir}, \code{segdatloc},
 #' and \code{ShapeDir} in the calling environment.
 #'
+#' \strong{This function does no spatial clipping.} It carried a
+#' \code{study.area} argument until DSMHelper 0.15.0 and never referenced it,
+#' while the documentation claimed the function clipped to the study area - it
+#' does not, and the argument is gone. A segment's presence in the output is
+#' decided entirely upstream, by the \code{clip.area} passed to
+#' \code{\link{create.survey.data}}; its covariates come from the rasters in
+#' \code{predLayerStudyAreaDir}, whose extent is set by \code{genpredrast} in
+#' \code{00.02_Extract_env_rasters.rmd}. Those two must agree: a segment
+#' outside the raster extent gets NA covariates here and is then dropped
+#' outright by the NA filter in \code{Generic_2_dsm.Rmd}. That is the failure
+#' mode to check first if a study-area buffer appears to have done nothing.
+#'
 #' @param the.data Named list with at least a \code{watches} element (as
 #'   returned by \code{\link{create.survey.data}}).
-#' @param study.area \code{sf} polygon defining the study area.
 #' @param inproj EPSG code or CRS for input watch coordinates.
 #' @param outproj EPSG code or CRS for output segdata.
 #' @param scale.factors Named list of mean and SD values used to standardise
@@ -2001,7 +2382,6 @@ copy.env <- function(src, dst) {
 #' @return \code{sf} data frame of segment data with covariates attached.
 #' @export
 create.segdata <- function(the.data,
-                           study.area,
                            inproj,
                            outproj,
                            scale.factors,

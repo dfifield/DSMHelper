@@ -4,7 +4,7 @@
 \alias{assign.season}
 \title{Assign season labels to observations based on date}
 \usage{
-assign.season(dat, season.def, datefield = "Date")
+assign.season(dat, season.def, datefield = "Date", season.levels = NULL)
 }
 \arguments{
 \item{dat}{Data frame (or sf object) to annotate.}
@@ -15,6 +15,14 @@ as \code{MMDD} integers.}
 
 \item{datefield}{Character string giving the name of the date column in
 \code{dat}.}
+
+\item{season.levels}{Factor levels for the returned \code{Season} column.
+\code{NULL} (the default) reproduces the historical behaviour exactly: the
+project global \code{season.names}, which this function used to reach for
+by lexical scope with no way for a caller to say otherwise, and which
+therefore made it unusable from any context that had not sourced
+\code{analysis_settings.R}. Falls back to \code{names(season.def)} when no
+such global exists.}
 }
 \value{
 \code{dat} with a \code{Season} factor column added.
