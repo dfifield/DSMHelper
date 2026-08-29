@@ -14,7 +14,9 @@ compare.finalist.surfaces(
   cell.area,
   top_n = 10,
   spike.ratio = 10,
-  map.limit = NULL
+  map.limit = NULL,
+  ref.density = NULL,
+  ref.mult = 100
 )
 }
 \arguments{
@@ -37,12 +39,27 @@ density, so this is what turns a summed surface into an abundance.}
 \item{spike.ratio}{A cell counts as a spike when it exceeds this multiple of
 the surface's median positive density. Default 10.}
 
-\item{map.limit}{Optional density above which a cell is implausible, i.e.
-\code{MAX_DENS_VALUE}. Worth passing: that limit is applied only when drawing
-leaflet maps and never to the rasters that get shared, so cells above it
-are invisible on the map you would check a surface against and fully
-present in the file. \code{NULL} leaves \code{n_over_limit} and \code{pct_over_limit}
+\item{map.limit}{Optional flat density above which a cell is hidden from the
+maps, i.e. \code{MAX_DENS_VALUE}. Worth passing, but for a narrow reason: that
+limit is applied only when drawing leaflet maps and never to the rasters
+that get shared, so \code{n_over_limit} counts exactly the cells that are
+invisible on the map you would check a surface against and fully present in
+the file. It is a \strong{visibility} measure, not a plausibility one -- see
+\code{ref.density} for that. \code{NULL} leaves \code{n_over_limit} and \code{pct_over_limit}
 \code{NA}.}
+
+\item{ref.density}{The highest detection-corrected density ever observed on a
+segment, one value per season in the order of \code{season} (a scalar is
+recycled). From \code{\link[=observed.density.ceiling]{observed.density.ceiling()}}. This is the
+species-and-season-specific ceiling, and it is the right one: across
+\code{NL_EXPL_DRL_RA} the observed maximum spans 0 to 7,183 birds/km2 between
+species-seasons, so no single constant can be meaningful for all of them.
+A season with no observations at all gets no reference rather than a
+ceiling of zero. \code{NULL} leaves the \verb{*_obs} columns \code{NA}.}
+
+\item{ref.mult}{How many times \code{ref.density} a cell must exceed to be
+counted in \code{n_over_obs}. Default 100, measured rather than picked -- see
+the calibration section.}
 }
 \value{
 A list of two tibbles:
@@ -55,8 +72,9 @@ at least one model predicts something -- the measure of \emph{where} they
 disagree that a correlation cannot give. \code{top_n_shared} is how many of
 the two models' \code{top_n} cells are the same cells: whether they are
 spiky in the same places, as distinct from equally spiky.
-\code{n_over_limit} and \code{pct_over_limit} are the runaway check described
-above.}
+\code{n_over_limit} and \code{pct_over_limit} count cells hidden from the maps;
+\code{max_over_obs}, \code{n_over_obs} and \code{pct_over_obs} are the plausibility
+check against what was actually observed.}
 \item{\verb{$cells}}{The \code{top_n} largest cells of each model, with the other
 model's value for the same cell, the coordinates and the ratio. This is
 what names the spots -- a caller can look each one up in the
@@ -92,6 +110,40 @@ which is why \code{median_pos} is returned beside them and should be read with
 them. And none of them catches a surface that has blown up \emph{everywhere}:
 that is what \code{map.limit} is for.
 }
+\section{Calibrating the plausibility ceiling}{
+
+\code{max_over_obs} -- the largest predicted cell over the largest density ever
+observed on a segment of the same species and season -- separates the
+populations that a flat limit cannot. Measured over 88 \code{NL_EXPL_DRL_RA}
+surfaces:
+
+\itemize{
+\item median \strong{0.075}. The typical surface peaks thirteen times \emph{below}
+anything ever seen, which is what should happen: a prediction cell is a
+seasonal mean over ten years and an observed segment density is one
+encounter on one day.
+\item 75th percentile 0.23, 90th 4.2, 95th 16.2. Twelve surfaces exceed 1.
+\item The legitimate tail tops out at \strong{32.5} (LESP Winter under \code{nb}),
+with Shearwaters Spring at 19.0 and 11.1 -- concentrated, plausible,
+flock-driven surfaces.
+\item Then a gap of five orders of magnitude to \strong{7.7e6}, Petrels Winter
+under \code{tw}.
+}
+
+\code{ref.mult = 100} sits in that gap: three times above the worst legitimate
+surface and four orders of magnitude below the pathology. It is a wide gap,
+so the exact value is not delicate -- anything from 50 to 1,000 separates the
+same two sets.
+
+Compare what the flat \code{MAX_DENS_VALUE} of 10,000 does on the same data. It
+fires on 3 of 88 surfaces, and it cannot do better, because it is set near
+the \emph{top} of the observed range: real segments have held 7,183 birds/km2
+(NOFU Spring), 4,091 (BLKI Fall) and 2,734 (BLKI Winter). For a razorbill in
+spring, whose busiest segment ever held 16 birds/km2, a predicted cell of
+5,000 would be three hundred times anything ever recorded and the flat rule
+would say nothing at all.
+}
+
 \section{What this found on NL_EXPL_DRL_RA}{
 
 Petrels Winter, fitted with \code{tw()} and the model \code{final.dsm.models} names, so

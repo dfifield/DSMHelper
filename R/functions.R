@@ -3637,7 +3637,8 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 # 14.9%, well under the level 03.70 warns on, because the blow-up is spread over
 # thousands of cells rather than piled into one. A concentration measure looks
 # for one big cell; this looks for many impossible ones.
-.surface.spikes <- function(v, top_n, spike.ratio, map.limit) {
+.surface.spikes <- function(v, top_n, spike.ratio, map.limit, ref.dens,
+                            ref.mult) {
   tot <- sum(v)
   srt <- sort(v, decreasing = TRUE)
   pos <- v[v > 0]
@@ -3645,6 +3646,13 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
   spikes <- if (isTRUE(med > 0)) v[v > spike.ratio * med] else v[0]
   p99 <- if (length(v)) unname(stats::quantile(v, 0.99)) else NA_real_
   over <- if (is.null(map.limit)) v[0] else v[v > map.limit]
+
+  # A season the species was never recorded in has no ceiling to exceed. Zero
+  # is the absence of a reference, not a reference of zero, and dividing by it
+  # would make every such surface infinitely bad.
+  has.ref <- !is.null(ref.dens) && !is.na(ref.dens) && ref.dens > 0
+  ceiling <- if (has.ref) ref.mult * ref.dens else NA_real_
+  over.ref <- if (has.ref) v[v > ceiling] else v[0]
 
   tibble::tibble(
     cells          = length(v),
@@ -3662,6 +3670,12 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
     n_over_limit   = if (is.null(map.limit)) NA_integer_ else length(over),
     pct_over_limit = if (is.null(map.limit) || !isTRUE(tot > 0)) NA_real_
                      else 100 * sum(over) / tot,
+    obs_max        = if (has.ref) ref.dens else NA_real_,
+    max_over_obs   = if (has.ref && length(srt)) srt[1] / ref.dens
+                     else NA_real_,
+    n_over_obs     = if (has.ref) length(over.ref) else NA_integer_,
+    pct_over_obs   = if (has.ref && isTRUE(tot > 0))
+                       100 * sum(over.ref) / tot else NA_real_,
     gini           = .gini(v))
 }
 
@@ -3689,6 +3703,38 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 #' which is why `median_pos` is returned beside them and should be read with
 #' them. And none of them catches a surface that has blown up *everywhere*:
 #' that is what `map.limit` is for.
+#'
+#' @section Calibrating the plausibility ceiling:
+#' `max_over_obs` -- the largest predicted cell over the largest density ever
+#' observed on a segment of the same species and season -- separates the
+#' populations that a flat limit cannot. Measured over 88 `NL_EXPL_DRL_RA`
+#' surfaces:
+#'
+#' \itemize{
+#'   \item median **0.075**. The typical surface peaks thirteen times *below*
+#'     anything ever seen, which is what should happen: a prediction cell is a
+#'     seasonal mean over ten years and an observed segment density is one
+#'     encounter on one day.
+#'   \item 75th percentile 0.23, 90th 4.2, 95th 16.2. Twelve surfaces exceed 1.
+#'   \item The legitimate tail tops out at **32.5** (LESP Winter under `nb`),
+#'     with Shearwaters Spring at 19.0 and 11.1 -- concentrated, plausible,
+#'     flock-driven surfaces.
+#'   \item Then a gap of five orders of magnitude to **7.7e6**, Petrels Winter
+#'     under `tw`.
+#' }
+#'
+#' `ref.mult = 100` sits in that gap: three times above the worst legitimate
+#' surface and four orders of magnitude below the pathology. It is a wide gap,
+#' so the exact value is not delicate -- anything from 50 to 1,000 separates the
+#' same two sets.
+#'
+#' Compare what the flat `MAX_DENS_VALUE` of 10,000 does on the same data. It
+#' fires on 3 of 88 surfaces, and it cannot do better, because it is set near
+#' the *top* of the observed range: real segments have held 7,183 birds/km2
+#' (NOFU Spring), 4,091 (BLKI Fall) and 2,734 (BLKI Winter). For a razorbill in
+#' spring, whose busiest segment ever held 16 birds/km2, a predicted cell of
+#' 5,000 would be three hundred times anything ever recorded and the flat rule
+#' would say nothing at all.
 #'
 #' @section What this found on NL_EXPL_DRL_RA:
 #' Petrels Winter, fitted with `tw()` and the model `final.dsm.models` names, so
@@ -3723,12 +3769,25 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 #'   10, matching `PRED_CONCENTRATION_TOP_N`.
 #' @param spike.ratio A cell counts as a spike when it exceeds this multiple of
 #'   the surface's median positive density. Default 10.
-#' @param map.limit Optional density above which a cell is implausible, i.e.
-#'   `MAX_DENS_VALUE`. Worth passing: that limit is applied only when drawing
-#'   leaflet maps and never to the rasters that get shared, so cells above it
-#'   are invisible on the map you would check a surface against and fully
-#'   present in the file. `NULL` leaves `n_over_limit` and `pct_over_limit`
+#' @param map.limit Optional flat density above which a cell is hidden from the
+#'   maps, i.e. `MAX_DENS_VALUE`. Worth passing, but for a narrow reason: that
+#'   limit is applied only when drawing leaflet maps and never to the rasters
+#'   that get shared, so `n_over_limit` counts exactly the cells that are
+#'   invisible on the map you would check a surface against and fully present in
+#'   the file. It is a **visibility** measure, not a plausibility one -- see
+#'   `ref.density` for that. `NULL` leaves `n_over_limit` and `pct_over_limit`
 #'   `NA`.
+#' @param ref.density The highest detection-corrected density ever observed on a
+#'   segment, one value per season in the order of `season` (a scalar is
+#'   recycled). From [observed.density.ceiling()]. This is the
+#'   species-and-season-specific ceiling, and it is the right one: across
+#'   `NL_EXPL_DRL_RA` the observed maximum spans 0 to 7,183 birds/km2 between
+#'   species-seasons, so no single constant can be meaningful for all of them.
+#'   A season with no observations at all gets no reference rather than a
+#'   ceiling of zero. `NULL` leaves the `*_obs` columns `NA`.
+#' @param ref.mult How many times `ref.density` a cell must exceed to be
+#'   counted in `n_over_obs`. Default 100, measured rather than picked -- see
+#'   the calibration section.
 #' @return A list of two tibbles:
 #'   \describe{
 #'     \item{`$seasons`}{One row per season. Per-model columns are suffixed `1`
@@ -3739,8 +3798,9 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 #'       disagree that a correlation cannot give. `top_n_shared` is how many of
 #'       the two models' `top_n` cells are the same cells: whether they are
 #'       spiky in the same places, as distinct from equally spiky.
-#'       `n_over_limit` and `pct_over_limit` are the runaway check described
-#'       above.}
+#'       `n_over_limit` and `pct_over_limit` count cells hidden from the maps;
+#'       `max_over_obs`, `n_over_obs` and `pct_over_obs` are the plausibility
+#'       check against what was actually observed.}
 #'     \item{`$cells`}{The `top_n` largest cells of each model, with the other
 #'       model's value for the same cell, the coordinates and the ratio. This is
 #'       what names the spots -- a caller can look each one up in the
@@ -3766,7 +3826,8 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 compare.finalist.surfaces <- function(paths1, paths2, season, species,
                                       model1, model2, cell.area,
                                       top_n = 10, spike.ratio = 10,
-                                      map.limit = NULL) {
+                                      map.limit = NULL, ref.density = NULL,
+                                      ref.mult = 100) {
   checkmate::expect_character(paths1, min.len = 1, any.missing = FALSE)
   checkmate::expect_character(paths2, len = length(paths1), any.missing = FALSE)
   checkmate::expect_atomic(season, len = length(paths1))
@@ -3777,8 +3838,21 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
   checkmate::expect_count(top_n, positive = TRUE)
   checkmate::expect_number(spike.ratio, lower = 1)
   checkmate::expect_number(map.limit, lower = 0, null.ok = TRUE)
+  checkmate::expect_numeric(ref.density, lower = 0, null.ok = TRUE)
+  checkmate::expect_number(ref.mult, lower = 1)
 
-  per.season <- purrr::pmap(list(paths1, paths2, season), function(p1, p2, se) {
+  # One reference per season, in the order the seasons were given. A scalar is
+  # recycled so a caller with a single project-wide ceiling still works.
+  if (!is.null(ref.density) && length(ref.density) == 1)
+    ref.density <- rep(ref.density, length(paths1))
+  if (!is.null(ref.density) && length(ref.density) != length(paths1))
+    stop("compare.finalist.surfaces: ref.density must be length 1 or ",
+         length(paths1), " (one per season), not ", length(ref.density))
+  refs <- if (is.null(ref.density)) rep(NA_real_, length(paths1))
+          else ref.density
+
+  per.season <- purrr::pmap(list(paths1, paths2, season, refs),
+                            function(p1, p2, se, ref) {
     se <- as.character(se)
     if (!file.exists(p1) || !file.exists(p2))
       return(list(
@@ -3804,8 +3878,10 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
     ok2 <- is.finite(v2all)
     both <- ok1 & ok2
 
-    s1 <- .surface.spikes(v1all[ok1], top_n, spike.ratio, map.limit)
-    s2 <- .surface.spikes(v2all[ok2], top_n, spike.ratio, map.limit)
+    s1 <- .surface.spikes(v1all[ok1], top_n, spike.ratio, map.limit,
+                          ref, ref.mult)
+    s2 <- .surface.spikes(v2all[ok2], top_n, spike.ratio, map.limit,
+                          ref, ref.mult)
 
     a <- v1all[both]
     b <- v2all[both]
@@ -8864,4 +8940,580 @@ guard.version.dir <- function(dir, allow.overwrite) {
       "To REPLACE it deliberately: set ALLOW_PRED_VERSION_OVERWRITE <- TRUE in ",
       "analysis_settings.R."),
     n, dir), call. = FALSE)
+}
+
+#' The highest density this species was ever actually seen at, by season
+#'
+#' A prediction-surface sanity check needs a ceiling, and a flat one cannot
+#' serve every species. Measured across `NL_EXPL_DRL_RA`, the largest
+#' detection-corrected density on any segment ranges from **0 to 7,183
+#' birds/km2** depending on species and season -- a factor of seven thousand. A
+#' single constant is therefore far too permissive for a razorbill in spring
+#' (whose busiest segment ever held 16 birds/km2) and barely above the
+#' legitimate range for a fulmar in spring (7,183). This returns the
+#' species-and-season-specific reference instead.
+#'
+#' What it measures is deliberately the observed **maximum**, not a quantile:
+#' the statement it supports is "the model predicts a seasonal-mean density in
+#' one cell higher than the single busiest instantaneous encounter ever
+#' recorded", which is interpretable without further calibration. `p999` and
+#' `p99` come back too, because the maximum is one flock and worth seeing beside
+#' a less brittle number.
+#'
+#' Predictions should ordinarily sit **well below** this. A prediction cell is a
+#' seasonal mean over `predgrid.years`; an observed segment density is one
+#' encounter on one day. Measured over 88 NL_EXPL_DRL_RA surfaces, the median
+#' ratio of largest predicted cell to observed maximum is **0.075** -- the
+#' typical surface peaks thirteen times below anything ever seen.
+#'
+#' @param segdata The `segdata` saved by the DSM step, with `estAbund`,
+#'   `segment.area`, `Season` and `Sample.Label` columns. An `sf` object is
+#'   fine; the geometry is dropped.
+#' @return A tibble with one row per season: `season`, `n_seg` (physical
+#'   segments, not rows), `n_pos`, `obs_max`, `obs_p999`, `obs_p99`,
+#'   `obs_mean`. A season the species was never recorded in gets `obs_max` 0,
+#'   which callers must treat as "no reference", not as a ceiling of zero.
+#' @examples
+#' \dontrun{
+#' load(here(RDataDir, "ATPU_distdata_segdata_ddfs.Rda"))
+#' observed.density.ceiling(segdata)
+#' }
+#' @export
+observed.density.ceiling <- function(segdata) {
+  checkmate::expect_data_frame(segdata, min.rows = 1)
+  for (col in c("estAbund", "segment.area", "Season", "Sample.Label"))
+    if (is.null(segdata[[col]]))
+      stop("observed.density.ceiling: segdata has no '", col, "' column")
+
+  sd <- segdata
+  if (inherits(sd, "sf")) sd <- sf::st_drop_geometry(sd)
+
+  # segdata holds one row per segment x ddftype, so a raw row density is only
+  # part of the segment's birds. The surfaces this is compared against are the
+  # summed "Combined" ones, so sum the ddftype rows back to the segment first.
+  # Sample.Label carries the ddftype suffix and is unique per row - see
+  # segment.id.from.label().
+  sd %>%
+    dplyr::mutate(
+      .seg = segment.id.from.label(as.character(.data$Sample.Label))) %>%
+    dplyr::group_by(.data$Season, .data$.seg) %>%
+    dplyr::summarise(abund = sum(.data$estAbund, na.rm = TRUE),
+                     area = dplyr::first(.data$segment.area),
+                     .groups = "drop") %>%
+    dplyr::filter(.data$area > 0) %>%
+    dplyr::mutate(dens = .data$abund / .data$area) %>%
+    dplyr::group_by(.data$Season) %>%
+    dplyr::summarise(
+      n_seg    = dplyr::n(),
+      n_pos    = sum(.data$dens > 0),
+      obs_max  = max(.data$dens),
+      obs_p999 = unname(stats::quantile(.data$dens, 0.999)),
+      obs_p99  = unname(stats::quantile(.data$dens, 0.99)),
+      obs_mean = mean(.data$dens),
+      .groups  = "drop") %>%
+    dplyr::rename(season = "Season")
+}
+
+# The document scaffold and stylesheet for write.finalist.summary.page().
+#
+# Kept in its own function purely so the page builder above stays readable; it
+# is one long string and has no logic in it. Everything the page draws comes
+# from the tokens defined here, in all three theme states the page can be read
+# in: an explicit light choice, an explicit dark choice, and the default where
+# neither is stamped and only the OS preference distinguishes them.
+.finalist.page.head <- function() {
+'<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two Families, One Question</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&amp;family=Source+Sans+3:ital,wght@0,400;0,600&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body,h1,h2,h3,p,dl,dd,figure,table{margin:0}
+:root{
+  --ground:#F5F6F7; --surface:#FFFFFF; --sunk:#ECEFF1; --ink:#131A20;
+  --muted:#5C6975; --faint:#8794A0; --rule:#DCE1E5; --rule-firm:#C3CBD2;
+  --a:#A8681F; --a-wash:#F6EDE0; --b:#1A626B; --b-wash:#E3EEEF;
+  --crit:#A02D20; --crit-wash:#F8E8E5; --ok:#1D6640;
+  --shadow:0 1px 2px rgba(19,26,32,.06),0 6px 20px rgba(19,26,32,.05);
+  --measure:65ch; --wide:62rem;
+  --s1:.35rem; --s2:.7rem; --s3:1.1rem; --s4:1.75rem; --s5:2.75rem; --s6:4.25rem;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0F1418; --surface:#161C22; --sunk:#1B232A; --ink:#E4EAEF;
+  --muted:#97A5B1; --faint:#6F7E8B; --rule:#27313A; --rule-firm:#3A4650;
+  --a:#DD9E52; --a-wash:#2B2216; --b:#55AEB7; --b-wash:#12262A;
+  --crit:#E57764; --crit-wash:#2C1815; --ok:#5FBF8A;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.3);
+}}
+:root[data-theme="dark"]{
+  --ground:#0F1418; --surface:#161C22; --sunk:#1B232A; --ink:#E4EAEF;
+  --muted:#97A5B1; --faint:#6F7E8B; --rule:#27313A; --rule-firm:#3A4650;
+  --a:#DD9E52; --a-wash:#2B2216; --b:#55AEB7; --b-wash:#12262A;
+  --crit:#E57764; --crit-wash:#2C1815; --ok:#5FBF8A;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.3);
+}
+body{background:var(--ground);color:var(--ink);
+  font-family:"Source Sans 3",ui-sans-serif,system-ui,sans-serif;
+  font-size:17px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.page{max-width:var(--wide);margin:0 auto;padding:var(--s6) var(--s4);
+  display:flex;flex-direction:column;gap:var(--s6)}
+.prose{max-width:var(--measure)}
+.prose>*+*{margin-top:var(--s3)}
+h1,h2,h3{font-family:Spectral,Georgia,"Times New Roman",serif;font-weight:600;
+  text-wrap:balance;line-height:1.18;letter-spacing:-.008em}
+h1{font-size:clamp(2.1rem,5vw,3rem)}
+h2{font-size:clamp(1.5rem,3vw,1.9rem)}
+h3{font-size:1.16rem}
+.eyebrow{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.74rem;
+  font-weight:500;letter-spacing:.13em;text-transform:uppercase;color:var(--faint)}
+code{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.87em;
+  background:var(--sunk);padding:.1em .34em;border-radius:3px}
+.masthead{display:flex;flex-direction:column;gap:var(--s3)}
+.masthead .lede{font-family:Spectral,Georgia,serif;font-size:1.22rem;
+  line-height:1.5;color:var(--muted);max-width:58ch}
+.meta{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s3);padding-top:var(--s3);
+  border-top:1px solid var(--rule);font-family:"IBM Plex Mono",monospace;
+  font-size:.78rem;color:var(--faint)}
+.fam{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:.82em;
+  padding:.12em .45em;border-radius:3px;white-space:nowrap}
+.fam-a{color:var(--a);background:var(--a-wash)}
+.fam-b{color:var(--b);background:var(--b-wash)}
+.finding{background:var(--surface);border:1px solid var(--rule);
+  border-left:4px solid var(--crit);border-radius:4px;box-shadow:var(--shadow);
+  padding:var(--s4);display:flex;flex-direction:column;gap:var(--s3)}
+.finding.is-ok{border-left-color:var(--ok)}
+.finding .eyebrow{color:var(--crit)}
+.finding.is-ok .eyebrow{color:var(--ok)}
+.finding h2{font-size:1.42rem}
+.finding p{max-width:62ch}
+.decades{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s2)}
+.decade-row{display:grid;grid-template-columns:5.5rem 1fr;gap:var(--s3);
+  align-items:center}
+.decade-label{font-family:"IBM Plex Mono",monospace;font-size:.8rem;text-align:right}
+.decade-track{position:relative;height:1.55rem;background:var(--sunk);
+  border-radius:2px;overflow:hidden}
+.decade-fill{position:absolute;inset:0 auto 0 0;border-radius:2px}
+.decade-fill.a{background:var(--a)}
+.decade-fill.b{background:var(--crit)}
+.decade-val{position:absolute;top:50%;transform:translateY(-50%);
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;font-weight:600;
+  padding:0 .5rem;white-space:nowrap;color:var(--surface)}
+.decade-scale{display:flex;justify-content:space-between;
+  font-family:"IBM Plex Mono",monospace;font-size:.68rem;color:var(--faint);
+  padding-left:calc(5.5rem + var(--s3))}
+.caption{font-size:.84rem;color:var(--muted);max-width:62ch}
+.stats{display:grid;gap:1px;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));
+  background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.stat{background:var(--surface);padding:var(--s3)}
+.stat dt{font-family:"IBM Plex Mono",monospace;font-size:.69rem;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--faint);margin-bottom:var(--s1)}
+.stat dd{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;
+  font-size:1.3rem;font-weight:600;line-height:1.15}
+.stat dd .unit{font-size:.78rem;font-weight:400;color:var(--muted);display:block;
+  margin-top:.2rem}
+.stat.is-crit dd{color:var(--crit)}
+.table-wrap{overflow-x:auto;border:1px solid var(--rule);border-radius:4px;
+  background:var(--surface)}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+caption{caption-side:top;text-align:left;padding:var(--s3) var(--s3) var(--s2);
+  color:var(--muted);font-size:.86rem}
+th,td{padding:.5rem .8rem;text-align:left;white-space:nowrap}
+thead th{font-family:"IBM Plex Mono",monospace;font-size:.7rem;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--faint);font-weight:500;
+  border-bottom:1px solid var(--rule-firm)}
+tbody tr+tr td{border-top:1px solid var(--rule)}
+td.n,th.n{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;
+  text-align:right}
+tbody tr.is-crit td{background:var(--crit-wash)}
+.win-a{color:var(--a);font-weight:600}
+.win-b{color:var(--b);font-weight:600}
+.tally{display:grid;gap:var(--s3);grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+.tally-item{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  padding:var(--s3)}
+.tally-item h3{font-family:"Source Sans 3",sans-serif;font-size:.88rem;
+  font-weight:600;margin-bottom:var(--s2)}
+.bar{display:flex;height:1.5rem;border-radius:2px;overflow:hidden;background:var(--sunk)}
+.bar span{display:grid;place-items:center;font-family:"IBM Plex Mono",monospace;
+  font-size:.74rem;font-weight:600;color:var(--surface)}
+.bar .b-a{background:var(--a)}
+.bar .b-b{background:var(--b)}
+.bar .b-tie{background:var(--faint)}
+.tally-item .caption{margin-top:var(--s2);font-size:.78rem}
+section{display:flex;flex-direction:column;gap:var(--s4)}
+section>h2{max-width:var(--measure)}
+footer{border-top:1px solid var(--rule);padding-top:var(--s4);color:var(--muted);
+  font-size:.88rem;display:flex;flex-direction:column;gap:var(--s2)}
+@media (max-width:34rem){
+  .decade-row{grid-template-columns:4rem 1fr}
+  .decade-scale{padding-left:calc(4rem + var(--s3))}
+  .page{padding:var(--s5) var(--s3)}
+}
+</style>
+</head>
+<body>'
+}
+
+# Minimal HTML escaping for values that reach the summary page. Species and
+# model names come from the pipeline rather than from a user, so this is
+# belt-and-braces - but a page that gets shared should not be able to be
+# derailed by an ampersand in a species group name.
+.esc <- function(x) {
+  x <- as.character(x)
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;",  x, fixed = TRUE)
+  gsub(">", "&gt;", x, fixed = TRUE)
+}
+
+# Format a number for display: plain with thousands separators when it is of a
+# human size, scientific when it is not. A summary page that prints
+# 3951058971034.7 has told the reader nothing they can hold in their head.
+.hnum <- function(x, sig = 3) {
+  if (length(x) != 1 || is.na(x)) return("&mdash;")
+  if (x != 0 && (abs(x) >= 1e5 || abs(x) < 1e-3)) {
+    e <- floor(log10(abs(x)))
+    m <- signif(x / 10^e, sig)
+    sprintf("%s &times; 10<sup>%d</sup>", format(m, trim = TRUE), e)
+  } else {
+    format(signif(x, sig), big.mark = ",", scientific = FALSE, trim = TRUE)
+  }
+}
+
+.pct <- function(x, dp = 1) if (is.na(x)) "&mdash;" else
+  sprintf(paste0("%.", dp, "f%%"), x)
+
+#' Write the shareable summary page for the finalist prediction comparison
+#'
+#' The per-species reports and the roll-up answer the question in detail; this
+#' is the one page to hand someone who was not in the room. Everything on it is
+#' computed from the arguments -- no finding, figure or species name is written
+#' into the template -- so it stays true after a refit, and a SubProject where
+#' nothing is wrong gets a page that says so rather than an empty version of
+#' the page where something was.
+#'
+#' The output is a standalone HTML document that opens on its own. The body is
+#' delimited by `<!-- ARTIFACT:BEGIN -->` and `<!-- ARTIFACT:END -->` sentinels,
+#' because publishing it as an Artifact needs the content without the
+#' `<!doctype>`/`<head>`/`<body>` scaffold, which that publisher supplies
+#' itself. Extract between the sentinels rather than re-deriving the page.
+#'
+#' @param seasons The roll-up tibble: one row per species-season, as
+#'   [compare.finalist.surfaces()] returns them, bound across species, with an
+#'   `incumbent` column added.
+#' @param cells The matching spike-cell tibble.
+#' @param path Where to write the file.
+#' @param subproject SubProject name, for the masthead.
+#' @param cell.km2 Prediction cell area, for the masthead.
+#' @param top_n,ref.mult,map.limit The settings the numbers were computed under,
+#'   so the page states its own thresholds instead of leaving them implicit.
+#' @param warn.pct The concentration level the shipping step warns at.
+#' @return `path`, invisibly.
+#' @examples
+#' \dontrun{
+#' write.finalist.summary.page(seasons, cells,
+#'   file.path(ResultsDir, paste0(SubProject, "_finalist_comparison.html")),
+#'   subproject = SubProject, cell.km2 = predgridCellArea)
+#' }
+#' @export
+write.finalist.summary.page <- function(seasons, cells, path, subproject,
+                                        cell.km2, top_n = 10, ref.mult = 100,
+                                        map.limit = NULL, warn.pct = 50) {
+  checkmate::expect_data_frame(seasons, min.rows = 1)
+  checkmate::expect_data_frame(cells)
+  checkmate::expect_string(path, min.chars = 1)
+  checkmate::expect_string(subproject, min.chars = 1)
+  checkmate::expect_number(cell.km2, lower = 0)
+
+  fam1 <- seasons$model1[1]; fam2 <- seasons$model2[1]
+  k1 <- if (!is.null(seasons$fam1)) seasons$fam1[1] else "1"
+  k2 <- if (!is.null(seasons$fam2)) seasons$fam2[1] else "2"
+  n_sp <- length(unique(seasons$species))
+  n_se <- length(unique(seasons$season))
+
+  # ---- the headline -------------------------------------------------------
+  # Worst surface by how far it exceeds what was actually observed. That is the
+  # measure with a defensible zero point; if no reference was available it falls
+  # back to the flat limit, and if neither fired the page says nothing is wrong.
+  imp <- seasons %>%
+    dplyr::select(dplyr::any_of(c("species", "season", "max_over_obs1",
+                                  "max_over_obs2"))) %>%
+    tidyr::pivot_longer(dplyr::starts_with("max_over_obs"),
+                        names_to = "which", values_to = "r") %>%
+    dplyr::filter(!is.na(.data$r)) %>%
+    dplyr::arrange(dplyr::desc(.data$r))
+
+  worst <- if (nrow(imp) && imp$r[1] > ref.mult) {
+    w <- seasons %>% dplyr::filter(.data$species == imp$species[1],
+                                   .data$season == imp$season[1])
+    list(row = w, fam = if (imp$which[1] == "max_over_obs1") k1 else k2,
+         ratio = imp$r[1])
+  } else NULL
+
+  # ---- agreement ----------------------------------------------------------
+  med <- function(v) stats::median(v, na.rm = TRUE)
+  n_big <- sum(seasons$total_ratio > 1.5 | seasons$total_ratio < 1 / 1.5,
+               na.rm = TRUE)
+
+  spikier <- function(a, b) {
+    ok <- !is.na(a) & !is.na(b)
+    c(k1 = sum(a[ok] > b[ok]), tie = sum(a[ok] == b[ok]), k2 = sum(b[ok] > a[ok]))
+  }
+  t_gini <- spikier(seasons$gini1, seasons$gini2)
+  t_mom  <- spikier(seasons$max_over_med1, seasons$max_over_med2)
+  t_tot  <- c(k1 = sum(seasons$total_ratio > 1, na.rm = TRUE), tie = 0,
+              k2 = sum(seasons$total_ratio < 1, na.rm = TRUE))
+
+  bar <- function(t, label, note) {
+    parts <- c(
+      if (t[["k1"]] > 0) sprintf('<span class="b-a" style="flex:%d;">%s %d</span>',
+                                 t[["k1"]], .esc(k1), t[["k1"]]),
+      if (t[["tie"]] > 0) sprintf('<span class="b-tie" style="flex:%d;"></span>',
+                                  t[["tie"]]),
+      if (t[["k2"]] > 0) sprintf('<span class="b-b" style="flex:%d;">%s %d</span>',
+                                 t[["k2"]], .esc(k2), t[["k2"]]))
+    sprintf(paste0('<div class="tally-item"><h3>%s</h3>',
+                   '<div class="bar" role="img" aria-label="%s %d, tie %d, %s %d">',
+                   '%s</div><p class="caption">%s</p></div>'),
+            .esc(label), .esc(k1), t[["k1"]], t[["tie"]], .esc(k2), t[["k2"]],
+            paste(parts, collapse = ""), .esc(note))
+  }
+
+  # ---- tables -------------------------------------------------------------
+  row.html <- function(cells.v, crit = FALSE)
+    sprintf('<tr%s>%s</tr>', if (crit) ' class="is-crit"' else "",
+            paste(cells.v, collapse = ""))
+  td <- function(x, n = FALSE) sprintf('<td%s>%s</td>',
+                                       if (n) ' class="n"' else "", x)
+
+  flagged <- seasons %>%
+    dplyr::mutate(
+      .td = !is.na(.data$total_ratio) &
+        (.data$total_ratio > 1.5 | .data$total_ratio < 1 / 1.5),
+      .cd = xor(.data$pct_top_n1 >= warn.pct,
+                .data$pct_top_n2 >= warn.pct) %in% TRUE,
+      .rd = if (is.null(seasons$max_over_obs1)) FALSE else
+        (.data$max_over_obs1 > ref.mult | .data$max_over_obs2 > ref.mult) %in% TRUE) %>%
+    dplyr::filter(.data$.td | .data$.cd | .data$.rd) %>%
+    dplyr::arrange(dplyr::desc(.data$.rd),
+                   dplyr::desc(abs(log(.data$total_ratio))))
+
+  flag.rows <- if (!nrow(flagged)) "" else paste(vapply(seq_len(nrow(flagged)),
+    function(i) {
+      r <- flagged[i, ]
+      inc <- if (is.null(r$incumbent) || is.na(r$incumbent)) "&mdash;" else
+        if (grepl(paste0("_", k1, "_"), r$incumbent)) k1 else k2
+      row.html(c(
+        td(.esc(r$species)), td(.esc(r$season)),
+        td(.hnum(r$abund1), TRUE), td(.hnum(r$abund2), TRUE),
+        td(.hnum(r$total_ratio), TRUE),
+        td(if (is.null(r$max_over_obs1)) "&mdash;" else
+             sprintf('<span class="win-a">%s</span> / <span class="win-b">%s</span>',
+                     .hnum(r$max_over_obs1, 2), .hnum(r$max_over_obs2, 2)), TRUE),
+        td(sprintf('<span class="fam fam-%s">%s</span>',
+                   if (inc == k1) "a" else "b", .esc(inc)))),
+        crit = isTRUE(r$.rd))
+    }, character(1)), collapse = "\n")
+
+  # ---- headline block -----------------------------------------------------
+  if (is.null(worst)) {
+    head.block <- sprintf(paste0(
+      '<div class="finding is-ok"><p class="eyebrow">What the comparison found</p>',
+      '<h2>No surface exceeds what was observed.</h2>',
+      '<p>Across all %d species-seasons, neither family predicts a cell more ',
+      'than %s times the highest density ever recorded on a segment of the same ',
+      'species and season. Where the two families differ they differ in degree, ',
+      'not in kind, and the table below says where.</p></div>'),
+      nrow(seasons), format(ref.mult, big.mark = ","))
+  } else {
+    w <- worst$row
+    other <- if (worst$fam == k1) k2 else k1
+    a.tot <- w$abund1; b.tot <- w$abund2
+    big <- if (worst$fam == k1) a.tot else b.tot
+    sml <- if (worst$fam == k1) b.tot else a.tot
+    n.over <- if (worst$fam == k1) w$n_over_obs1 else w$n_over_obs2
+    p.over <- if (worst$fam == k1) w$pct_over_obs1 else w$pct_over_obs2
+    mx <- if (worst$fam == k1) w$max1 else w$max2
+    obs <- if (!is.null(w$obs_max1)) w$obs_max1 else NA_real_
+
+    # A log axis spanning both totals, rounded out to whole decades, so the two
+    # bars are honestly placed rather than merely ordered.
+    lo <- floor(log10(max(min(sml, big), .Machine$double.xmin))) - 1
+    hi <- ceiling(log10(max(sml, big))) + 1
+    # Pick the number of tick labels so the decades divide evenly, rather than
+    # stretching the axis until five of them fit: five labels over a nine-decade
+    # span come out 10^5, 10^7, 10^10, 10^12, 10^14, and widening the span to
+    # fix that pushes the bars away from the edge they should reach.
+    gaps <- which((hi - lo) %% (3:5) == 0)
+    n.tick <- if (length(gaps)) (3:5)[gaps[length(gaps)]] + 1 else 5
+    # A span of one or two decades has fewer decades than labels, and asking
+    # for five gives repeats (10^0, 10^0, 10^1, 10^2, 10^2).
+    n.tick <- min(n.tick, hi - lo + 1)
+    posn <- function(v) max(0, min(100, (log10(max(v, 10^lo)) - lo) / (hi - lo) * 100))
+    ticks <- paste(sprintf("<span>10<sup>%d</sup></span>",
+                           round(seq(lo, hi, length.out = n.tick))),
+                   collapse = "")
+
+    head.block <- sprintf(paste0(
+      '<div class="finding"><p class="eyebrow">What the comparison found</p>',
+      '<h2>%s in %s is not a tie. It is a runaway.</h2>',
+      '<p>Under <span class="fam fam-%s">%s</span>%s the surface puts ',
+      '<strong>%s cells</strong> more than %s&times; the highest density ever ',
+      'recorded on a segment of this species and season (%s birds/km<sup>2</sup>), ',
+      'peaking at %s. Those cells hold %s of the seasonal total. The ',
+      '<span class="fam fam-%s">%s</span> finalist, fitted to the same segments ',
+      'on the same grid, gives a total %s. The two surfaces correlate at %s.</p>',
+      '<div class="decades" role="img" aria-label="Predicted totals on a log scale">',
+      '<div class="decade-row"><span class="decade-label">',
+      '<span class="fam fam-%s">%s</span></span><span class="decade-track">',
+      '<span class="decade-fill a" style="width:%.1f%%;"></span>',
+      '<span class="decade-val" style="left:%.1f%%;color:var(--ink);">&nbsp;%s birds</span>',
+      '</span></div>',
+      '<div class="decade-row"><span class="decade-label">',
+      '<span class="fam fam-%s">%s</span></span><span class="decade-track">',
+      '<span class="decade-fill b" style="width:%.1f%%;"></span>',
+      '<span class="decade-val" style="right:%.1f%%;">%s birds&nbsp;</span>',
+      '</span></div>',
+      '<div class="decade-scale">%s</div></div>',
+      '<p class="caption">Seasonal totals on a log scale &mdash; the bar length is ',
+      'the exponent. On a linear scale the smaller bar would be invisible.</p>',
+      '<dl class="stats">',
+      '<div class="stat is-crit"><dt>Cells past the observed ceiling</dt>',
+      '<dd>%s<span class="unit">of %s, under <span class="fam fam-%s">%s</span></span></dd></div>',
+      '<div class="stat is-crit"><dt>Their share of the total</dt>',
+      '<dd>%s<span class="unit">the surface <em>is</em> the outliers</span></dd></div>',
+      '<div class="stat"><dt>Largest cell</dt><dd>%s<span class="unit">birds per km<sup>2</sup></span></dd></div>',
+      '<div class="stat"><dt>Correlation of the two</dt><dd>%s<span class="unit">Pearson, over live cells</span></dd></div>',
+      '</dl></div>'),
+      .esc(w$species), tolower(.esc(w$season)),
+      if (worst$fam == k1) "a" else "b", .esc(worst$fam),
+      if (!is.null(w$incumbent) && !is.na(w$incumbent) &&
+          grepl(paste0("_", worst$fam, "_"), w$incumbent))
+        " &mdash; the model this species currently ships &mdash; " else ", ",
+      format(n.over, big.mark = ","), format(ref.mult, big.mark = ","),
+      .hnum(obs), .hnum(mx), .pct(p.over, 4),
+      if (worst$fam == k1) "b" else "a", .esc(other),
+      sprintf("%s times smaller", .hnum(big / sml)),
+      .hnum(w$pearson_r, 2),
+      "a", .esc(k1), posn(a.tot), posn(a.tot), .hnum(a.tot),
+      "b", .esc(k2), posn(b.tot), 100 - posn(b.tot), .hnum(b.tot),
+      ticks,
+      format(n.over, big.mark = ","), format(w$cells1, big.mark = ","),
+      "a", .esc(worst$fam),
+      .pct(p.over, 4), .hnum(mx), .hnum(w$pearson_r, 2))
+  }
+
+  body <- sprintf(paste0(
+'<!-- ARTIFACT:BEGIN -->
+<div class="page">
+<header class="masthead">
+  <p class="eyebrow">%s &nbsp;&middot;&nbsp; pipeline step 02.15</p>
+  <h1>Two Families, One Question</h1>
+  <p class="lede">Cross-validation could not choose between the two response
+  families for these species. Neither could the model diagnostics. So we asked
+  the question neither of them asks &mdash; whether the tie matters &mdash; by
+  predicting both surfaces and comparing them cell by cell.</p>
+  <p class="meta"><span>%d species &times; %d seasons = %d comparisons</span>
+  <span>%s prediction cells each</span><span>%s km&sup2; cells</span>
+  <span>%s</span></p>
+</header>
+
+%s
+
+<section>
+  <h2>Everywhere else, the two families mostly agree</h2>
+  <div class="prose">
+    <p>Across all %d species-seasons the median ratio of seasonal totals is
+    <strong>%s</strong>, the median rank correlation between the surfaces is
+    <strong>%s</strong>, and on the log scale &mdash; the one that reflects the
+    surface as it would be mapped &mdash; the median correlation is
+    <strong>%s</strong>. For most species in most seasons the unresolved tie
+    genuinely does not change the product.</p>
+    <p>%s of the %d are exceptions, listed below: the seasonal totals differ by
+    more than a factor of 1.5, the concentration crosses the %s%% level the
+    shipping step warns at, or a surface runs past what was ever observed.</p>
+  </div>
+  <div class="table-wrap"><table>
+    <caption>Species-seasons where the family choice changes the answer.</caption>
+    <thead><tr><th>Species</th><th>Season</th><th class="n">%s total</th>
+    <th class="n">%s total</th><th class="n">ratio</th>
+    <th class="n">max &divide; observed max</th><th>currently ships</th></tr></thead>
+    <tbody>%s</tbody>
+  </table></div>
+  <p class="caption">Totals are the summed density surface in birds. Ratio is
+  %s &divide; %s. The last numeric column is each family&rsquo;s largest cell as a
+  multiple of the highest density ever recorded on a segment of that species and
+  season &mdash; below 1 is normal, since a prediction is a seasonal mean and an
+  observation is one encounter.</p>
+</section>
+
+<section>
+  <h2>Which family is spikier?</h2>
+  <div class="prose">
+    <p>Measured three ways over the %d species-seasons. The margins are not
+    dramatic, and the exception is the one that matters most.</p>
+  </div>
+  <div class="tally">%s%s%s</div>
+  <div class="prose">
+    <p>The two families are also rarely spiky in the <em>same places</em>. Of the
+    %d largest cells in each surface, the median overlap is <strong>%s</strong>
+    &mdash; %d of the %d species-seasons share none at all. Agreement on the
+    shape of a surface does not imply agreement on where the birds pile up.</p>
+  </div>
+</section>
+
+<section>
+  <h2>How the ceiling is set</h2>
+  <div class="prose">
+    <p>A flat density limit cannot serve every species. On this SubProject the
+    highest density ever recorded on a segment ranges from %s to %s
+    birds/km&sup2; between species-seasons, so one constant is far too permissive
+    for the small species and barely above the legitimate range for the large
+    ones.</p>
+    <p>The ceiling used here is therefore <strong>species- and
+    season-specific</strong>: each surface is judged against the busiest segment
+    ever recorded for that species in that season, and a cell is counted when it
+    exceeds %s&times; it. The median surface peaks <strong>%s&times;</strong> that
+    reference &mdash; below it, as it should be, since a prediction cell is a
+    seasonal mean over ten years and an observed segment density is a single
+    encounter on a single day.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Generated by <code>02.15_Compare_finalist_predictions.Rmd</code> from
+  <code>DSMHelper::compare.finalist.surfaces()</code>. Per-species reports, the
+  full %d-row table and the spike-cell coordinates are in the results folder
+  beside this page.</p>
+</footer>
+</div>
+<!-- ARTIFACT:END -->'),
+    .esc(subproject), n_sp, n_se, nrow(seasons),
+    format(seasons$cells1[1], big.mark = ","),
+    format(cell.km2, big.mark = ","), format(Sys.Date(), "%d %B %Y"),
+    head.block,
+    nrow(seasons), .hnum(med(seasons$total_ratio)),
+    .hnum(med(seasons$spearman_r)), .hnum(med(seasons$log_r)),
+    nrow(flagged), nrow(seasons), format(warn.pct),
+    .esc(k1), .esc(k2), flag.rows, .esc(k1), .esc(k2),
+    nrow(seasons),
+    bar(t_gini, "Higher Gini across the whole surface",
+        "Inequality over every cell: 0 flat, 1 all in one place."),
+    bar(t_mom, "Higher largest cell divided by median cell",
+        "Scale-free, so a bigger total is not counted as spikier."),
+    bar(t_tot, "Larger seasonal total",
+        "Which family predicts more birds, season by season."),
+    top_n, .hnum(med(seasons$top_n_shared)),
+    sum(seasons$top_n_shared == 0, na.rm = TRUE), nrow(seasons),
+    .hnum(min(c(seasons$obs_max1, seasons$obs_max2), na.rm = TRUE)),
+    .hnum(max(c(seasons$obs_max1, seasons$obs_max2), na.rm = TRUE)),
+    format(ref.mult, big.mark = ","),
+    .hnum(med(c(seasons$max_over_obs1, seasons$max_over_obs2)), 2),
+    nrow(seasons))
+
+  writeLines(c(.finalist.page.head(), body, "</body>", "</html>"), path)
+  invisible(path)
 }
