@@ -3589,6 +3589,289 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
   dplyr::arrange(out, dplyr::desc(.data$pct_top_n))
 }
 
+
+# Gini coefficient of a non-negative vector.
+#
+# Used as one of the spikiness measures in compare.finalist.surfaces(). It is
+# the scale-free one: multiplying every cell by a constant leaves it unchanged,
+# so a Tweedie surface and a negative binomial surface predicting very different
+# totals can still be asked which is the more unevenly distributed.
+.gini <- function(v) {
+  v <- v[is.finite(v)]
+  if (length(v) < 2 || sum(v) <= 0) return(NA_real_)
+  # Negative densities cannot come off a log link, but a raster read back from
+  # disk is not a promise, and the formula below is only defined on
+  # non-negative values.
+  if (any(v < 0)) return(NA_real_)
+  s <- sort(v)
+  n <- length(s)
+  (2 * sum(seq_len(n) * s) / (n * sum(s))) - (n + 1) / n
+}
+
+# cor() errors on a zero-variance argument rather than returning NA, and a
+# season where a species is absent from the study area gives exactly that.
+.safe.cor <- function(a, b, method) {
+  if (length(a) < 3 || stats::sd(a) == 0 || stats::sd(b) == 0) return(NA_real_)
+  stats::cor(a, b, method = method)
+}
+
+# Spikiness of one surface, as a one-row tibble.
+#
+# Every measure here is deliberately scale-free apart from `total`, `max` and
+# the over-limit pair, because the question is which family concentrates its
+# prediction more, not which predicts more birds.
+#
+# `median_pos` is the median over cells holding any density at all: the median
+# over every cell is often 0 in a season a species is largely absent from, and a
+# ratio to it would then be undefined everywhere. It is RETURNED, not just used,
+# because it is the denominator of `max_over_med`, `p99_over_med` and
+# `n_spikes`, and on a near-empty surface it goes denormal - measured on
+# NL_EXPL_DRL_RA RAZO Fall, a median positive cell of 2.0e-13 against a maximum
+# of 0.31 birds/km2 gives `max_over_med` of 1.5e12, which reads as a
+# catastrophic spike and is a vanishing denominator. Always read the ratio
+# beside its denominator; `pct_top_n` and `gini` have no such failure mode.
+#
+# `n_over_limit` is the one that caught the real thing. Petrels Winter tw on
+# NL_EXPL_DRL_RA has 2,267 cells above MAX_DENS_VALUE holding 99.9997% of the
+# seasonal total and peaking at 1.7e10 birds/km2 - and its `pct_top_n` is only
+# 14.9%, well under the level 03.70 warns on, because the blow-up is spread over
+# thousands of cells rather than piled into one. A concentration measure looks
+# for one big cell; this looks for many impossible ones.
+.surface.spikes <- function(v, top_n, spike.ratio, map.limit) {
+  tot <- sum(v)
+  srt <- sort(v, decreasing = TRUE)
+  pos <- v[v > 0]
+  med <- if (length(pos)) stats::median(pos) else NA_real_
+  spikes <- if (isTRUE(med > 0)) v[v > spike.ratio * med] else v[0]
+  p99 <- if (length(v)) unname(stats::quantile(v, 0.99)) else NA_real_
+  over <- if (is.null(map.limit)) v[0] else v[v > map.limit]
+
+  tibble::tibble(
+    cells          = length(v),
+    total          = tot,
+    max            = if (length(srt)) srt[1] else NA_real_,
+    median_pos     = med,
+    p99            = p99,
+    pct_top_n      = if (isTRUE(tot > 0))
+                       100 * sum(utils::head(srt, top_n)) / tot else NA_real_,
+    max_over_med   = if (isTRUE(med > 0)) srt[1] / med else NA_real_,
+    p99_over_med   = if (isTRUE(med > 0)) p99 / med else NA_real_,
+    n_spikes       = if (isTRUE(med > 0)) length(spikes) else NA_integer_,
+    pct_in_spikes  = if (isTRUE(tot > 0) && isTRUE(med > 0))
+                       100 * sum(spikes) / tot else NA_real_,
+    n_over_limit   = if (is.null(map.limit)) NA_integer_ else length(over),
+    pct_over_limit = if (is.null(map.limit) || !isTRUE(tot > 0)) NA_real_
+                     else 100 * sum(over) / tot,
+    gini           = .gini(v))
+}
+
+#' Compare the prediction surfaces of two models, cell by cell
+#'
+#' Answers what the family cross-validation and the in-sample diagnostics both
+#' leave open: when neither can separate the Tweedie and the negative binomial
+#' finalist, do their predictions actually differ, and where?
+#'
+#' The comparison is deliberately two-sided. **Agreement** is the correlation
+#' between the two surfaces and the ratio of their totals -- if those are tight
+#' the choice of family does not matter for the product, and a tie can be left
+#' as a tie. **Spikiness** is the rest of it, and is the half worth reading
+#' first: two surfaces can correlate at 0.99 and still put wildly different
+#' amounts of the total into a handful of cells, because that correlation is
+#' carried by the tens of thousands of cells where both models predict almost
+#' nothing.
+#'
+#' The spike measures are scale-free on purpose (`max_over_med`, `n_spikes`,
+#' `gini`), so a family predicting twice the abundance is not thereby recorded
+#' as twice as spiky. Two cautions come with them. The ones divided by
+#' `median_pos` go meaningless on a near-empty surface, where that denominator
+#' goes denormal -- `NL_EXPL_DRL_RA` RAZO Fall has a median positive cell of
+#' 2.0e-13 and so a `max_over_med` of 1.5e12 off a maximum of 0.31 birds/km^2 --
+#' which is why `median_pos` is returned beside them and should be read with
+#' them. And none of them catches a surface that has blown up *everywhere*:
+#' that is what `map.limit` is for.
+#'
+#' @section What this found on NL_EXPL_DRL_RA:
+#' Petrels Winter, fitted with `tw()` and the model `final.dsm.models` names, so
+#' the surface `03.70` ships: **2,267 cells above `MAX_DENS_VALUE`**, together
+#' holding 99.9997% of the seasonal total, peaking at 1.7e10 birds/km^2 for a
+#' seasonal total of 3.95e12 birds. The `nb()` finalist on the same segments and
+#' the same grid gives 6.3e6. The two surfaces correlate at 0.037.
+#'
+#' The existing concentration check does not see it. `pct_top_n` for that
+#' surface is 14.9%, far below the level `03.70` warns on, because the blow-up
+#' is spread over thousands of cells instead of piled into one -- and
+#' `MAX_DENS_VALUE` is applied only when drawing maps, so every one of those
+#' cells is absent from the picture and present in the file. A concentration
+#' measure asks whether one cell dominates; `n_over_limit` asks whether many
+#' cells are impossible, and only the second question had a useful answer here.
+#'
+#' Concentration is where the response family stops being a detail, which is why
+#' this exists: where one observation dominates, Tweedie and negative binomial
+#' disagree about how likely a huge count is, and the totals diverge
+#' accordingly. See [summarise.prediction.concentration()] for the `Atl IMRP`
+#' Herring Gull case that established the pattern.
+#'
+#' @param paths1,paths2 Character vectors of raster files to compare, one per
+#'   season, in the same order. Both models must have been predicted on the same
+#'   grid; the geometries are checked.
+#' @param season Season labels, the same length as `paths1`.
+#' @param species Character string species code, carried into the output.
+#' @param model1,model2 Character strings naming the two models.
+#' @param cell.area Cell area in km^2, i.e. `predgridCellArea`. The rasters hold
+#'   density, so this is what turns a summed surface into an abundance.
+#' @param top_n How many of the largest cells to accumulate and to list. Default
+#'   10, matching `PRED_CONCENTRATION_TOP_N`.
+#' @param spike.ratio A cell counts as a spike when it exceeds this multiple of
+#'   the surface's median positive density. Default 10.
+#' @param map.limit Optional density above which a cell is implausible, i.e.
+#'   `MAX_DENS_VALUE`. Worth passing: that limit is applied only when drawing
+#'   leaflet maps and never to the rasters that get shared, so cells above it
+#'   are invisible on the map you would check a surface against and fully
+#'   present in the file. `NULL` leaves `n_over_limit` and `pct_over_limit`
+#'   `NA`.
+#' @return A list of two tibbles:
+#'   \describe{
+#'     \item{`$seasons`}{One row per season. Per-model columns are suffixed `1`
+#'       and `2`; `total_ratio`, `max_ratio` and the correlations are the
+#'       pairwise ones. `pct_cells_2x` is the share of cells where the two
+#'       surfaces differ by more than a factor of two, counting only cells where
+#'       at least one model predicts something -- the measure of *where* they
+#'       disagree that a correlation cannot give. `top_n_shared` is how many of
+#'       the two models' `top_n` cells are the same cells: whether they are
+#'       spiky in the same places, as distinct from equally spiky.
+#'       `n_over_limit` and `pct_over_limit` are the runaway check described
+#'       above.}
+#'     \item{`$cells`}{The `top_n` largest cells of each model, with the other
+#'       model's value for the same cell, the coordinates and the ratio. This is
+#'       what names the spots -- a caller can look each one up in the
+#'       extrapolation assessment, exactly as `03.70` does for the chosen
+#'       model.}
+#'   }
+#'   A season whose rasters are missing gets a row with `missing_raster` set
+#'   rather than being dropped, so the caller can see which comparison did not
+#'   happen.
+#' @examples
+#' \dontrun{
+#' compare.finalist.surfaces(
+#'   paths1 = file.path(predDir,
+#'     sprintf("ATPU.%s.dsm_tw_allpred_abund_factor.4_sqkm.tif", season.names)),
+#'   paths2 = file.path(predDir,
+#'     sprintf("ATPU.%s.dsm_nb_allpred_abund_factor.4_sqkm.tif", season.names)),
+#'   season = season.names, species = "ATPU",
+#'   model1 = "dsm_tw_allpred_abund_factor",
+#'   model2 = "dsm_nb_allpred_abund_factor",
+#'   cell.area = predgridCellArea, map.limit = MAX_DENS_VALUE)
+#' }
+#' @export
+compare.finalist.surfaces <- function(paths1, paths2, season, species,
+                                      model1, model2, cell.area,
+                                      top_n = 10, spike.ratio = 10,
+                                      map.limit = NULL) {
+  checkmate::expect_character(paths1, min.len = 1, any.missing = FALSE)
+  checkmate::expect_character(paths2, len = length(paths1), any.missing = FALSE)
+  checkmate::expect_atomic(season, len = length(paths1))
+  checkmate::expect_string(species, min.chars = 1)
+  checkmate::expect_string(model1, min.chars = 1)
+  checkmate::expect_string(model2, min.chars = 1)
+  checkmate::expect_number(cell.area, lower = 0)
+  checkmate::expect_count(top_n, positive = TRUE)
+  checkmate::expect_number(spike.ratio, lower = 1)
+  checkmate::expect_number(map.limit, lower = 0, null.ok = TRUE)
+
+  per.season <- purrr::pmap(list(paths1, paths2, season), function(p1, p2, se) {
+    se <- as.character(se)
+    if (!file.exists(p1) || !file.exists(p2))
+      return(list(
+        seasons = tibble::tibble(species = species, season = se,
+                                 model1 = model1, model2 = model2,
+                                 missing_raster = TRUE),
+        cells = NULL))
+
+    r1 <- terra::rast(p1)
+    r2 <- terra::rast(p2)
+    terra::compareGeom(r1, r2, stopOnError = TRUE)
+
+    v1all <- terra::values(r1)[, 1]
+    v2all <- terra::values(r2)[, 1]
+
+    # Each model's own finite cells for its own totals and spike measures, the
+    # intersection for anything pairwise. These are the same set in every case
+    # seen so far -- both surfaces come off one prediction grid -- but a family
+    # that produced a non-finite value somewhere is itself the kind of finding
+    # this function exists to surface, so it is counted rather than assumed
+    # away.
+    ok1 <- is.finite(v1all)
+    ok2 <- is.finite(v2all)
+    both <- ok1 & ok2
+
+    s1 <- .surface.spikes(v1all[ok1], top_n, spike.ratio, map.limit)
+    s2 <- .surface.spikes(v2all[ok2], top_n, spike.ratio, map.limit)
+
+    a <- v1all[both]
+    b <- v2all[both]
+
+    # Cells where at least one model predicts something. A ratio between two
+    # cells that both round to nothing is arithmetically enormous and
+    # ecologically empty, so the disagreement measure is restricted to cells
+    # carrying some density in at least one of the two.
+    live <- (a > 0) | (b > 0)
+    hi <- pmax(a[live], b[live])
+    lo <- pmin(a[live], b[live])
+    ratio <- hi / pmax(lo, .Machine$double.xmin)
+
+    # The cells each model calls its largest, and what the other model says
+    # about the same ground.
+    top.of <- function(v, ok, mod, other) {
+      idx <- which(ok)[utils::head(order(v[ok], decreasing = TRUE), top_n)]
+      if (!length(idx)) return(NULL)
+      xy <- terra::xyFromCell(r1, idx)
+      tibble::tibble(
+        species = species, season = se, top_of = mod, rank = seq_along(idx),
+        cell = idx, x = xy[, 1], y = xy[, 2],
+        dens = v[idx], other_dens = other[idx],
+        ratio = v[idx] / other[idx])
+    }
+
+    seasons <- tibble::tibble(species = species, season = se,
+                              model1 = model1, model2 = model2,
+                              missing_raster = FALSE,
+                              cells_compared = sum(both),
+                              nonfinite1 = sum(!ok1),
+                              nonfinite2 = sum(!ok2)) %>%
+      dplyr::bind_cols(dplyr::rename_with(s1, ~ paste0(.x, "1")),
+                       dplyr::rename_with(s2, ~ paste0(.x, "2"))) %>%
+      dplyr::mutate(
+        abund1       = .data$total1 * cell.area,
+        abund2       = .data$total2 * cell.area,
+        total_ratio  = if (isTRUE(s2$total > 0)) s1$total / s2$total
+                       else NA_real_,
+        max_ratio    = if (isTRUE(s2$max > 0)) s1$max / s2$max else NA_real_,
+        pearson_r    = .safe.cor(a, b, "pearson"),
+        spearman_r   = .safe.cor(a, b, "spearman"),
+        # On the log scale as well, because the untransformed correlation
+        # between two zero-inflated surfaces is set by their few largest cells
+        # and reports near-perfect agreement almost regardless of the rest.
+        log_r        = .safe.cor(log1p(a), log1p(b), "pearson"),
+        live_cells   = sum(live),
+        pct_cells_2x = if (sum(live)) 100 * sum(ratio > 2) / sum(live)
+                       else NA_real_,
+        median_abs_diff = if (length(a)) stats::median(abs(a - b))
+                          else NA_real_,
+        max_abs_diff    = if (length(a)) max(abs(a - b)) else NA_real_)
+
+    cells <- dplyr::bind_rows(top.of(v1all, ok1, model1, v2all),
+                              top.of(v2all, ok2, model2, v1all))
+    seasons$top_n_shared <- if (!nrow(cells)) NA_integer_ else
+      length(intersect(cells$cell[cells$top_of == model1],
+                       cells$cell[cells$top_of == model2]))
+
+    list(seasons = seasons, cells = cells)
+  })
+
+  list(seasons = dplyr::bind_rows(purrr::map(per.season, "seasons")),
+       cells   = dplyr::bind_rows(purrr::map(per.season, "cells")))
+}
+
 #' Copy a species prediction HTML summary to the versioned predictions folder
 #'
 #' Copies the HTML report for the final model of \code{spec} into
