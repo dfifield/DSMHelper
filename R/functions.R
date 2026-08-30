@@ -2682,6 +2682,196 @@ recreate.sst.mnth.from.files <- function(folder, pattern){
   r
 }
 
+#' Decode a CF-convention time axis to dates
+#'
+#' Handles the \code{"<unit> since <origin>"} form the CF conventions require,
+#' e.g. \code{"seconds since 1970-01-01T00:00:00Z"}. Anything else returns
+#' \code{NULL} rather than a guess - a wrong date here would be worse than no
+#' date, because it would look like an answer.
+#'
+#' @param vals Numeric vector of time-axis values.
+#' @param units The axis's \code{units} attribute.
+#' @return A \code{Date} vector, or \code{NULL} if \code{units} is not a
+#'   recognised CF time string.
+#' @examples
+#' decode.cf.time(1673827200, "seconds since 1970-01-01T00:00:00Z")
+#' @export
+decode.cf.time <- function(vals, units) {
+  checkmate::assert_numeric(vals)
+  checkmate::assert_string(units, na.ok = TRUE)
+
+  if (is.na(units) || !grepl(" since ", units, fixed = TRUE)) return(NULL)
+
+  parts  <- strsplit(units, " since ", fixed = TRUE)[[1]]
+  unit   <- tolower(trimws(parts[1]))
+  origin <- trimws(parts[2])
+
+  # "1970-01-01T00:00:00Z" and "1970-01-01 00:00:00" are both legal.
+  origin <- sub("T", " ", origin, fixed = TRUE)
+  origin <- sub("Z$", "", origin)
+  origin <- as.POSIXct(origin, tz = "UTC")
+  if (is.na(origin)) return(NULL)
+
+  mult <- switch(unit,
+                 second = , seconds = , sec = , secs = 1,
+                 minute = , minutes = , min = , mins = 60,
+                 hour   = , hours   = , hr  = , hrs  = 3600,
+                 day    = , days    = 86400,
+                 NULL)
+  if (is.null(mult)) return(NULL)
+
+  as.Date(origin + vals * mult)
+}
+
+
+#' Time coverage of a single netCDF file
+#'
+#' Finds the file's time axis - by CF units first, since the name is only a
+#' convention - decodes it with \code{\link{decode.cf.time}}, and summarises
+#' what it spans.
+#'
+#' Never throws: a file that will not open, has no time axis, or carries units
+#' this cannot parse comes back as a row with \code{note} filled in and the
+#' date columns \code{NA}. That is deliberate, because the point of scanning a
+#' folder is to find the odd file out, and stopping on it would report the
+#' problem by hiding every file after it.
+#'
+#' @param f Path to a \code{.nc} file.
+#' @return A one-row tibble: \code{file}, \code{n_times}, \code{first},
+#'   \code{last}, \code{years}, \code{months}, \code{note}.
+#' @examples
+#' \dontrun{
+#' get.nc.file.times("GIS/Spatial covars/NetCDF/etopo180.nc")
+#' }
+#' @export
+get.nc.file.times <- function(f) {
+  checkmate::assert_file_exists(f)
+
+  none <- function(note)
+    tibble::tibble(file = basename(f), n_times = NA_integer_,
+                   first = as.Date(NA), last = as.Date(NA),
+                   years = NA_character_, months = NA_character_, note = note)
+
+  nc <- try(ncdf4::nc_open(f), silent = TRUE)
+  if (inherits(nc, "try-error"))
+    return(none(paste("could not open:", trimws(attr(nc, "condition")$message))))
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+
+  # By units, not by name: "time" is a convention, "since" is the standard.
+  # Fall back to the usual names for a file that omits the units attribute.
+  dim.units <- vapply(nc$dim, function(d)
+    if (is.null(d$units)) NA_character_ else d$units, character(1))
+  is.time <- !is.na(dim.units) & grepl(" since ", dim.units, fixed = TRUE)
+  if (!any(is.time))
+    is.time <- tolower(names(nc$dim)) %in% c("time", "t")
+  if (!any(is.time)) return(none("no time dimension (static)"))
+
+  d <- nc$dim[[which(is.time)[1]]]
+  dates <- decode.cf.time(d$vals,
+                          if (is.null(d$units)) NA_character_ else d$units)
+  if (is.null(dates))
+    return(none(paste0("time units not understood: ", d$units)))
+
+  dates <- sort(dates)
+  tibble::tibble(
+    file    = basename(f),
+    n_times = length(dates),
+    first   = min(dates),
+    last    = max(dates),
+    years   = paste(sort(unique(format(dates, "%Y"))), collapse = ", "),
+    months  = paste(sort(unique(format(dates, "%Y-%m"))), collapse = " "),
+    note    = "")
+}
+
+
+#' What years is a folder of netCDF files actually from?
+#'
+#' Opens every netCDF in a folder and reports its time coverage, then the
+#' folder's coverage as a whole: the overall span, months that appear in more
+#' than one file, and months missing from inside the span.
+#'
+#' It exists because the downloads are named by ERDDAP hash -
+#' \code{jplMURSST41mday_14d0_c28b_14ce.nc} - so the filename says nothing
+#' about what is inside, and a year that was never downloaded looks exactly
+#' like a year that was. Worth running whenever a covariate download changes,
+#' and on a new SubProject before trusting the covariates: a segment whose
+#' month has no raster is dropped by the NA filter before fitting.
+#'
+#' \strong{This reads the SOURCE netCDFs, not the processed rasters in
+#' \code{predLayerStudyAreaDir}.} The two can disagree - the processed rasters
+#' accumulate across runs and are not cleaned up, so a month whose source file
+#' has since been removed can still have a raster. Comparing the two is the
+#' point; do not read a clean report here as proof the pipeline has what it
+#' needs, or vice versa.
+#'
+#' @param folder Folder to scan.
+#' @param pattern Regex for the files to read.
+#' @param report.gaps Also list months with no data between the earliest and
+#'   latest timestep found anywhere in the folder. Assumes monthly coverage was
+#'   wanted, which is what the SST downloads are; harmless otherwise, since a
+#'   month counts as covered when any timestep falls inside it.
+#' @return Invisibly, one row per file, as from \code{\link{get.nc.file.times}}.
+#'   Prints a summary.
+#' @examples
+#' \dontrun{
+#' report.nc.time.coverage("GIS/Spatial covars/NetCDF/sst")
+#' }
+#' @export
+report.nc.time.coverage <- function(folder, pattern = "[.]nc$",
+                                    report.gaps = TRUE) {
+  checkmate::assert_directory_exists(folder)
+  checkmate::assert_string(pattern)
+  checkmate::assert_flag(report.gaps)
+
+  files <- list.files(folder, pattern = pattern, full.names = TRUE,
+                      ignore.case = TRUE)
+  if (!length(files)) {
+    message("No files matching ", pattern, " in ", folder)
+    return(invisible(NULL))
+  }
+
+  res <- purrr::map_dfr(files, get.nc.file.times)
+
+  cat(sprintf("\n%d netCDF file(s) in %s\n\n", nrow(res), folder))
+  print(as.data.frame(res[, c("file", "n_times", "first", "last", "years",
+                              "note")]),
+        row.names = FALSE)
+
+  dated <- dplyr::filter(res, !is.na(first))
+  if (!nrow(dated)) {
+    cat("\nNo file in this folder carries a time axis.\n")
+    return(invisible(res))
+  }
+
+  all.months <- sort(unique(unlist(strsplit(dated$months, " "))))
+  cat(sprintf("\nOverall: %s to %s, %d distinct month(s), years %s\n",
+              min(dated$first), max(dated$last), length(all.months),
+              paste(sort(unique(unlist(strsplit(dated$years, ", ")))),
+                    collapse = ", ")))
+
+  # Overlap is worth knowing: these are hand-downloaded, so the same month
+  # arriving in two files is easy to do and easy to miss.
+  dup <- unlist(strsplit(dated$months, " "))
+  dup <- names(which(table(dup) > 1))
+  if (length(dup))
+    cat(sprintf("Months present in more than one file: %s\n",
+                paste(sort(dup), collapse = ", ")))
+
+  if (report.gaps) {
+    want <- format(seq(as.Date(paste0(min(all.months), "-01")),
+                       as.Date(paste0(max(all.months), "-01")),
+                       by = "month"), "%Y-%m")
+    gaps <- setdiff(want, all.months)
+    if (length(gaps))
+      cat(sprintf("MISSING month(s) inside that span: %s\n",
+                  paste(gaps, collapse = ", ")))
+    else
+      cat("No gaps: every month in that span is present.\n")
+  }
+
+  invisible(res)
+}
+
 #' Create a raster from one time slice of a NetCDF array
 #'
 #' Extracts the layer at position \code{index} from \code{dat}, flips the
