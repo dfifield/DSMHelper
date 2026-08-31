@@ -2,7 +2,7 @@
 % Please edit documentation in R/functions.R
 \name{get.nc.file.times}
 \alias{get.nc.file.times}
-\title{Time coverage of a single netCDF file}
+\title{Time coverage and spatial extent of a single netCDF file}
 \usage{
 get.nc.file.times(f)
 }
@@ -11,19 +11,22 @@ get.nc.file.times(f)
 }
 \value{
 A one-row tibble: \code{file}, \code{n_times}, \code{first},
-\code{last}, \code{years}, \code{months}, \code{note}.
+\code{last}, \code{years}, \code{months}, \code{xmin}, \code{xmax},
+\code{ymin}, \code{ymax}, \code{note}. Extent is cell edges, as
+\code{terra::ext()} reports it.
 }
 \description{
-Finds the file's time axis - by CF units first, since the name is only a
-convention - decodes it with \code{\link{decode.cf.time}}, and summarises
-what it spans.
+Reads the file's time axis - by CF units first, since the name is only a
+convention - decodes it with \code{\link{decode.cf.time}}, and reads its
+spatial extent with the same approach.
 }
 \details{
 Never throws: a file that will not open, has no time axis, or carries units
 this cannot parse comes back as a row with \code{note} filled in and the
 date columns \code{NA}. That is deliberate, because the point of scanning a
 folder is to find the odd file out, and stopping on it would report the
-problem by hiding every file after it.
+problem by hiding every file after it. A file with no time axis still gets
+its extent read - a bathymetry grid has no dates but very much has a box.
 }
 \examples{
 \dontrun{

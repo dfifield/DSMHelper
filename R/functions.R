@@ -2724,21 +2724,73 @@ decode.cf.time <- function(vals, units) {
 }
 
 
-#' Time coverage of a single netCDF file
+#' Spatial extent of an open netCDF handle
 #'
-#' Finds the file's time axis - by CF units first, since the name is only a
-#' convention - decodes it with \code{\link{decode.cf.time}}, and summarises
-#' what it spans.
+#' Finds the longitude and latitude axes and returns the extent as cell
+#' \emph{edges}, matching \code{terra::ext()} rather than the axis values,
+#' which are cell centres. Half a cell is not much, but a coverage test that
+#' is half a cell wrong is wrong in the direction that matters - it says a
+#' file does not reach somewhere it does.
+#'
+#' Axes are found by their CF \code{units} (\code{degrees_east} /
+#' \code{degrees_north}), falling back to the usual names only when a file
+#' omits the attribute. Same reasoning as the time axis: the name is a
+#' convention, the units are the standard.
+#'
+#' @param nc An open \code{ncdf4} handle.
+#' @return Named list of \code{xmin}, \code{xmax}, \code{ymin}, \code{ymax},
+#'   all \code{NA_real_} if the axes cannot be identified.
+#' @keywords internal
+nc.spatial.extent <- function(nc) {
+  none <- list(xmin = NA_real_, xmax = NA_real_,
+               ymin = NA_real_, ymax = NA_real_)
+
+  units.of <- vapply(nc$dim, function(d)
+    if (is.null(d$units)) NA_character_ else tolower(d$units), character(1))
+  names.of <- tolower(names(nc$dim))
+
+  pick <- function(unit, aliases) {
+    i <- which(!is.na(units.of) & units.of == unit)
+    if (!length(i)) i <- which(names.of %in% aliases)
+    if (length(i)) nc$dim[[i[1]]]$vals else NULL
+  }
+
+  lon <- pick("degrees_east",  c("longitude", "lon", "x"))
+  lat <- pick("degrees_north", c("latitude",  "lat", "y"))
+  if (is.null(lon) || is.null(lat)) return(none)
+
+  # Centres to edges. A single-valued axis has no spacing to halve.
+  edges <- function(v) {
+    v <- sort(v)
+    if (length(v) < 2) return(c(v[1], v[1]))
+    sp <- stats::median(diff(v))
+    c(v[1] - sp / 2, v[length(v)] + sp / 2)
+  }
+
+  x <- edges(lon)
+  y <- edges(lat)
+  list(xmin = x[1], xmax = x[2], ymin = y[1], ymax = y[2])
+}
+
+
+#' Time coverage and spatial extent of a single netCDF file
+#'
+#' Reads the file's time axis - by CF units first, since the name is only a
+#' convention - decodes it with \code{\link{decode.cf.time}}, and reads its
+#' spatial extent with the same approach.
 #'
 #' Never throws: a file that will not open, has no time axis, or carries units
 #' this cannot parse comes back as a row with \code{note} filled in and the
 #' date columns \code{NA}. That is deliberate, because the point of scanning a
 #' folder is to find the odd file out, and stopping on it would report the
-#' problem by hiding every file after it.
+#' problem by hiding every file after it. A file with no time axis still gets
+#' its extent read - a bathymetry grid has no dates but very much has a box.
 #'
 #' @param f Path to a \code{.nc} file.
 #' @return A one-row tibble: \code{file}, \code{n_times}, \code{first},
-#'   \code{last}, \code{years}, \code{months}, \code{note}.
+#'   \code{last}, \code{years}, \code{months}, \code{xmin}, \code{xmax},
+#'   \code{ymin}, \code{ymax}, \code{note}. Extent is cell edges, as
+#'   \code{terra::ext()} reports it.
 #' @examples
 #' \dontrun{
 #' get.nc.file.times("GIS/Spatial covars/NetCDF/etopo180.nc")
@@ -2747,15 +2799,27 @@ decode.cf.time <- function(vals, units) {
 get.nc.file.times <- function(f) {
   checkmate::assert_file_exists(f)
 
-  none <- function(note)
-    tibble::tibble(file = basename(f), n_times = NA_integer_,
-                   first = as.Date(NA), last = as.Date(NA),
-                   years = NA_character_, months = NA_character_, note = note)
+  row <- function(note, ext = NULL, n_times = NA_integer_,
+                  first = as.Date(NA), last = as.Date(NA),
+                  years = NA_character_, months = NA_character_) {
+    if (is.null(ext))
+      ext <- list(xmin = NA_real_, xmax = NA_real_,
+                  ymin = NA_real_, ymax = NA_real_)
+    tibble::tibble(file = basename(f), n_times = n_times,
+                   first = first, last = last,
+                   years = years, months = months,
+                   xmin = ext$xmin, xmax = ext$xmax,
+                   ymin = ext$ymin, ymax = ext$ymax,
+                   note = note)
+  }
 
   nc <- try(ncdf4::nc_open(f), silent = TRUE)
   if (inherits(nc, "try-error"))
-    return(none(paste("could not open:", trimws(attr(nc, "condition")$message))))
+    return(row(paste("could not open:", trimws(attr(nc, "condition")$message))))
   on.exit(ncdf4::nc_close(nc), add = TRUE)
+
+  # Extent first, so a file with no usable time axis still reports its box.
+  ext <- nc.spatial.extent(nc)
 
   # By units, not by name: "time" is a convention, "since" is the standard.
   # Fall back to the usual names for a file that omits the units attribute.
@@ -2764,38 +2828,43 @@ get.nc.file.times <- function(f) {
   is.time <- !is.na(dim.units) & grepl(" since ", dim.units, fixed = TRUE)
   if (!any(is.time))
     is.time <- tolower(names(nc$dim)) %in% c("time", "t")
-  if (!any(is.time)) return(none("no time dimension (static)"))
+  if (!any(is.time)) return(row("no time dimension (static)", ext))
 
   d <- nc$dim[[which(is.time)[1]]]
   dates <- decode.cf.time(d$vals,
                           if (is.null(d$units)) NA_character_ else d$units)
   if (is.null(dates))
-    return(none(paste0("time units not understood: ", d$units)))
+    return(row(paste0("time units not understood: ", d$units), ext))
 
   dates <- sort(dates)
-  tibble::tibble(
-    file    = basename(f),
-    n_times = length(dates),
-    first   = min(dates),
-    last    = max(dates),
-    years   = paste(sort(unique(format(dates, "%Y"))), collapse = ", "),
-    months  = paste(sort(unique(format(dates, "%Y-%m"))), collapse = " "),
-    note    = "")
+  row("", ext,
+      n_times = length(dates),
+      first   = min(dates),
+      last    = max(dates),
+      years   = paste(sort(unique(format(dates, "%Y"))), collapse = ", "),
+      months  = paste(sort(unique(format(dates, "%Y-%m"))), collapse = " "))
 }
 
 
-#' What years is a folder of netCDF files actually from?
+#' What years - and what area - is a folder of netCDF files actually from?
 #'
-#' Opens every netCDF in a folder and reports its time coverage, then the
-#' folder's coverage as a whole: the overall span, months that appear in more
-#' than one file, and months missing from inside the span.
+#' Opens every netCDF in a folder and reports each file's time coverage and
+#' spatial extent, then the folder as a whole: the overall span, months that
+#' appear in more than one file, months missing from inside the span, and the
+#' distinct bounding boxes present.
 #'
 #' It exists because the downloads are named by ERDDAP hash -
 #' \code{jplMURSST41mday_14d0_c28b_14ce.nc} - so the filename says nothing
 #' about what is inside, and a year that was never downloaded looks exactly
-#' like a year that was. Worth running whenever a covariate download changes,
-#' and on a new SubProject before trusting the covariates: a segment whose
-#' month has no raster is dropped by the NA filter before fitting.
+#' like a year that was. That matters because a segment whose month has no
+#' raster is dropped by the NA filter before fitting, which is silent.
+#'
+#' \strong{Mixed extents are called out, because they are the quiet failure.}
+#' These files are hand-downloaded a year at a time, so re-downloading part of
+#' a series under a wider box is easy to do and leaves a folder whose covariate
+#' silently changes footprint partway through the time series. One box is
+#' reported as a single line; more than one is reported per box, with the files
+#' listed.
 #'
 #' \strong{This reads the SOURCE netCDFs, not the processed rasters in
 #' \code{predLayerStudyAreaDir}.} The two can disagree - the processed rasters
@@ -2837,6 +2906,43 @@ report.nc.time.coverage <- function(folder, pattern = "[.]nc$",
                               "note")]),
         row.names = FALSE)
 
+  ###--------------------------------------------------------------------------
+  ### Spatial extent
+  placed <- dplyr::filter(res, !is.na(xmin))
+  if (!nrow(placed)) {
+    cat("\nNo file has identifiable longitude/latitude axes.\n")
+  } else {
+    boxes <- placed %>%
+      dplyr::count(xmin, xmax, ymin, ymax, name = "n_files") %>%
+      dplyr::arrange(dplyr::desc(n_files))
+
+    if (nrow(boxes) == 1) {
+      cat(sprintf(
+        "\nExtent: all %d file(s) share lon %.4f to %.4f, lat %.4f to %.4f\n",
+        nrow(placed), boxes$xmin, boxes$xmax, boxes$ymin, boxes$ymax))
+    } else {
+      cat(sprintf("\nMIXED EXTENTS - %d different boxes in one folder:\n\n",
+                  nrow(boxes)))
+      print(as.data.frame(boxes), row.names = FALSE, digits = 8)
+      cat("\nA covariate whose footprint changes partway through the series is",
+          "\nalmost never what you want. Files by box:\n")
+      for (i in seq_len(nrow(boxes))) {
+        f <- placed$file[placed$xmin == boxes$xmin[i] &
+                           placed$xmax == boxes$xmax[i] &
+                           placed$ymin == boxes$ymin[i] &
+                           placed$ymax == boxes$ymax[i]]
+        cat(sprintf("  lon %.4f..%.4f lat %.4f..%.4f : %s\n",
+                    boxes$xmin[i], boxes$xmax[i], boxes$ymin[i], boxes$ymax[i],
+                    paste(f, collapse = ", ")))
+      }
+    }
+    if (nrow(placed) < nrow(res))
+      cat(sprintf("(%d file(s) had no identifiable lon/lat axes)\n",
+                  nrow(res) - nrow(placed)))
+  }
+
+  ###--------------------------------------------------------------------------
+  ### Time
   dated <- dplyr::filter(res, !is.na(first))
   if (!nrow(dated)) {
     cat("\nNo file in this folder carries a time axis.\n")

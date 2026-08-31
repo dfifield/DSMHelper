@@ -2,7 +2,7 @@
 % Please edit documentation in R/functions.R
 \name{report.nc.time.coverage}
 \alias{report.nc.time.coverage}
-\title{What years is a folder of netCDF files actually from?}
+\title{What years - and what area - is a folder of netCDF files actually from?}
 \usage{
 report.nc.time.coverage(folder, pattern = "[.]nc$", report.gaps = TRUE)
 }
@@ -21,17 +21,24 @@ Invisibly, one row per file, as from \code{\link{get.nc.file.times}}.
 Prints a summary.
 }
 \description{
-Opens every netCDF in a folder and reports its time coverage, then the
-folder's coverage as a whole: the overall span, months that appear in more
-than one file, and months missing from inside the span.
+Opens every netCDF in a folder and reports each file's time coverage and
+spatial extent, then the folder as a whole: the overall span, months that
+appear in more than one file, months missing from inside the span, and the
+distinct bounding boxes present.
 }
 \details{
 It exists because the downloads are named by ERDDAP hash -
 \code{jplMURSST41mday_14d0_c28b_14ce.nc} - so the filename says nothing
 about what is inside, and a year that was never downloaded looks exactly
-like a year that was. Worth running whenever a covariate download changes,
-and on a new SubProject before trusting the covariates: a segment whose
-month has no raster is dropped by the NA filter before fitting.
+like a year that was. That matters because a segment whose month has no
+raster is dropped by the NA filter before fitting, which is silent.
+
+\strong{Mixed extents are called out, because they are the quiet failure.}
+These files are hand-downloaded a year at a time, so re-downloading part of
+a series under a wider box is easy to do and leaves a folder whose covariate
+silently changes footprint partway through the time series. One box is
+reported as a single line; more than one is reported per box, with the files
+listed.
 
 \strong{This reads the SOURCE netCDFs, not the processed rasters in
 \code{predLayerStudyAreaDir}.} The two can disagree - the processed rasters
