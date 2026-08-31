@@ -2,6 +2,7 @@
 
 export(add.dist.sd)
 export(adjust.time.covars)
+export(align.raster.crs)
 export(apply.dsm.var)
 export(assess.extrapolation)
 export(assign.blocks)

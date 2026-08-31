@@ -2350,6 +2350,157 @@ copy.env <- function(src, dst) {
     assign(n, get(n, src), dst)
 }
 
+#' Restamp a raster's CRS when it differs from the target in name only
+#'
+#' Returns \code{r} with its CRS replaced by \code{target} when the two are
+#' the same coordinate system carrying different *names*, and returns \code{r}
+#' untouched (with a warning) when they are genuinely different.
+#'
+#' \strong{Why this exists.} \code{terra::extract()} compares CRSs with
+#' \code{terra::same.crs()}, which compares WKT2 strings, and the ERDAS Imagine
+#' (\code{.img} / HFA) driver every raster in this pipeline is written with does
+#' not round-trip an \emph{anonymous} datum. A CRS built with
+#' \code{+ellps=WGS84} and no \code{+datum=} gets the datum name "Unknown
+#' based on WGS 84 ellipsoid"; HFA writes that back in ESRI flavour as
+#' \code{D_Unknown_based_on_WGS_84_ellipsoid}, capitalises \code{ANGLEUNIT} to
+#' \code{"Degree"}, renames the conversion \code{"unnamed"} and drops the
+#' PRIMEM \code{ID["EPSG",8901]}. Nothing numeric changes - \code{crs(r, proj =
+#' TRUE)} comes back byte-identical to the string it was written with, which is
+#' why the projections look the same - but \code{same.crs()} says \code{FALSE},
+#' so \code{extract()} silently reprojects the vector and warns
+#' \code{"[extract] transforming vector data to the CRS of the raster"} once per
+#' call.
+#'
+#' Measured on \code{NL_EXPL_DRL_RA}, whose \code{segProj} comes from
+#' \code{dftools::pick_aea_projection()} and therefore has no \code{+datum=}:
+#' the implied transform moves points by \strong{0 m} at +/-400 km and the
+#' extracted depths are identical to every digit either way. So the warning is
+#' cosmetic - but it is cosmetic \emph{here}, for a reason worth checking rather
+#' than assuming, which is what this function does.
+#'
+#' The projection is irrelevant; the missing datum is the whole cause. Round
+#' tripping through \code{.img}: AEA with \code{+ellps} only FALSE, AEA with
+#' \code{+datum=WGS84} TRUE, LAEA with \code{+datum=WGS84} TRUE (which is why
+#' the hard-coded LAEA SubProjects have never shown this), LAEA with
+#' \code{+ellps} only FALSE. GeoTIFF round-trips all four.
+#'
+#' This function treats the symptom. Atlantic DSM issue #60 tracks removing the
+#' cause - adding \code{+datum=WGS84} to
+#' \code{dftools::pick_aea_projection()} and writing GeoTIFF rather than
+#' \code{.img}. Both invalidate saved artefacts, so they have to land together
+#' in one re-run, which is why this is here in the meantime. Keep the call
+#' afterwards: it costs nothing when the CRSs already agree, and it is what
+#' would catch the next format-driven mismatch instead of letting
+#' \code{extract()} reproject silently.
+#'
+#' \strong{This deliberately does not just stamp the CRS on.} A blanket
+#' \code{crs(r) <- target} would also silence a genuine mismatch, and that
+#' warning from \code{extract()} is then the only thing standing between you and
+#' covariates extracted at the wrong places. So equivalence is \emph{measured}:
+#' points spread over the raster's own extent are projected from \code{target}
+#' into the raster's CRS, and the CRS is replaced only if none of them moves
+#' more than \code{tol} metres. Note this tests the property that actually
+#' matters - that the extract locations do not move - rather than comparing
+#' proj4 strings, which are lossy about datums in exactly the way that would
+#' make a string comparison unsafe here.
+#'
+#' @param r A \code{SpatRaster}.
+#' @param target CRS to restamp with, in any form \code{terra::crs()} accepts
+#'   (typically the project's \code{segProj} string).
+#' @param what Character label for \code{r} used in messages.
+#' @param tol Maximum displacement, in the CRS's own units (metres here), that
+#'   still counts as "the same place". Default 1e-6, i.e. a micron; the
+#'   identity pipeline this is written for measures exactly 0.
+#' @param verbose If \code{TRUE}, report when a restamp happens.
+#' @return \code{r}, with its CRS replaced by \code{target} if and only if the
+#'   two describe the same coordinate system.
+#' @examples
+#' \dontrun{
+#' # segProj here has +ellps=WGS84 and no +datum=, so .img mangles its names.
+#' depth <- terra::rast(file.path(predLayerStudyAreaDir, "depth.img"))
+#' terra::same.crs(depth, segProj)                       # FALSE
+#' depth <- align.raster.crs(depth, segProj, "depth.img", verbose = TRUE)
+#' terra::same.crs(depth, segProj)                       # TRUE
+#' }
+#' @export
+align.raster.crs <- function(r,
+                             target,
+                             what = "raster",
+                             tol = 1e-6,
+                             verbose = FALSE) {
+
+  checkmate::expect_class(r, "SpatRaster")
+  checkmate::expect_string(what, min.chars = 1)
+  checkmate::expect_number(tol, lower = 0, finite = TRUE)
+  checkmate::expect_flag(verbose)
+
+  target.crs <- terra::crs(target)
+  if (!nzchar(target.crs))
+    stop("align.raster.crs: target CRS is empty or unrecognised.")
+
+  # Already agree on the WKT - nothing to do, and extract() will not warn.
+  if (terra::same.crs(r, target.crs))
+    return(r)
+
+  if (!nzchar(terra::crs(r))) {
+    warning(sprintf(
+      paste0("align.raster.crs: %s has no CRS, so equivalence cannot be ",
+             "tested. Leaving its CRS alone."),
+      what), immediate. = TRUE)
+    return(r)
+  }
+
+  # Measure the transform on a grid spanning the raster's own extent, so the
+  # test covers the area the extract will actually happen over.
+  e <- terra::ext(r)
+  probe <- expand.grid(x = seq(e[1], e[2], length.out = 5),
+                       y = seq(e[3], e[4], length.out = 5))
+  v <- terra::vect(probe, geom = c("x", "y"), crs = target.crs)
+
+  moved <- try({
+    pv <- terra::project(v, terra::crs(r))
+    # project() can drop points it cannot transform, which would make the
+    # comparison below meaningless rather than merely wrong.
+    if (nrow(pv) != nrow(probe))
+      stop("projection dropped ", nrow(probe) - nrow(pv), " of ", nrow(probe),
+           " probe points")
+    max(abs(terra::crds(pv) - as.matrix(probe)))
+  }, silent = TRUE)
+
+  if (inherits(moved, "try-error") || !is.finite(moved)) {
+    warning(sprintf(
+      paste0("align.raster.crs: could not project between the target CRS and ",
+             "%s to test them (%s), so leaving its CRS alone. extract() will ",
+             "transform and warn."),
+      what,
+      if (inherits(moved, "try-error"))
+        trimws(conditionMessage(attr(moved, "condition")))
+      else "non-finite result"),
+      immediate. = TRUE)
+    return(r)
+  }
+
+  if (moved > tol) {
+    warning(sprintf(
+      paste0("align.raster.crs: %s is in a DIFFERENT CRS from the target, not ",
+             "merely a differently-named one - probe points move up to %g map ",
+             "units. Leaving its CRS alone; extract() will transform, which ",
+             "is the right thing to do but is worth knowing about."),
+      what, moved), immediate. = TRUE)
+    return(r)
+  }
+
+  if (verbose)
+    message(sprintf(
+      paste0("Restamping %s with the target CRS: same coordinate system, ",
+             "different WKT names (max probe displacement %g map units). ",
+             "See ?align.raster.crs."), what, moved))
+
+  terra::crs(r) <- target.crs
+  r
+}
+
+
 #' Build segment data with environmental covariates from watch data
 #'
 #' Creates the DSM segment data frame from \code{the.data$watches}, extracts
@@ -2415,11 +2566,21 @@ create.segdata <- function(the.data,
     stringr::str_sort()
 
   ### Depth and other static rasters
+  #
+  # Every raster read here is passed through align.raster.crs(). They are
+  # written as .img, whose HFA driver does not round-trip an anonymous datum,
+  # so on a SubProject whose segProj carries +ellps= but no +datum= the WKT
+  # that comes back differs from outproj in its NAMES only. That is enough for
+  # terra::extract() to reproject the vector and warn once per extract. The
+  # restamp is measured, not assumed - see ?align.raster.crs, which also
+  # records why the reprojection was harmless when this was diagnosed.
   # Depth
-  depth <- terra::rast(file.path(predLayerStudyAreaDir, "depth.img"))
+  depth <- terra::rast(file.path(predLayerStudyAreaDir, "depth.img")) %>%
+    align.raster.crs(outproj, what = "depth.img", verbose = verbose)
 
   # Depth gradient
-  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, "depth.g.img"))
+  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, "depth.g.img")) %>%
+    align.raster.crs(outproj, what = "depth.g.img", verbose = verbose)
 
   # SST
   #
@@ -2454,11 +2615,13 @@ create.segdata <- function(the.data,
     stop("create.segdata: no SST raster exists for any month in the segment data.")
 
   sst <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
-                               paste0("sst.", sst.available, ".img")))
+                               paste0("sst.", sst.available, ".img"))) %>%
+    align.raster.crs(outproj, what = "sst rasters", verbose = verbose)
 
   # SST gradient
   sst.g <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
-                                 paste0("sst.g.", sst.available, ".img")))
+                                 paste0("sst.g.", sst.available, ".img"))) %>%
+    align.raster.crs(outproj, what = "sst.g rasters", verbose = verbose)
 
   ###---------------------------------------------------------------------------
   ### Extract raster values at segdata locations
