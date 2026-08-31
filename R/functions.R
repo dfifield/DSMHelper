@@ -2883,10 +2883,10 @@ get.nc.file.times <- function(f) {
 #'   Prints a summary.
 #' @examples
 #' \dontrun{
-#' report.nc.time.coverage("GIS/Spatial covars/NetCDF/sst")
+#' report.nc.coverage("GIS/Spatial covars/NetCDF/sst")
 #' }
 #' @export
-report.nc.time.coverage <- function(folder, pattern = "[.]nc$",
+report.nc.coverage <- function(folder, pattern = "[.]nc$",
                                     report.gaps = TRUE) {
   checkmate::assert_directory_exists(folder)
   checkmate::assert_string(pattern)
