@@ -4836,30 +4836,81 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
 #' \code{predVersionDir} (project global) and also copies the accompanying
 #' \code{lib/} folder if needed.
 #'
+#' \strong{The summaries are timestamped, and this takes the newest.}
+#' \code{save.map()} writes \code{<modname>_<YYYYmmdd>_<HHMMSS>.html}, so a
+#' species accumulates one summary per run of \code{03.00} and a plain
+#' \code{<modname>.html} has never existed. This asked for exactly that name
+#' and reported the miss as an unreadable \code{stopifnot(file.copy(...))}
+#' failure (issue #65). The newest stamp is the right one because the
+#' prediction rasters carry no stamp and are overwritten in place, so the
+#' latest summary is the one describing the rasters being copied beside it.
+#'
+#' The copy is named \code{<spec>_<modname>.html}, without the stamp, so the
+#' shared version folder holds one predictable name per species. The stamp is
+#' not lost by dropping it: \code{save.map()} writes
+#' \code{<spec>_<modname>_<stamp>} as the page's own heading.
+#'
+#' Every failure here is now a sentence naming the species, the model and the
+#' folder looked in, because this runs inside a \code{walk()} over all species
+#' where the default error says only which index failed.
+#'
 #' @param spec Character string species code.
 #' @return \code{invisible(NULL)}, called for its side-effect (file copied).
 #' @export
-copy.prediction.summary <- function(spec){
-
+copy.prediction.summary <- function(spec) {
+  checkmate::expect_string(spec, min.chars = 1)
 
   modname <- final.dsm.models$dsm_final_name[final.dsm.models$species == spec]
+
+  # Same test as the project's has.final.model(), inlined rather than adding
+  # another project global to the ones this already needs.
+  if (length(modname) != 1 || is.na(modname) || !nzchar(trimws(modname)))
+    stop(sprintf(paste("copy.prediction.summary: final.dsm.models names no",
+                       "final model for species '%s'."), spec))
+
   source_path <- file.path(ResultsDir, spec, "Prediction summaries")
+  if (!dir.exists(source_path))
+    stop(sprintf(paste("copy.prediction.summary: no 'Prediction summaries'",
+                       "folder for %s at '%s'. Has 03.00 been run for it?"),
+                 spec, source_path))
+
+  # Strip the stamp and compare the remainder to modname literally, rather than
+  # building a regex around modname: no escaping to get wrong, and one model
+  # name cannot match another it merely prefixes. Stamped names sort
+  # chronologically, so the last is the newest.
+  html <- list.files(source_path, pattern = "\\.html$")
+  stamped <- grepl("_[0-9]{8}_[0-9]{6}\\.html$", html)
+  cands <- sort(html[stamped &
+                     sub("_[0-9]{8}_[0-9]{6}\\.html$", "", html) == modname])
+
+  if (!length(cands))
+    stop(sprintf(paste("copy.prediction.summary: no prediction summary for %s",
+                       "model '%s' in '%s'. Found: %s."),
+                 spec, modname, source_path,
+                 if (length(html)) paste(html, collapse = ", ") else "nothing"))
+
+  src <- utils::tail(cands, 1)
+  message(sprintf("%s: copying prediction summary '%s' (%d available).",
+                  spec, src, length(cands)))
+
   create.dir.if.needed(predVersionDir)
-  stopifnot(file.copy(file.path(source_path, paste0(modname, ".html")),
-                      file.path(predVersionDir, paste0(spec,"_",  modname, ".html")),
-                      overwrite = TRUE,
-                      copy.date = TRUE))
+  dest <- file.path(predVersionDir, paste0(spec, "_", modname, ".html"))
+  if (!file.copy(file.path(source_path, src), dest, overwrite = TRUE,
+                 copy.date = TRUE))
+    stop(sprintf("copy.prediction.summary: failed to copy '%s' to '%s'.",
+                 file.path(source_path, src), dest))
 
   # Check if lib folder exists (contains needed .js files) and is not in
-  # dest_path, and copy if needed.
+  # dest_path, and copy if needed. The maps do not render without it, so a
+  # silent failure here ships a folder of blank pages.
   if (dir.exists(file.path(source_path, "lib")) &&
-      !dir.exists(file.path(predVersionDir, "lib")))
-    file.copy(
-      file.path(source_path, "lib"),
-      predVersionDir,
-      recursive = TRUE,
-      overwrite = TRUE
-    )
+      !dir.exists(file.path(predVersionDir, "lib")) &&
+      !all(file.copy(file.path(source_path, "lib"), predVersionDir,
+                     recursive = TRUE, overwrite = TRUE)))
+    stop(sprintf("copy.prediction.summary: failed to copy '%s' to '%s'.",
+                 file.path(source_path, "lib"), predVersionDir))
+
+  invisible(NULL)
 }
 
 #' Arrange four seasonal leaflet maps in a 2x2 HTML table
