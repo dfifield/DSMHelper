@@ -7113,8 +7113,12 @@ apply.dsm.var <- function(dat, this.dsm){
   # across chunks on one worker it only ever rises. That is the number wanted:
   # what made issue #46 visible from outside was one worker process holding
   # 31.7 GB while nine held 172 MB.
+  # "cells" counts prediction units, which equal rows only when
+  # get.per.cell.var() was called without a group - with one it is the number of
+  # summed units, and "rows" is what the predict() cost actually scales with.
   attr(out, "chunk.stats") <- c(
     cells   = length(dat),
+    rows    = sum(vapply(dat, nrow, integer(1))),
     mins    = (proc.time()[["elapsed"]] - t0) / 60,
     peak.gb = sum(gc()[, 6]) / 1024
   )
@@ -7146,17 +7150,46 @@ apply.dsm.var <- function(dat, this.dsm){
 #'   coefficients and \code{Vp} are untouched.
 #' @param off.set Numeric offset (cell area): either a scalar or a vector the
 #'   same length as \code{nrow(df)}.
+#' @param group Optional grouping vector of length \code{nrow(df)} naming the
+#'   rows that are to be \strong{summed into one prediction unit} before their
+#'   variance is taken. \code{NULL} (default) makes every row its own unit,
+#'   which is the historical behaviour.
+#'
+#'   This is not a convenience. \code{dsm_var_gam()} builds one row of
+#'   \code{dpred.db} per element of \code{pred.data}, summing the rows
+#'   \emph{within} an element before the quadratic form, and then keeps only
+#'   \code{diag()} of the result - so covariances between elements are
+#'   discarded. Rows that belong to one reported number must therefore travel in
+#'   one element. The DSM case is the platform copies of a cell: they are
+#'   different functions of the \emph{same} coefficient vector, so summing their
+#'   variances afterwards drops \code{2Cov(A,B)} and understates the combined
+#'   variance. Measured on NL_EXPL_DRL_RA ATPU, the correct variance is 1.97x the
+#'   summed one and the CV is understated by a factor of 1.40.
+#'
+#'   This reproduces analytically what Miller et al. (2021) do by sampling -
+#'   "we predict for each platform (k = 1, ..., K) then sum these per-platform
+#'   predictions" \emph{inside} the per-draw loop, taking the empirical variance
+#'   outside it (PeerJ 9:e12113, and \code{fulmars.Rmd:435-437} in their
+#'   supplement, which sums the two behaviour levels within a draw before
+#'   \code{var()}). It does \strong{not} address the delta method's
+#'   linearisation of the log link, for which sampling is still the only route.
+#'
+#'   Coerced to a factor; results come back in level order, so pass a factor if
+#'   you need a particular one.
 #' @param parallel If \code{TRUE}, process chunks in parallel with
 #'   \code{parLapplyLB}.
 #' @param nodes Integer number of cluster nodes for parallel processing.
 #' @return List of per-chunk results from \code{\link{apply.dsm.var}}, in the
 #'   order of the chunks, each carrying a \code{chunk.stats} attribute.
 #'   \code{\link{report.chunk.stats}} is called on the way out and prints them.
+#'   With \code{group} given there is one \code{pred}/\code{pred.var} per
+#'   group, in level order, not one per row of \code{df}.
 #' @export
 get.per.cell.var <- function(this.dsm,
                              df,
                              nchunks,
                              off.set = 1,
+                             group = NULL,
                              parallel = FALSE,
                              nodes = 1,
                              exact.predict = TRUE
@@ -7196,17 +7229,47 @@ get.per.cell.var <- function(this.dsm,
 
   df$.my.off.set <- off.set
 
-  # split data into chunks for processing
-  if (nchunks > 1) {
-    dat.split <- split(df, cut(1:nrow(df), nchunks, FALSE))
-  } else{
-    # Process all of df in one chunk, make it a list so it can be processed
-    # by either map() of parallel::parLapply() below.
-    dat.split <- list(df)
+  # Build the prediction units FIRST, then chunk the units - never the rows.
+  #
+  # The order matters and is not interchangeable. A group's rows are the
+  # platform copies of one cell, and dsm.pred() lays the grid out with platform
+  # as the OUTERMOST block, so those rows sit nrow(df)/nlevels apart - about as
+  # far apart as rows can be. Chunking by row first (as this did until the group
+  # argument existed) would scatter every group across several chunks, and since
+  # each chunk is a separate dsm_var_gam() call the rows could never be summed
+  # inside one element. The bug would be silent: each partial group would simply
+  # return its own variance.
+  #
+  # With group = NULL each unit is one row, so cutting the units into contiguous
+  # chunks is the same partition the old row-cut produced. The historical path
+  # is unchanged.
+  if (is.null(group)) {
+    units <- split(df, seq_len(nrow(df)))
+  } else {
+    if (length(group) != nrow(df))
+      stop(sprintf(paste0("get.per.cell.var: group has %d elements but df has ",
+                          "%d rows; it must name a group for every row."),
+                   length(group), nrow(df)))
+    if (anyNA(group))
+      stop("get.per.cell.var: group has NAs. A row with no group would be ",
+           "dropped from the results with no error.")
+    group <- as.factor(group)
+    units <- split(df, group, drop = TRUE)
+    message(sprintf(paste0("get.per.cell.var: summing %d rows into %d ",
+                           "prediction units (%.3g rows each) before taking ",
+                           "variance, so within-unit covariance is retained."),
+                    nrow(df), length(units), nrow(df) / length(units)))
   }
 
-  # split each chunk in dat.split into sublists with 1 cell per element.
-  dat.split <- purrr::map(dat.split, ~ split(.x, 1:nrow(.x)))
+  # split the UNITS into chunks for processing
+  if (nchunks > 1) {
+    dat.split <- split(units, cut(seq_along(units), nchunks, FALSE))
+  } else{
+    # Process all units in one chunk, keeping the list-of-lists shape so it can
+    # be processed by either map() or parallel::parLapply() below.
+    dat.split <- list(units)
+  }
+  rm(units)
 
   if (parallel) {
 
@@ -7294,9 +7357,13 @@ report.chunk.stats <- function(res) {
   st <- as.data.frame(do.call(rbind, stats))
   st$chunk <- seq_len(nrow(st))
 
+  # "rows" is absent from results produced before the group argument existed,
+  # so fall back to cells rather than printing NA for an old saved run.
+  n.rows <- if (!is.null(st$rows)) sum(st$rows) else sum(st$cells)
   message(sprintf(
-    "get.per.cell.var: %d chunks, %s cells, %.1f min of chunk time",
-    nrow(st), format(sum(st$cells), big.mark = ","), sum(st$mins)))
+    "get.per.cell.var: %d chunks, %s prediction units over %s rows, %.1f min of chunk time",
+    nrow(st), format(sum(st$cells), big.mark = ","),
+    format(n.rows, big.mark = ","), sum(st$mins)))
   message(sprintf(
     "  slowest chunk %d at %.1f min vs median %.1f (%.1fx), peak %.1f GB",
     st$chunk[which.max(st$mins)], max(st$mins), stats::median(st$mins),

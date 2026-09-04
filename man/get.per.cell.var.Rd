@@ -9,6 +9,7 @@ get.per.cell.var(
   df,
   nchunks,
   off.set = 1,
+  group = NULL,
   parallel = FALSE,
   nodes = 1,
   exact.predict = TRUE
@@ -29,6 +30,33 @@ also cap per-worker memory. \code{nchunks} does not change the answer when
 \item{off.set}{Numeric offset (cell area): either a scalar or a vector the
 same length as \code{nrow(df)}.}
 
+\item{group}{Optional grouping vector of length \code{nrow(df)} naming the
+rows that are to be \strong{summed into one prediction unit} before their
+variance is taken. \code{NULL} (default) makes every row its own unit,
+which is the historical behaviour.
+
+This is not a convenience. \code{dsm_var_gam()} builds one row of
+\code{dpred.db} per element of \code{pred.data}, summing the rows
+\emph{within} an element before the quadratic form, and then keeps only
+\code{diag()} of the result - so covariances between elements are
+discarded. Rows that belong to one reported number must therefore travel in
+one element. The DSM case is the platform copies of a cell: they are
+different functions of the \emph{same} coefficient vector, so summing their
+variances afterwards drops \code{2Cov(A,B)} and understates the combined
+variance. Measured on NL_EXPL_DRL_RA ATPU, the correct variance is 1.97x the
+summed one and the CV is understated by a factor of 1.40.
+
+This reproduces analytically what Miller et al. (2021) do by sampling -
+"we predict for each platform (k = 1, ..., K) then sum these per-platform
+predictions" \emph{inside} the per-draw loop, taking the empirical variance
+outside it (PeerJ 9:e12113, and \code{fulmars.Rmd:435-437} in their
+supplement, which sums the two behaviour levels within a draw before
+\code{var()}). It does \strong{not} address the delta method's
+linearisation of the log link, for which sampling is still the only route.
+
+Coerced to a factor; results come back in level order, so pass a factor if
+you need a particular one.}
+
 \item{parallel}{If \code{TRUE}, process chunks in parallel with
 \code{parLapplyLB}.}
 
@@ -46,6 +74,8 @@ coefficients and \code{Vp} are untouched.}
 List of per-chunk results from \code{\link{apply.dsm.var}}, in the
 order of the chunks, each carrying a \code{chunk.stats} attribute.
 \code{\link{report.chunk.stats}} is called on the way out and prints them.
+With \code{group} given there is one \code{pred}/\code{pred.var} per
+group, in level order, not one per row of \code{df}.
 }
 \description{
 Splits the prediction grid into \code{nchunks} pieces, applies
