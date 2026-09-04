@@ -7382,6 +7382,97 @@ report.chunk.stats <- function(res) {
 }
 
 
+#' Squared coefficient of variation of a DSM's detection functions
+#'
+#' Returns \code{cvp.sq}, the quantity \code{summary.dsm.var()} adds to the
+#' GAM's squared CV to produce the reported total. Exposed separately because
+#' the per-cell variance path cannot call \code{summary()}: that method returns
+#' one study-area total, rbinding a list of prediction grids back into a single
+#' frame, so its number never lands on a cell.
+#'
+#' \strong{Why this is needed at all.} \code{dsm_var_gam()} is the entry point
+#' of a two-stage workflow - \code{$pred.var} carries GAM uncertainty only, and
+#' \code{summary.dsm.var()} performs the delta combination the function is
+#' documented for. The dsm package's own mexico-analysis vignette maps per-cell
+#' CV as \code{sqrt(dsm.xy.var$pred.var)/preddata$Prediction}, which is the
+#' GAM-only quantity, three chunks after describing \code{dsm_var_gam} as adding
+#' squared CVs. Following the vignette therefore yields per-cell maps without
+#' the detection term. \code{plot.dsm.var()} does add it per cell, but only on
+#' the bootstrap branch (\code{dsm_var_movblk}), and there only for the first
+#' ddf.
+#'
+#' The arithmetic mirrors \code{summary.dsm.var()} exactly, including its two
+#' conventions: strip/dummy \code{fake_ddf} components contribute nothing (they
+#' estimate no parameters, so they carry no uncertainty - Miller et al. 2021:
+#' "when a strip/plot transect is used there is no corresponding k and therefore
+#' no uncertainty"), and the remaining ddfs are summed on the assumption that
+#' they are independent. That assumption is the block-diagonal
+#' \code{V = diag(V1, ..., VK)} of Miller et al. (2021), which is reasonable
+#' here because each ddf is fitted separately to its own survey data.
+#'
+#' \strong{One caveat this shares with summary.dsm.var().} The ddfs are summed
+#' unweighted, with no account of how much of a given cell's abundance each
+#' platform actually carries. A cell whose density comes almost entirely from
+#' one platform still receives every ddf's squared CV. That is conservative -
+#' it overstates rather than understates - and it is what the package does, so
+#' the per-cell and total-abundance paths agree. An abundance-weighted version
+#' would be smaller; on NL_EXPL_DRL_RA ATPU roughly halved.
+#'
+#' @param model Fitted \code{dsm} object, or its \code{$ddf} component: a single
+#'   detection function or a list of them.
+#' @return Numeric scalar \code{cvp.sq}, with attribute \code{"detfct.cv"}
+#'   giving the per-ddf CVs (\code{NA} for \code{fake_ddf} components) in the
+#'   order they appear on the model. \code{0} when every component is a
+#'   \code{fake_ddf}, which is the correct answer, not a failure.
+#' @examples
+#' \dontrun{
+#' cvp.sq <- ddf.cv.squared(dsm_final)
+#' predgrid$CV <- sqrt(predgrid$CV^2 + cvp.sq)   # CV including detection
+#' }
+#' @export
+ddf.cv.squared <- function(model) {
+
+  ddf <- if (!is.null(model$ddf)) model$ddf else model
+  if (is.null(ddf))
+    stop("ddf.cv.squared: model has no $ddf component and is not itself a ",
+         "detection function or list of them.")
+
+  # summary.dsm.var() branches on class(x) == "list" rather than is.list(),
+  # because a single ddf is itself a list under the hood. Mirrored here so the
+  # two paths cannot disagree about what counts as one ddf.
+  if (!any(class(ddf) == "list")) ddf <- list(ddf)
+
+  cvp.sq <- 0
+  detfct.cv <- numeric(0)
+  for (i in seq_along(ddf)) {
+    this.ddf <- ddf[[i]]
+    if (all(class(this.ddf) != "fake_ddf")) {
+      sm <- summary(this.ddf)
+      if (is.null(sm$average.p) || is.null(sm$average.p.se))
+        stop(sprintf(paste0("ddf.cv.squared: ddf component %d has no ",
+                            "average.p/average.p.se, so its CV cannot be ",
+                            "computed. Class: %s."),
+                     i, paste(class(this.ddf), collapse = "/")))
+      # as.numeric() is load-bearing: average.p.se comes back with a dim
+      # attribute on some ddf classes, and without stripping it the returned
+      # cvp.sq is a 1x1 array. Adding that to a vector of per-cell CVs still
+      # gives the right numbers but warns "Recycling array of length 1 in
+      # vector-array arithmetic is deprecated" on every call, and is scheduled
+      # to become an error.
+      this.cvp.sq <- as.numeric((sm$average.p.se / sm$average.p)^2)
+      cvp.sq <- cvp.sq + this.cvp.sq
+    } else {
+      this.cvp.sq <- NA_real_
+    }
+    detfct.cv <- c(detfct.cv, sqrt(this.cvp.sq))
+  }
+
+  cvp.sq <- as.numeric(cvp.sq)
+  attr(cvp.sq, "detfct.cv") <- as.numeric(detfct.cv)
+  cvp.sq
+}
+
+
 #' Compute a density estimate with uncertainty from a DSM
 #'
 #' \strong{Note: not currently used.}  \code{Generic_4_variance.Rmd} does this
