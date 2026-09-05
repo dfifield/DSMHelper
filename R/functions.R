@@ -7328,7 +7328,7 @@ get.per.cell.var <- function(this.dsm,
     ))
   }
 
-  report.chunk.stats(res)
+  report.chunk.stats(res, label = "get.per.cell.var")
 
   res
 }
@@ -7341,6 +7341,8 @@ get.per.cell.var <- function(this.dsm,
 #' make visible (issue #46), and it is invisible in a wall-clock total.
 #'
 #' @param res List of chunk results from \code{\link{get.per.cell.var}}.
+#' @param label Name printed at the head of each line, so a caller other than
+#'   \code{\link{get.per.cell.var}} does not report itself as that function.
 #' @return \code{invisible(NULL)}; called for the printed summary.
 #' @examples
 #' \dontrun{
@@ -7348,8 +7350,9 @@ get.per.cell.var <- function(this.dsm,
 #' report.chunk.stats(res)
 #' }
 #' @export
-report.chunk.stats <- function(res) {
+report.chunk.stats <- function(res, label = "get.per.cell.var") {
   checkmate::expect_list(res, min.len = 1)
+  checkmate::expect_string(label, min.chars = 1)
 
   stats <- purrr::map(res, ~ attr(.x, "chunk.stats"))
   if (any(purrr::map_lgl(stats, is.null))) return(invisible(NULL))
@@ -7361,13 +7364,29 @@ report.chunk.stats <- function(res) {
   # so fall back to cells rather than printing NA for an old saved run.
   n.rows <- if (!is.null(st$rows)) sum(st$rows) else sum(st$cells)
   message(sprintf(
-    "get.per.cell.var: %d chunks, %s prediction units over %s rows, %.1f min of chunk time",
-    nrow(st), format(sum(st$cells), big.mark = ","),
+    "%s: %d chunks, %s prediction units over %s rows, %.1f min of chunk time",
+    label, nrow(st), format(sum(st$cells), big.mark = ","),
     format(n.rows, big.mark = ","), sum(st$mins)))
   message(sprintf(
     "  slowest chunk %d at %.1f min vs median %.1f (%.1fx), peak %.1f GB",
     st$chunk[which.max(st$mins)], max(st$mins), stats::median(st$mins),
     max(st$mins) / stats::median(st$mins), max(st$peak.gb)))
+
+  # Sampling-only columns. exp() can overflow where the delta method merely gave
+  # a large number, so a non-finite count is a result, not a glitch - it is
+  # reported rather than cleaned away. See get.per.cell.var.posterior().
+  if (!is.null(st$n.nonfinite)) {
+    tot <- sum(st$n.nonfinite)
+    message(sprintf("  max eta %.1f across chunks; %s non-finite draw value(s)",
+                    max(st$max.eta), format(tot, big.mark = ",")))
+    if (tot > 0)
+      warning(sprintf(paste0(
+        "%s: %s non-finite value(s) among the posterior draws (max eta %.1f; ",
+        "exp() overflows past 709). Affected cells carry Inf/NaN variance and ",
+        "are NOT silently dropped. Check them against the extrapolation ",
+        "assessment before using the surface."),
+        label, format(tot, big.mark = ","), max(st$max.eta)), call. = FALSE)
+  }
 
   # The ATPU run that prompted this was 5x. Anything near that is the same
   # unexplained thing, not a rough edge in the chunking.
@@ -7379,6 +7398,355 @@ report.chunk.stats <- function(res) {
       call. = FALSE)
 
   invisible(NULL)
+}
+
+
+#' Apply posterior sampling to one chunk of prediction cells
+#'
+#' Worker for \code{\link{get.per.cell.var.posterior}}. Builds one
+#' \code{lpmatrix} for the whole chunk, evaluates the posterior draws against it
+#' in blocks, sums the platform copies of each cell \emph{inside} each draw, and
+#' summarises across draws.
+#'
+#' @param dat Data frame for one chunk, already geometry-dropped and ordered
+#'   cell-major: \code{K} consecutive rows per cell, cells in output order.
+#'   Carries \code{.my.off.set}.
+#' @param this.dsm Fitted \code{dsm}/\code{gam} object.
+#' @param Bt Coefficient draws, \code{p x B}, transposed once by the caller so
+#'   no chunk pays for it.
+#' @param logf Length-\code{B} vector of log detection-function factors, all
+#'   zero when that term is off.
+#' @param K Platform copies per cell; constant by construction, asserted by the
+#'   caller.
+#' @param probs Quantile probabilities.
+#' @param draw.block Draws evaluated per matrix multiply.
+#' @param agg Character vector of length \code{nrow(dat)/K} labelling the
+#'   aggregate each cell belongs to, or \code{NULL}.
+#' @param agg.levels Full level set for \code{agg}, so every chunk returns rows
+#'   in the same order and chunks can simply be added.
+#' @return List with \code{cells} (one row per cell) and \code{agg.draws},
+#'   carrying a \code{chunk.stats} attribute.
+#' @export
+apply.posterior.var <- function(dat, this.dsm, Bt, logf, K, probs, draw.block,
+                                agg = NULL, agg.levels = NULL) {
+  t0 <- proc.time()[["elapsed"]]
+
+  off <- dat$.my.off.set
+  nr  <- nrow(dat)
+  nc  <- nr %/% K
+  B   <- ncol(Bt)
+
+  # Mirror dsm_var_gam exactly. Stripping "dsm" matters: predict.dsm does
+  # newdata$off.set <- family$linkfun(newdata$off.set), which on the 0 set below
+  # is log(0) = -Inf. The offset plays no part in an lpmatrix - the per-cell
+  # area is applied by hand afterwards, exactly as dsm_var_gam does.
+  class(this.dsm) <- class(this.dsm)[class(this.dsm) != "dsm"]
+  dat$off.set <- 0
+
+  # na.action is passed explicitly rather than inherited from options(). With
+  # one lpmatrix covering the whole chunk a dropped row would shift every cell
+  # after it, where the old one-call-per-cell path could only corrupt its own.
+  Xp <- stats::predict(this.dsm, newdata = dat, type = "lpmatrix",
+                       na.action = stats::na.pass)
+  if (nrow(Xp) != nr || ncol(Xp) != nrow(Bt))
+    stop(sprintf(paste0("apply.posterior.var: lpmatrix is %d x %d, expected ",
+                        "%d x %d. Row loss would silently shift every cell ",
+                        "after it."),
+                 nrow(Xp), ncol(Xp), nr, nrow(Bt)))
+
+  linkinv <- this.dsm$family$linkinv
+
+  # Sum the K platform copies of each cell. Rows are cell-major, so copy k of
+  # every cell is a stride-K slice. Deliberately NOT rowsum(): that orders its
+  # output by SORTED group label, and a character group sorts lexically
+  # ("1","10","11","2"), silently scrambling cells - and it allocates a rowname
+  # vector the length of the grid. This is order-preserving by construction.
+  stride.sum <- function(M)
+    Reduce(`+`, lapply(seq_len(K),
+                       function(k) M[seq.int(k, nrow(M), by = K), , drop = FALSE]))
+
+  # Point estimate: exp(eta-hat), NOT the draw mean. exp(eta-hat) is the
+  # posterior MEDIAN and reproduces the prediction step's NHat bitwise; the draw
+  # mean is larger by exp(sigma^2/2) - 1.9x at NL_EXPL_DRL_RA ATPU's median cell
+  # - and would break the calibration the fitted surface has against the data.
+  N0   <- off * linkinv(drop(Xp %*% stats::coef(this.dsm)))
+  pred <- Reduce(`+`, lapply(seq_len(K), function(k) N0[seq.int(k, nr, by = K)]))
+
+  Ncell       <- matrix(0, nc, B)
+  n.nonfinite <- 0
+  max.eta     <- -Inf
+
+  for (s in seq(1, B, by = draw.block)) {
+    idx <- s:min(s + draw.block - 1L, B)
+    eta <- Xp %*% Bt[, idx, drop = FALSE]
+    fin <- is.finite(eta)
+    if (any(fin)) max.eta <- max(max.eta, max(eta[fin]))
+    Nblk <- off * linkinv(eta)
+    n.nonfinite <- n.nonfinite + sum(!is.finite(Nblk))
+    Nb <- stride.sum(Nblk)
+    # Detection-function factor: one scalar per DRAW, shared by every cell.
+    # p-hat is estimated once and its error is perfectly correlated across
+    # space, so a per-cell factor would average away to nothing in any total.
+    if (any(logf[idx] != 0)) Nb <- Nb * rep(exp(logf[idx]), each = nc)
+    Ncell[, idx] <- Nb
+    rm(eta, fin, Nblk, Nb)
+  }
+
+  mu <- rowMeans(Ncell)
+  cells <- data.frame(
+    pred      = pred,
+    pred.mean = mu,
+    var       = apply(Ncell, 1, stats::var),
+    sigma.log = apply(Ncell, 1, function(z) stats::sd(log(z)))
+  )
+  # CV is sd/MEAN. sqrt(var)/pred would divide a posterior SD by a posterior
+  # median and inflate every cell by exp(sigma^2/2).
+  cells$cv <- sqrt(cells$var) / cells$pred.mean
+
+  qs <- t(apply(Ncell, 1, stats::quantile, probs = probs, names = FALSE))
+  colnames(qs) <- sprintf("q%g", probs)
+  cells <- cbind(cells, as.data.frame(qs))
+
+  agg.draws <- NULL
+  if (!is.null(agg)) {
+    agg.draws <- matrix(0, length(agg.levels), B,
+                        dimnames = list(agg.levels, NULL))
+    for (a in seq_along(agg.levels)) {
+      i <- which(agg == agg.levels[a])
+      if (length(i)) agg.draws[a, ] <- colSums(Ncell[i, , drop = FALSE])
+    }
+  }
+
+  out <- list(cells = cells, agg.draws = agg.draws)
+  attr(out, "chunk.stats") <- c(
+    cells       = nc,
+    rows        = nr,
+    draws       = B,
+    n.nonfinite = n.nonfinite,
+    max.eta     = if (is.finite(max.eta)) max.eta else NA_real_,
+    mins        = (proc.time()[["elapsed"]] - t0) / 60,
+    peak.gb     = sum(gc()[, 6]) / 1024
+  )
+  out
+}
+
+
+#' Per-cell variance by posterior sampling
+#'
+#' Replaces the delta method of \code{\link{get.per.cell.var}} with posterior
+#' simulation, which is what Miller et al. (2021, PeerJ 9:e12113) and Miller et
+#' al. (2022, PeerJ 10:e13950) recommend.
+#'
+#' \strong{Why.} \code{dsm_var_gam()} linearises \code{exp()} about
+#' \code{beta-hat}, so it reports \code{CV = sigma} where the truth is
+#' \code{sqrt(exp(sigma^2) - 1)}. That is fine below CV ~0.2 and wrong above it:
+#' on \code{NL_EXPL_DRL_RA} ATPU the median cell's CV is understated by ~40 per
+#' cent and 57.8 per cent of cells sit above CV 1.0. Sampling applies
+#' \code{exp()} exactly to each draw, so the non-linearity is handled rather than
+#' approximated, and the platform sum becomes exact as a side effect.
+#'
+#' \strong{Draws are generated once, in the parent.} Every chunk must use the
+#' same draws or the surface is incoherent between cells, and shared draws are
+#' what make the per-chunk \code{agg.draws} summable. It also means the workers
+#' do no RNG at all, sidestepping the L-Ecuyer-CMRG trap
+#' \code{\link{assign.blocks}} documents. The generator is pinned as well as the
+#' seed, because \code{mgcv::rmvn} draws from whichever generator is current.
+#'
+#' \strong{No streaming accumulator is needed.} Miller et al. (2022) used
+#' Welford's method because they predicted the whole grid at once; this chunks,
+#' so a chunk's full cell-by-draw matrix is a few hundred MB and the quantiles
+#' can be taken directly. \code{draw.block} bounds the transient matrix-multiply
+#' result, not the stored draws.
+#'
+#' @param this.dsm Fitted \code{dsm} object with a log link.
+#' @param df Prediction grid; \code{sf} is fine and its geometry is dropped.
+#' @param group Required. Grouping vector of length \code{nrow(df)} naming the
+#'   rows summed into one prediction unit - the platform copies of one cell x
+#'   season. Unlike \code{\link{get.per.cell.var}} it has no default: a
+#'   posterior run with every row its own unit is never what is wanted.
+#' @param off.set Per-cell area: scalar, or vector of length \code{nrow(df)}.
+#' @param nchunks Cells are split into this many chunks. Chunking bounds memory
+#'   and is what removes the need for a streaming accumulator.
+#' @param n.draws Posterior draws (\code{B}).
+#' @param seed Seed for the draws; recorded on the result.
+#' @param probs Quantile probabilities returned per cell.
+#' @param vcov.type \code{"Vp"} (default) or \code{"Vc"}, the latter also
+#'   carrying smoothing-parameter uncertainty.
+#' @param ddf.cvp.sq Squared detection-function CV from
+#'   \code{\link{ddf.cv.squared}}, or 0 to leave it out. Enters as a
+#'   median-preserving lognormal factor on each draw, so the quantiles carry it
+#'   as well as the CV.
+#' @param agg Optional vector of length \code{n.cells} (e.g. Season) to also
+#'   return summed posterior draws for. A CV raster cannot be aggregated by a
+#'   downstream user - the cells are near-perfectly correlated - so this is the
+#'   only correct route to a total.
+#' @param parallel,nodes Cluster settings, as \code{\link{get.per.cell.var}}.
+#' @param exact.predict Drop \code{$dinfo} from a \code{discrete = TRUE} fit so
+#'   results do not depend on chunk composition.
+#' @param draw.block Draws per matrix multiply. Caps the transient result and
+#'   keeps \code{chunk rows * draw.block} under the 2^31 element limit most BLAS
+#'   builds use.
+#' @return List with \code{cells} (one row per cell, in \code{group} level
+#'   order, carrying \code{pred}, \code{pred.mean}, \code{var}, \code{sigma.log},
+#'   \code{cv}, the quantiles and \code{cell}) and \code{agg.draws}; a
+#'   \code{posterior.info} attribute records seed, RNG kind, draws, vcov type,
+#'   \code{ddf.cvp.sq} and the DSMHelper version.
+#' @export
+get.per.cell.var.posterior <- function(this.dsm,
+                                       df,
+                                       group,
+                                       off.set     = 1,
+                                       nchunks     = 1,
+                                       n.draws     = 5000L,
+                                       seed        = get0("POSTERIOR_VAR_SEED",
+                                                          ifnotfound = 20260904L),
+                                       probs       = c(0.025, 0.5, 0.975),
+                                       vcov.type   = c("Vp", "Vc"),
+                                       ddf.cvp.sq  = 0,
+                                       agg         = NULL,
+                                       parallel    = FALSE,
+                                       nodes       = 1,
+                                       exact.predict = TRUE,
+                                       draw.block  = get0("POSTERIOR_DRAW_BLOCK",
+                                                          ifnotfound = 500L)) {
+
+  checkmate::expect_multi_class(df, c("sf", "data.frame"))
+  checkmate::expect_count(n.draws, positive = TRUE)
+  checkmate::expect_count(nchunks, positive = TRUE)
+  checkmate::expect_count(nodes, positive = TRUE)
+  checkmate::expect_count(draw.block, positive = TRUE)
+  checkmate::expect_numeric(probs, lower = 0, upper = 1, any.missing = FALSE,
+                            min.len = 1)
+  checkmate::expect_number(ddf.cvp.sq, lower = 0, finite = TRUE)
+  checkmate::expect_flag(parallel)
+  vcov.type <- match.arg(vcov.type)
+
+  if (any(class(this.dsm) == "gamm")) this.dsm <- this.dsm$gam
+  if (this.dsm$family$link != "log")
+    stop("get.per.cell.var.posterior: only log-link models are supported.")
+
+  if (length(group) != nrow(df))
+    stop(sprintf(paste0("get.per.cell.var.posterior: group has %d elements but ",
+                        "df has %d rows."), length(group), nrow(df)))
+  if (anyNA(group))
+    stop("get.per.cell.var.posterior: group has NAs; those rows would vanish.")
+  if (length(off.set) > 1 && length(off.set) != nrow(df))
+    stop("get.per.cell.var.posterior: off.set is not the same length as df.")
+
+  # Same reasoning as get.per.cell.var(): a discrete fit re-discretises whatever
+  # newdata it is handed, so without this a cell's answer depends on its chunk.
+  if (isTRUE(exact.predict) && !is.null(this.dsm$dinfo)) {
+    message("get.per.cell.var.posterior: model fitted with discrete = TRUE; ",
+            "predicting exactly so results do not depend on chunk composition.")
+    this.dsm$dinfo <- NULL
+  }
+
+  # ---- prediction units ----------------------------------------------------
+  grp <- as.integer(as.factor(group))
+  K   <- unique(tabulate(grp))
+  if (length(K) != 1L)
+    stop(sprintf(paste0("get.per.cell.var.posterior: cells carry %d different ",
+                        "row counts (%s). Every cell must have the same number ",
+                        "of platform copies."),
+                 length(K), paste(sort(unique(K)), collapse = ", ")))
+  n.cells <- length(grp) / K
+
+  # ---- newdata -------------------------------------------------------------
+  if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
+  keep <- intersect(unique(c(all.vars(this.dsm$pred.formula), "off.set")),
+                    names(df))
+  nd <- df[, keep, drop = FALSE]
+  nd$.my.off.set <- off.set
+
+  # Rows become cell-major: K consecutive rows per cell, cells ascending.
+  ord <- order(grp, method = "radix")
+  nd  <- nd[ord, , drop = FALSE]
+
+  if (!is.null(agg)) {
+    if (length(agg) != n.cells)
+      stop(sprintf(paste0("get.per.cell.var.posterior: agg has %d elements, ",
+                          "expected %d cells."), length(agg), n.cells))
+    agg <- as.character(agg)
+  }
+  agg.levels <- if (is.null(agg)) NULL else sort(unique(agg))
+
+  # ---- draws, in the parent only -------------------------------------------
+  V <- stats::vcov(this.dsm, unconditional = (vcov.type == "Vc"))
+  old.kind <- RNGkind()
+  on.exit(RNGkind(old.kind[1], old.kind[2], old.kind[3]), add = TRUE)
+  suppressWarnings(RNGkind("Mersenne-Twister", "Inversion", "Rejection"))
+  set.seed(seed)
+  Bt   <- t(mgcv::rmvn(n.draws, stats::coef(this.dsm), V))
+  logf <- if (ddf.cvp.sq > 0)
+    stats::rnorm(n.draws, 0, sqrt(log(1 + ddf.cvp.sq))) else rep(0, n.draws)
+
+  message(sprintf(paste0("get.per.cell.var.posterior: %s draws from %s over %s ",
+                         "cells x %d platform copies; ddf CV %s"),
+                  format(n.draws, big.mark = ","), vcov.type,
+                  format(n.cells, big.mark = ","), K,
+                  if (ddf.cvp.sq > 0) sprintf("%.4f", sqrt(ddf.cvp.sq)) else "off"))
+
+  # ---- chunk the CELLS, never the rows -------------------------------------
+  cell.chunk <- if (nchunks > 1)
+    split(seq_len(n.cells), cut(seq_len(n.cells), nchunks, labels = FALSE))
+  else list(seq_len(n.cells))
+
+  max.rows <- max(vapply(cell.chunk, length, integer(1))) * K
+  if (max.rows * draw.block > .Machine$integer.max)
+    stop(sprintf(paste0("get.per.cell.var.posterior: a chunk of %d rows x %d ",
+                        "draws exceeds the 2^31 element limit most BLAS builds ",
+                        "use, and would fail inside dgemm rather than as an R ",
+                        "allocation error. Raise nchunks or lower draw.block."),
+                 max.rows, draw.block))
+
+  dat.split <- lapply(cell.chunk, function(cc) {
+    stopifnot(identical(cc, min(cc):max(cc)))     # cut() gives contiguous runs
+    rows <- ((min(cc) - 1L) * K + 1L):(max(cc) * K)
+    list(dat = nd[rows, , drop = FALSE],
+         agg = if (is.null(agg)) NULL else agg[cc])
+  })
+
+  worker <- function(piece)
+    apply.posterior.var(piece$dat, this.dsm, Bt, logf, K, probs, draw.block,
+                        piece$agg, agg.levels)
+
+  if (parallel) {
+    cl <- parallel::makeCluster(nodes)
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::clusterEvalQ(cl, { library(mgcv); library(dsm) })
+    # Exported rather than passed as parLapplyLB arguments, which are
+    # re-serialised per task; by name rather than DSMHelper:: so that a driver
+    # running a sourced functions.R gets its own version on the workers.
+    parallel::clusterExport(cl,
+      c("apply.posterior.var", "this.dsm", "Bt", "logf", "K", "probs",
+        "draw.block", "agg.levels"),
+      envir = environment())
+    environment(worker) <- globalenv()
+    print(system.time(
+      res <- parallel::parLapplyLB(cl, dat.split, worker, chunk.size = 1)))
+  } else {
+    print(system.time(res <- lapply(dat.split, worker)))
+  }
+
+  report.chunk.stats(res, label = "get.per.cell.var.posterior")
+
+  cells <- do.call(rbind, lapply(res, function(x) x$cells))
+  if (nrow(cells) != n.cells)
+    stop(sprintf("get.per.cell.var.posterior: got %d cells, expected %d.",
+                 nrow(cells), n.cells))
+  rownames(cells) <- NULL
+  cells$cell <- seq_len(n.cells)
+
+  agg.draws <- NULL
+  if (!is.null(agg))
+    agg.draws <- Reduce(`+`, lapply(res, function(x) x$agg.draws))
+
+  out <- list(cells = cells, agg.draws = agg.draws)
+  attr(out, "posterior.info") <- list(
+    seed = seed, rngkind = RNGkind(), n.draws = n.draws,
+    vcov.type = vcov.type, ddf.cvp.sq = ddf.cvp.sq, probs = probs, K = K,
+    DSMHelper = as.character(utils::packageVersion("DSMHelper")))
+  out
 }
 
 

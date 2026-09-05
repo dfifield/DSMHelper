@@ -4,10 +4,13 @@
 \alias{report.chunk.stats}
 \title{Summarise the per-chunk cost of a get.per.cell.var() run}
 \usage{
-report.chunk.stats(res)
+report.chunk.stats(res, label = "get.per.cell.var")
 }
 \arguments{
 \item{res}{List of chunk results from \code{\link{get.per.cell.var}}.}
+
+\item{label}{Name printed at the head of each line, so a caller other than
+\code{\link{get.per.cell.var}} does not report itself as that function.}
 }
 \value{
 \code{invisible(NULL)}; called for the printed summary.
