@@ -7558,6 +7558,22 @@ apply.posterior.var <- function(dat, this.dsm, Bt, logf, K, probs, draw.block,
 #' can be taken directly. \code{draw.block} bounds the transient matrix-multiply
 #' result, not the stored draws.
 #'
+#' \strong{Watch the degenerate cells, which are not the same as overflow.} A
+#' sample CV cannot exceed \code{sqrt(B - 1)}, and it reaches that bound exactly
+#' when one draw carries the whole sample. So a cell reporting a CV near
+#' \code{sqrt(B - 1)} is not measuring a CV of that size - it is saying the
+#' estimate rests on a single draw and means nothing. This happens with entirely
+#' finite arithmetic, so the non-finite count does not catch it: on
+#' \code{NL_EXPL_DRL_RA} ATPU at B = 5,000 there were \strong{zero} non-finite
+#' values and \strong{5.0 per cent} of cells within a whisker of
+#' \code{sqrt(4999) = 70.70}. The function counts them and warns.
+#'
+#' Those cells carry almost no abundance (0.08-0.45 per cent of a season's total
+#' on ATPU), so they do not threaten the density surface - but they dominate a CV
+#' map, and they make the \emph{mean} of \code{agg.draws} useless while its
+#' median stays sensible. Prefer the median for a posterior total, and read
+#' \code{sigma.log} rather than \code{cv} where the CV is near the bound.
+#'
 #' @param this.dsm Fitted \code{dsm} object with a log link.
 #' @param df Prediction grid; \code{sf} is fine and its geometry is dropped.
 #' @param group Required. Grouping vector of length \code{nrow(df)} naming the
@@ -7737,6 +7753,27 @@ get.per.cell.var.posterior <- function(this.dsm,
   rownames(cells) <- NULL
   cells$cell <- seq_len(n.cells)
 
+  # Monte Carlo degeneracy. A sample CV is bounded above by sqrt(B - 1) and
+  # attains it when a single draw carries the sample, so cells near that bound
+  # are reporting "one draw decided this", not a coefficient of variation. The
+  # arithmetic is entirely finite, so the non-finite census above cannot see it.
+  cv.bound <- sqrt(n.draws - 1)
+  degen <- sum(cells$cv > 0.5 * cv.bound, na.rm = TRUE)
+  if (degen > 0)
+    warning(sprintf(paste0(
+      "get.per.cell.var.posterior: %s of %s cells (%.2f%%) have CV above half ",
+      "the sqrt(B-1) = %.1f bound, i.e. their variance rests on a handful of ",
+      "draws and is not a usable CV. They hold little abundance but will ",
+      "dominate a CV map, and they make the MEAN of any total unusable - use ",
+      "the median. Read sigma.log there instead, or raise n.draws."),
+      format(degen, big.mark = ","), format(n.cells, big.mark = ","),
+      100 * degen / n.cells, cv.bound), call. = FALSE)
+  message(sprintf(paste0("get.per.cell.var.posterior: CV bound sqrt(B-1) = ",
+                         "%.1f; %s cells (%.2f%%) above half of it, max CV %.4g"),
+                  cv.bound, format(degen, big.mark = ","),
+                  100 * degen / n.cells,
+                  max(cells$cv[is.finite(cells$cv)], na.rm = TRUE)))
+
   agg.draws <- NULL
   if (!is.null(agg))
     agg.draws <- Reduce(`+`, lapply(res, function(x) x$agg.draws))
@@ -7745,6 +7782,7 @@ get.per.cell.var.posterior <- function(this.dsm,
   attr(out, "posterior.info") <- list(
     seed = seed, rngkind = RNGkind(), n.draws = n.draws,
     vcov.type = vcov.type, ddf.cvp.sq = ddf.cvp.sq, probs = probs, K = K,
+    cv.bound = cv.bound, n.degenerate = degen,
     DSMHelper = as.character(utils::packageVersion("DSMHelper")))
   out
 }
