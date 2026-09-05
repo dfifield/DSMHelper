@@ -9788,10 +9788,20 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
   # Warn about a platform level resting on very few observations. It is not an
   # error and nothing is dropped: the _N ddftypes are strip/dummy ddfs so their
   # observation count does not threaten a detection function. What it threatens
-  # is the DSM, where each ddftype now carries its own platform intercept. On
-  # NL_EXPL_DRL_RA, SWN is empty for nine of eleven species and rests on 1 (BLKI)
-  # and 3 (NOFU) observations for the other two, because lkpDistMeth gives water
-  # birds perpendicular distances under almost every DistMeth in use.
+  # is the DSM, where each ddftype now carries its own platform intercept.
+  #
+  # SWN is the level this normally fires on, because lkpDistMeth gives water
+  # birds perpendicular distances under almost every DistMeth in use. On
+  # NL_EXPL_DRL_RA (ship-only, post study-area buffer) it is empty for four of
+  # eleven species - NOGA, Petrels, RAZO, Shearwaters, which therefore fit three
+  # platform levels rather than four - and thin for five more: LESP 2, Gulls 3,
+  # BLKI 4, NOFU 5, ATPU 6. DOVE (72) and Murres (58) clear the threshold.
+  #
+  # Those are one SubProject's numbers at one moment, not a property of the
+  # code: they depend on the survey types present, the species list, and the
+  # effort actually retained. These moved when the buffer (issue #33) added
+  # ~14,000 ship watches, which is why the earlier version of this comment said
+  # nine species and named BLKI 1 / NOFU 3.
   sparse <- table(distdata$ddfobj.orig)
   sparse <- sparse[sparse < SPARSE_PLATFORM_LEVEL_OBS]
   if (length(sparse) > 0)
