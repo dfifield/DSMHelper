@@ -7558,15 +7558,17 @@ apply.posterior.var <- function(dat, this.dsm, Bt, logf, K, probs, draw.block,
 #' can be taken directly. \code{draw.block} bounds the transient matrix-multiply
 #' result, not the stored draws.
 #'
-#' \strong{Watch the degenerate cells, which are not the same as overflow.} A
-#' sample CV cannot exceed \code{sqrt(B - 1)}, and it reaches that bound exactly
-#' when one draw carries the whole sample. So a cell reporting a CV near
-#' \code{sqrt(B - 1)} is not measuring a CV of that size - it is saying the
-#' estimate rests on a single draw and means nothing. This happens with entirely
-#' finite arithmetic, so the non-finite count does not catch it: on
-#' \code{NL_EXPL_DRL_RA} ATPU at B = 5,000 there were \strong{zero} non-finite
-#' values and \strong{5.0 per cent} of cells within a whisker of
-#' \code{sqrt(4999) = 70.70}. The function counts them and warns.
+#' \strong{Watch the degenerate cells, which are not the same as overflow.} With
+#' the usual \code{n - 1} divisor, the sample CV of \code{B} non-negative values
+#' cannot exceed \code{sqrt(B)}, and it attains that bound exactly when one draw
+#' carries the whole sample. So a cell reporting a CV near \code{sqrt(B)} is not
+#' measuring a CV of that size - it is saying the estimate rests on a single draw
+#' and means nothing. This happens with entirely finite arithmetic, so the
+#' non-finite count does not catch it: on \code{NL_EXPL_DRL_RA} at B = 5,000
+#' there were \strong{zero} non-finite values while 9.1 per cent (ATPU) and 15.0
+#' per cent (Petrels) of cells sat above half of \code{sqrt(5000) = 70.711} -
+#' and Petrels reached 70.71, the bound itself. The function counts them and
+#' warns.
 #'
 #' Those cells carry almost no abundance (0.08-0.45 per cent of a season's total
 #' on ATPU), so they do not threaten the density surface - but they dominate a CV
@@ -7757,19 +7759,22 @@ get.per.cell.var.posterior <- function(this.dsm,
   # attains it when a single draw carries the sample, so cells near that bound
   # are reporting "one draw decided this", not a coefficient of variation. The
   # arithmetic is entirely finite, so the non-finite census above cannot see it.
-  cv.bound <- sqrt(n.draws - 1)
+  # sqrt(B), not sqrt(B - 1): with the n-1 divisor on the SD, x = (c, 0, ..., 0)
+  # gives mean c/B, sd c/sqrt(B) and hence CV = sqrt(B). Petrels hit 70.71
+  # against sqrt(5000) = 70.7107, which is what identified the bound.
+  cv.bound <- sqrt(n.draws)
   degen <- sum(cells$cv > 0.5 * cv.bound, na.rm = TRUE)
   if (degen > 0)
     warning(sprintf(paste0(
       "get.per.cell.var.posterior: %s of %s cells (%.2f%%) have CV above half ",
-      "the sqrt(B-1) = %.1f bound, i.e. their variance rests on a handful of ",
+      "the sqrt(B) = %.2f bound, i.e. their variance rests on a handful of ",
       "draws and is not a usable CV. They hold little abundance but will ",
       "dominate a CV map, and they make the MEAN of any total unusable - use ",
       "the median. Read sigma.log there instead, or raise n.draws."),
       format(degen, big.mark = ","), format(n.cells, big.mark = ","),
       100 * degen / n.cells, cv.bound), call. = FALSE)
-  message(sprintf(paste0("get.per.cell.var.posterior: CV bound sqrt(B-1) = ",
-                         "%.1f; %s cells (%.2f%%) above half of it, max CV %.4g"),
+  message(sprintf(paste0("get.per.cell.var.posterior: CV bound sqrt(B) = ",
+                         "%.3f; %s cells (%.2f%%) above half of it, max CV %.4g"),
                   cv.bound, format(degen, big.mark = ","),
                   100 * degen / n.cells,
                   max(cells$cv[is.finite(cells$cv)], na.rm = TRUE)))
