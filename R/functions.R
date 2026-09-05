@@ -10454,6 +10454,94 @@ guard.version.dir <- function(dir, allow.overwrite) {
     n, dir), call. = FALSE)
 }
 
+#' Is a cached result older than the things it was computed from?
+#'
+#' A step that reuses a saved artefact has to decide whether that artefact still
+#' describes the current state, and **existence is not that question**. The
+#' artefact can have been produced from inputs that were since replaced, in
+#' which case reusing it reports a stale answer under a fresh date -- which is
+#' worse than no answer, because it reads as confirmation.
+#'
+#' That is issue #71. `02.15_Compare_finalist_predictions.Rmd` skipped any
+#' species holding a saved comparison, so after `02.00` refit every model on
+#' 30 Aug 2026 the step reloaded 29 Aug comparisons and wrote them into
+#' `dsm_finalist_pred_comparison.csv` under a header reading
+#' `Generated: 2026-08-31`. The CSV reported **0 cells over the density limit**
+#' for a Petrels Winter surface that by then had 3,726. Nothing was wrong with
+#' the arithmetic; the inputs had moved and the guard could not see it.
+#'
+#' Comparison is by modification time, which is weaker than hashing the inputs
+#' and deliberately so: the inputs here are multi-GB `.RData` files, and hashing
+#' them costs more than recomputing what they feed. The case mtime cannot see is
+#' an input rewritten with **identical** content -- that forces an unnecessary
+#' recompute rather than returning a stale answer, which is the safe direction
+#' to be wrong in.
+#'
+#' A **missing** input counts as stale, on the same reasoning. It cannot be
+#' shown current, and forcing the recompute makes whatever depends on it fail
+#' where the file is actually needed, rather than silently reusing an artefact
+#' whose provenance can no longer be checked.
+#'
+#' @param cache.file Character path to the saved artefact.
+#' @param inputs Character vector of paths the artefact was computed from.
+#'   Listing a file that does not affect the result costs an unnecessary
+#'   recompute; omitting one that does is the bug this function exists to
+#'   prevent, so err towards listing more.
+#' @param label Character, what to call this cache in messages. Normally the
+#'   species or step name.
+#' @param quiet Logical. `FALSE` (default) reports the verdict and, when stale,
+#'   names the input responsible and how much newer it is.
+#' @return `TRUE` when the cache is absent, or older than any input, or any
+#'   input is missing; `FALSE` when it can be reused. The `"reason"` attribute
+#'   carries a one-line explanation in both cases.
+#' @examples
+#' \dontrun{
+#' cache.is.stale(here(RDataDir, "ATPU_finalist_pred_comparison.rda"),
+#'                inputs = c(here(RDataDir, "segdata.rda"),
+#'                           here(RDataDir, "ATPU_distdata_segdata_ddfs.Rda")),
+#'                label = "ATPU")
+#' }
+#' @export
+cache.is.stale <- function(cache.file, inputs, label = basename(cache.file),
+                           quiet = FALSE) {
+  checkmate::expect_string(cache.file, min.chars = 1)
+  checkmate::expect_character(inputs, min.len = 1, any.missing = FALSE)
+  checkmate::expect_string(label, min.chars = 1)
+  checkmate::expect_flag(quiet)
+
+  verdict <- function(stale, reason) {
+    if (!quiet)
+      message(sprintf("  %-14s %s: %s", label,
+                      if (stale) "RECOMPUTE" else "reuse", reason))
+    structure(stale, reason = reason)
+  }
+
+  if (!file.exists(cache.file))
+    return(verdict(TRUE, "no saved result"))
+
+  missing <- inputs[!file.exists(inputs)]
+  if (length(missing))
+    return(verdict(TRUE, sprintf("%d input(s) missing, first %s",
+                                 length(missing), basename(missing[1]))))
+
+  cache.time <- file.mtime(cache.file)
+  in.times   <- file.mtime(inputs)
+  newer      <- which(in.times > cache.time)
+
+  if (!length(newer))
+    return(verdict(FALSE, sprintf("saved %s, newest input %s",
+                                  format(cache.time, "%Y-%m-%d %H:%M"),
+                                  format(max(in.times), "%Y-%m-%d %H:%M"))))
+
+  worst <- newer[which.max(in.times[newer])]
+  verdict(TRUE, sprintf("%s is %.1f h newer (%s vs saved %s)",
+                        basename(inputs[worst]),
+                        as.numeric(difftime(in.times[worst], cache.time,
+                                            units = "hours")),
+                        format(in.times[worst], "%Y-%m-%d %H:%M"),
+                        format(cache.time, "%Y-%m-%d %H:%M")))
+}
+
 #' The highest density this species was ever actually seen at, by season
 #'
 #' A prediction-surface sanity check needs a ceiling, and a flat one cannot
