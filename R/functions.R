@@ -3389,22 +3389,69 @@ do.dotchart <- function(varname, dat) {
              ylab = "Order of the data")
 }
 
+#' The calendar months a season spans
+#'
+#' Season boundaries are encoded \code{month * 100 + day}, and a season may wrap
+#' the year end -- \code{Winter = c(from = 1101, to = 331)} is 11, 12, 1, 2, 3.
+#'
+#' This exists because \code{start:end} does **not** express that, and fails
+#' silently when it is asked to: \code{11:3} is a valid R expression returning
+#' \code{11, 10, 9, 8, 7, 6, 5, 4, 3}, so a wrapping season quietly averaged
+#' nine months of the wrong half of the year rather than raising anything
+#' (issue #74). Every Winter prediction grid in the project carried a
+#' March-November mean of \code{sst} and \code{sst.g} until this was fixed,
+#' 3.66 degC too warm, moving Winter abundance totals by up to 2.5x. Nothing
+#' detected it: the surfaces still correlated with the truth at Spearman
+#' 0.95-0.98, and only 11 prediction cells of 184,242 fell outside the training
+#' range, so the extrapolation check scored the whole grid analogue.
+#'
+#' \code{\link{assign.season}} has always handled the wrap correctly with its own
+#' \code{from > to} branch, which is why the *training* data were never affected.
+#' Both now go through the same rule.
+#'
+#' @param from,to Season boundaries encoded \code{month * 100 + day}, as held in
+#'   the project \code{seasons} list. Only the month part is used.
+#' @return Integer vector of months in calendar order from \code{from}'s month to
+#'   \code{to}'s month, wrapping through December when the season does.
+#' @examples
+#' season.months(1101, 331)   # 11 12 1 2 3
+#' season.months(601, 831)    # 6 7 8
+#' @export
+season.months <- function(from, to) {
+  checkmate::expect_number(from, lower = 101, upper = 1231)
+  checkmate::expect_number(to, lower = 101, upper = 1231)
+  start <- from %/% 100
+  end <- to %/% 100
+  months <- if (start > end) c(start:12, 1:end) else start:end
+  # A season cannot span more than a year, and every month must be a real one.
+  # Cheap, and the failure this replaces was silent.
+  stopifnot(length(months) >= 1, length(months) <= 12,
+            all(months %in% 1:12), !anyDuplicated(months))
+  months
+}
+
 #' Compute seasonal mean for one dynamic variable across a month range
 #'
 #' Averages the per-row monthly columns \code{<var>.MM} (and their scaled
-#' counterparts \code{<var>.MM_sc}) between \code{start} and \code{end}
-#' months and returns the means as a named list.
+#' counterparts \code{<var>.MM_sc}) over \code{months} and returns the means as
+#' a named list.
 #'
 #' @param var Character string variable name (e.g. \code{"sst"}).
 #' @param dat Data frame (normally a prediction grid) containing monthly
 #'   value columns named \code{<var>.<month>}.
-#' @param start Integer start month.
-#' @param end Integer end month.
+#' @param months Integer vector of months to average, from
+#'   \code{\link{season.months}}. This replaced a \code{start}/\code{end} pair
+#'   that was expanded here with \code{start:end}: building the sequence at the
+#'   call site is what let a wrapping season count downwards (issue #74), so the
+#'   months are now computed once, where the wrap is understood, and passed in.
 #' @return Named list with elements \code{<var>} and \code{<var>_sc}
 #'   containing the row-wise means.
 #' @export
-get.seas.mean.var <- function(var, dat, start, end) {
-  var.names <- paste(var, start:end, sep = ".")
+get.seas.mean.var <- function(var, dat, months) {
+  checkmate::expect_string(var)
+  checkmate::expect_integerish(months, lower = 1, upper = 12, min.len = 1,
+                               any.missing = FALSE, unique = TRUE)
+  var.names <- paste(var, months, sep = ".")
   var.names.sc <- paste0(var.names, "_sc")
   ret = list(dat %>%
                dplyr::select(dplyr::all_of(var.names)) %>%
@@ -3423,6 +3470,11 @@ get.seas.mean.var <- function(var, dat, start, end) {
 #' \code{\link{get.seas.mean.var}} for each variable in \code{dyn.vars} to
 #' compute the mean over the months defined in \code{season.spec}.
 #'
+#' The month set comes from \code{\link{season.months}}, which handles a season
+#' that wraps the year end. This function used to derive it here as
+#' \code{start:end}, which for Winter is \code{11:3} and counts downwards --
+#' see \code{\link{season.months}} for what that cost (issue #74).
+#'
 #' @param seas Character string season label.
 #' @param season.spec Named list of season boundary definitions for the
 #'   species (from the project \code{seasons} list).
@@ -3434,10 +3486,9 @@ get.seas.mean.var <- function(var, dat, start, end) {
 #'   appended.
 #' @export
 get.seas.mean <- function(seas, season.spec, dat, dyn.vars) {
-  start <- season.spec[[seas]]["from"] %/% 100
-  end <- season.spec[[seas]]["to"] %/% 100
+  months <- season.months(season.spec[[seas]]["from"], season.spec[[seas]]["to"])
   dat <- dplyr::filter(dat, as.character(Season) == seas)
-  new.cols <- purrr::map(dyn.vars, get.seas.mean.var, dat = dat, start = start, end = end)
+  new.cols <- purrr::map(dyn.vars, get.seas.mean.var, dat = dat, months = months)
   cbind(dat, new.cols)
 }
 

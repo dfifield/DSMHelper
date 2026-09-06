@@ -27,3 +27,9 @@ Filters \code{dat} to rows matching \code{seas}, then calls
 \code{\link{get.seas.mean.var}} for each variable in \code{dyn.vars} to
 compute the mean over the months defined in \code{season.spec}.
 }
+\details{
+The month set comes from \code{\link{season.months}}, which handles a season
+that wraps the year end. This function used to derive it here as
+\code{start:end}, which for Winter is \code{11:3} and counts downwards --
+see \code{\link{season.months}} for what that cost (issue #74).
+}
