@@ -9,7 +9,7 @@ do.pred.map.ggplot(
   dat,
   modname,
   species,
-  subs = c("Combined", "F", "W"),
+  subs = "Combined",
   samp_n = NA
 )
 }
@@ -23,7 +23,8 @@ columns.}
 
 \item{species}{Character string species code; used in messages.}
 
-\item{subs}{Platform subset label.}
+\item{subs}{Platform subset label, used only for the plot title. Its caller
+\code{\link[=do.pred.maps.ggplot]{do.pred.maps.ggplot()}} has already done the filtering and validation.}
 
 \item{samp_n}{Integer; if not \code{NA}, plot a random sample of this many
 polygons.}

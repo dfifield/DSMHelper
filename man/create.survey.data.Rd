@@ -12,7 +12,8 @@ create.survey.data(
   outproj = segProj,
   saveshp = TRUE,
   create_transects = FALSE,
-  intransect.only = TRUE
+  intransect.only = TRUE,
+  clip.area = NULL
 )
 }
 \arguments{
@@ -37,6 +38,10 @@ ship, observer, and direction into transects.}
 
 \item{intransect.only}{If \code{TRUE} (default), retain only observations
 where \code{InTransect == TRUE}.}
+
+\item{clip.area}{\code{sf} polygon that watches and observations are clipped
+to.  \code{NULL} (the default) falls back to \code{study.area} from the
+calling environment, which is the historical behaviour.}
 }
 \value{
 Named list with elements \code{distdata}, \code{watches}, and
@@ -44,11 +49,20 @@ optionally \code{transects}.
 }
 \description{
 Takes raw ECSAS data, filters observations, clips both watches and
-observations to the study area, and optionally assembles watches into
+observations to \code{clip.area}, and optionally assembles watches into
 transects.  Returns a list with elements \code{distdata}, \code{watches},
 and (if \code{create_transects = TRUE}) \code{transects}.
 }
 \details{
-Expects \code{study.area} (an \code{sf} polygon) to exist in the calling
-environment.
+\strong{The area effort is clipped to need not be the area results are
+reported over, and deliberately is not on some SubProjects.} Where a study
+area boundary is a straight administrative line through surveyed water,
+clipping at it cuts continuous coverage dead and leaves the spatial smooth
+unconstrained across the cut - on a log link that has produced predictions
+of 1.7e10 birds/km^2 (issue #33). Passing a buffered polygon here keeps the
+effort just outside the boundary, which anchors the smooth, while the
+prediction grid stays on the exact study area so totals still describe the
+assessment area. See the study-area buffer section of the project
+\code{CLAUDE.md}, and \code{\link{measure.study.area.buffer}} for choosing
+the width.
 }

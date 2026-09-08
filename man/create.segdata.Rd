@@ -4,20 +4,11 @@
 \alias{create.segdata}
 \title{Build segment data with environmental covariates from watch data}
 \usage{
-create.segdata(
-  the.data,
-  study.area,
-  inproj,
-  outproj,
-  scale.factors,
-  verbose = FALSE
-)
+create.segdata(the.data, inproj, outproj, scale.factors, verbose = FALSE)
 }
 \arguments{
 \item{the.data}{Named list with at least a \code{watches} element (as
 returned by \code{\link{create.survey.data}}).}
-
-\item{study.area}{\code{sf} polygon defining the study area.}
 
 \item{inproj}{EPSG code or CRS for input watch coordinates.}
 
@@ -40,4 +31,16 @@ as both an RData file and a shapefile.
 \details{
 Expects project globals \code{predLayerStudyAreaDir}, \code{segdatloc},
 and \code{ShapeDir} in the calling environment.
+
+\strong{This function does no spatial clipping.} It carried a
+\code{study.area} argument until DSMHelper 0.15.0 and never referenced it,
+while the documentation claimed the function clipped to the study area - it
+does not, and the argument is gone. A segment's presence in the output is
+decided entirely upstream, by the \code{clip.area} passed to
+\code{\link{create.survey.data}}; its covariates come from the rasters in
+\code{predLayerStudyAreaDir}, whose extent is set by \code{genpredrast} in
+\code{00.02_Extract_env_rasters.rmd}. Those two must agree: a segment
+outside the raster extent gets NA covariates here and is then dropped
+outright by the NA filter in \code{Generic_2_dsm.Rmd}. That is the failure
+mode to check first if a study-area buffer appears to have done nothing.
 }

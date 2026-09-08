@@ -30,6 +30,12 @@ a \code{"Combined"} subset by summing across platform levels, writes a
 combined shapefile, and saves four-season rasters as GeoTIFFs.
 }
 \details{
+Predictions are made with \code{discrete = FALSE} so that a cell's predicted
+density depends only on that cell's covariates and the model, not on the
+composition of the grid it happens to be predicted alongside. Note this does
+not reach \code{dsm::dsm_var_gam()} in the variance step, which takes no
+\code{discrete} argument - only refitting without discrete does.
+
 Expects project globals \code{ShapeDir}, \code{predDir}, \code{season.names},
 and \code{predgridCellArea}.
 }

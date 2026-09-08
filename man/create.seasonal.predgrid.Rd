@@ -4,23 +4,43 @@
 \alias{create.seasonal.predgrid}
 \title{Build a species-specific seasonal prediction grid}
 \usage{
-create.seasonal.predgrid(species, predgrid)
+create.seasonal.predgrid(
+  species,
+  predgrid,
+  write.shapefile = TRUE,
+  replicate.platform = TRUE,
+  platform.levels = unique(ddftype_to_platform)
+)
 }
 \arguments{
 \item{species}{Character string species code.}
 
 \item{predgrid}{\code{sf} data frame representing the prediction grid (one
 row per cell, with monthly covariate columns).}
+
+\item{write.shapefile}{Logical. Write \verb{[species]_predgrid.shp} to
+\code{ShapeDir}? Defaults to \code{TRUE}.}
+
+\item{replicate.platform}{Logical. Replicate the grid once per platform
+level, adding a \code{platform} column? Defaults to \code{TRUE}.}
+
+\item{platform.levels}{Character vector of platform levels to replicate over,
+normally \code{model$xlevels$platform} for the model being predicted.
+Defaults to \code{unique(ddftype_to_platform)}; see \emph{Getting the platform
+levels right}.}
 }
 \value{
 \code{sf} data frame with one row per (cell × season × platform)
-combination, containing seasonal mean covariates.
+combination, containing seasonal mean covariates, with \code{platform} a
+factor whose levels are \code{platform.levels} in the given order. With
+\code{replicate.platform = FALSE}, one row per (cell × season) and no
+\code{platform} column.
 }
 \description{
-Creates four seasonal copies of \code{predgrid}, computes seasonal mean
-values for all dynamic covariates, drops the monthly columns, and then
-replicates the grid once per level of the \code{platform} factor (one copy
-per level of \code{ddftype_to_platform}).  The combined grid is saved as a
+Creates one seasonal copy of \code{predgrid} per entry in
+\code{season.names}, computes seasonal mean values for all dynamic
+covariates, drops the monthly columns, and then replicates the grid once per
+level of the \code{platform} factor.  The combined grid is saved as a
 shapefile.
 }
 \details{
@@ -28,3 +48,30 @@ Expects project globals \code{seasons}, \code{season.names},
 \code{ddftype_to_platform}, and \code{ShapeDir} in the calling
 environment.
 }
+\section{Getting the platform levels right}{
+
+The number of prediction-grid copies must equal the number of segment-table
+copies per segment, because \code{\link[=dsm.pred]{dsm.pred()}} sums across them to get the combined
+surface. Miller et al. (2021) hold that by construction - \code{segs2 <- rbind(segs, segs)} and \code{pred2 <- rbind(pred, pred)} in their fulmar example -
+and here it holds as long as each platform level is carried by exactly one
+ddftype.
+
+The levels used to default to \code{unique(ddftype_to_platform)}, the declared
+global. That is wrong whenever a species' fitted model has fewer levels than
+the global declares - which happens routinely now that \code{\link[=create.dsm.data]{create.dsm.data()}}
+drops ddftypes with no observations. Predicting on a grid with more levels
+than the model has fails inside \code{mgcv} with "factor has new levels";
+predicting with FEWER fails silently, summing a subset of the components and
+under-reporting density with no error at all. So pass \code{platform.levels} from
+the fitted model (\code{model$xlevels$platform}) rather than relying on the
+default.
+
+The two side-effect arguments exist for consumers that want the seasonal
+covariate values without the products built for prediction.
+\code{\link[=assess.extrapolation]{assess.extrapolation()}} is one: it needs the covariates the predictions
+were made on, but must not rewrite the shapefile that
+\code{Generic_3_prediction.Rmd} owns, and has no use for the platform copies
+because \code{platform} is a model term rather than an environmental covariate.
+Both default to \code{TRUE}, so the prediction path is unchanged.
+}
+

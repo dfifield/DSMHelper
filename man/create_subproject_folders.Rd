@@ -14,6 +14,22 @@ create_subproject_folders(subproj)
 created).
 }
 \description{
+Creates every per-subproject folder the pipeline writes into, so that a new
+subproject can be run from \code{00.01} onwards without a step failing on a
+missing directory.  Safe to re-run: existing folders are left alone.
+}
+\details{
+Note that every path is built from \code{subproj}, never from the
+\code{SubProject} global.  Those are usually the same, but not while you are
+setting up a new subproject - which is the only time this function is
+called.
+
 Expects project globals \code{GenericRDataDir}, \code{GenericShapeDir},
-\code{predLayerDir}, \code{GISDir}, and \code{SubProject}.
+\code{predLayerDir} and \code{GISDir}.  These are not subproject-specific,
+unlike \code{predLayerStudyAreaDir} and \code{predLayerGridDir}, which is
+why the subproject-level paths are assembled here rather than taken from
+those globals.
+}
+\examples{
+# create_subproject_folders("Atl IMRP")
 }

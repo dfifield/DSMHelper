@@ -14,7 +14,13 @@ apply.dsm.var(dat, this.dsm)
 }
 \value{
 Named list with elements \code{pred.var} (per-cell variance) and
-\code{pred} (numeric prediction vector).
+\code{pred} (numeric prediction vector), carrying a \code{chunk.stats}
+attribute: \code{cells}, \code{mins} and \code{peak.gb} for this chunk.
+\code{\link{get.per.cell.var}} summarises those across chunks. They exist
+because one ATPU chunk of 220,000 rows ran 5x slower than nine others of
+the same size and reached a 31.7 GB working set, which nothing in the code
+explains (issue #46); without per-chunk numbers the next long run would
+again only be diagnosable from outside, with \code{tasklist}.
 }
 \description{
 Calls \code{\link[dsm]{dsm_var_gam}} on \code{dat} using the offset stored

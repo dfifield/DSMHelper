@@ -4,7 +4,7 @@
 \alias{get.seas.mean.var}
 \title{Compute seasonal mean for one dynamic variable across a month range}
 \usage{
-get.seas.mean.var(var, dat, start, end)
+get.seas.mean.var(var, dat, months)
 }
 \arguments{
 \item{var}{Character string variable name (e.g. \code{"sst"}).}
@@ -12,9 +12,11 @@ get.seas.mean.var(var, dat, start, end)
 \item{dat}{Data frame (normally a prediction grid) containing monthly
 value columns named \code{<var>.<month>}.}
 
-\item{start}{Integer start month.}
-
-\item{end}{Integer end month.}
+\item{months}{Integer vector of months to average, from
+\code{\link{season.months}}. This replaced a \code{start}/\code{end} pair
+that was expanded here with \code{start:end}: building the sequence at the
+call site is what let a wrapping season count downwards (issue #74), so the
+months are now computed once, where the wrap is understood, and passed in.}
 }
 \value{
 Named list with elements \code{<var>} and \code{<var>_sc}
@@ -22,6 +24,6 @@ containing the row-wise means.
 }
 \description{
 Averages the per-row monthly columns \code{<var>.MM} (and their scaled
-counterparts \code{<var>.MM_sc}) between \code{start} and \code{end}
-months and returns the means as a named list.
+counterparts \code{<var>.MM_sc}) over \code{months} and returns the means as
+a named list.
 }

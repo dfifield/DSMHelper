@@ -17,3 +17,22 @@ Copies the HTML report for the final model of \code{spec} into
 \code{predVersionDir} (project global) and also copies the accompanying
 \code{lib/} folder if needed.
 }
+\details{
+\strong{The summaries are timestamped, and this takes the newest.}
+\code{save.map()} writes \code{<modname>_<YYYYmmdd>_<HHMMSS>.html}, so a
+species accumulates one summary per run of \code{03.00} and a plain
+\code{<modname>.html} has never existed. This asked for exactly that name
+and reported the miss as an unreadable \code{stopifnot(file.copy(...))}
+failure (issue #65). The newest stamp is the right one because the
+prediction rasters carry no stamp and are overwritten in place, so the
+latest summary is the one describing the rasters being copied beside it.
+
+The copy is named \code{<spec>_<modname>.html}, without the stamp, so the
+shared version folder holds one predictable name per species. The stamp is
+not lost by dropping it: \code{save.map()} writes
+\code{<spec>_<modname>_<stamp>} as the page's own heading.
+
+Every failure here is now a sentence naming the species, the model and the
+folder looked in, because this runs inside a \code{walk()} over all species
+where the default error says only which index failed.
+}

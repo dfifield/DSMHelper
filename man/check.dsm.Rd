@@ -21,8 +21,15 @@ plots.}
 (concurvity, autocorrelogram, variograms).}
 }
 \value{
-\code{invisible(NULL)}, called for its side-effects (plots and
-printed output).
+Invisibly, a named list of the statistics computed along the way -
+\code{k.check}, \code{residuals}, \code{zeroinflation}, \code{spatial},
+\code{overdispersion}, \code{oe.platform}, \code{oe.depth}, and with
+\code{brief = FALSE} also \code{concurvity} and \code{variogram}. Entries
+that could not be computed hold the \code{try-error}. Pass it to
+\code{\link{interpret.dsm.checks}} for plain-English verdicts. Still called
+mainly for its side-effects: the printing and plotting are unchanged, and
+the statistics are captured as they are produced rather than recomputed,
+because \code{DHARMa::simulateResiduals()} is the slowest thing here.
 }
 \description{
 Runs a full suite of checks including smooth plots, gratia appraise,
@@ -30,3 +37,14 @@ mgcv \code{\link[mgcv]{gam.check}}, DHARMa residual tests, spatial
 autocorrelation tests, observed vs expected plots, and (optionally)
 concurvity checks and variograms.
 }
+\section{Reproducibility under parallelism}{
+
+Safe to call from a \code{future}/\code{furrr} worker: the generator is
+pinned to Mersenne-Twister for the duration and restored afterwards, so the
+seeded steps give the same numbers as a serial run. Without that pin they
+do not - measured on ATPU, an unpinned worker returned a k-index of 0.833
+against 0.896 serial and a Moran's I of -0.00216 against 0.000964, from
+identical seeds, because furrr's workers run L'Ecuyer-CMRG and
+\code{set.seed()} resets whichever generator is current.
+}
+

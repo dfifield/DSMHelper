@@ -35,7 +35,9 @@ and diagnostic histograms.}
 \code{ECSAS.find.suspicious.posn()}.}
 }
 \value{
-Data frame of suspicious watches, or \code{NULL} if none found.
+Data frame of suspicious watches; a 0-row data frame if none were
+found (previously \code{NULL}, which made callers such as
+\code{table(probs$Program)} fail with "nothing to tabulate").
 }
 \description{
 Wraps \code{ECSAS.find.suspicious.posn()} and annotates results with

@@ -1,6 +1,6 @@
 Package: DSMHelper
 Title: Distance Sampling and Density Surface Modelling Utilities
-Version: 0.2.2
+Version: 0.23.1
 Authors@R:
     person("Dave", "Fifield", email = "dave.fifield@ec.gc.ca",
            role = c("aut", "cre"))
@@ -13,6 +13,7 @@ Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
 Imports:
+    blockCV,
     checkmate,
     callr,
     DHARMa,
@@ -21,9 +22,11 @@ Imports:
     dplyr,
     dsm,
     dsmextra,
+    ECSASconnect,
     furrr,
     future,
     geodist,
+    grec,
     geosphere,
     ggplot2,
     gratia,
@@ -54,6 +57,7 @@ Imports:
     stringr,
     testthat,
     terra,
+    tibble,
     tidync,
     tidyr,
     viridis,
@@ -62,7 +66,6 @@ Remotes:
     densitymodelling/dsmextra,
     RoyChristian/ECSASconnect
 Suggests:
-    ECSASconnect,
     knitr,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3

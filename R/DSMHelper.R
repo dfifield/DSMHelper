@@ -6,7 +6,7 @@
 #   create.survey.data()        - references segProj, study.area
 #   create.segdata()            - references segProj, study.area, the.data
 #   do.generic.render()         - references ResultsDir, RDir
-#   do_oneoff_render()          - sources 'analysis settings.r' directly
+#   do_oneoff_render()          - sources 'analysis_settings.R' directly
 #   do.full.prelim()            - references spec.grps and other globals
 #   create_subproject_folders() - references GenericRDataDir, GenericShapeDir,
 #                                 predLayerDir, GISDir, SubProject
