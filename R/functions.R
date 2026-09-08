@@ -9952,13 +9952,41 @@ get.ds.res <- function(folder) {
 do.ds.det.fcn.checks <- function(folder, species, dsetname) {
   fl <- list.files(path = folder, pattern = "AIC.*\\.RData", full.names = T)
 
+  # A degenerate candidate must not stop the checks on its siblings, let alone
+  # the species and the whole render. This is a diagnostic pass over CANDIDATE
+  # models: some are expected to be unusable, and nothing here feeds the fitted
+  # objects downstream - it only writes summary output, so skipping one costs a
+  # summary and nothing else.
+  #
+  # The failure that prompted this (Atl IMRP, Murres, ECSAS_Aerial_W_D): hr with
+  # a size covariate over 94 observations spanning four distance bins. mrds
+  # reports convergence, but the scale is exp(8.01) ~ 3.0e3 so the detection
+  # function is flat across the 0.15 km actually observed, the shape parameter
+  # is unidentifiable, and the hessian holds -Inf. solve() then returns an
+  # all-NaN vcov and eigen() is the first call to object.
+  failed <- character(0)
+
   purrr::walk(fl, function(filename) {
     message(sprintf("Checking detection function: %s", filename))
-    load(filename)
-    check.det.fcn(model,
-                  species = species,
-                  stringr::str_replace(basename(folder), stringr::fixed("DF Summaries_"), ""))
+    tryCatch({
+      load(filename)
+      check.det.fcn(model,
+                    species = species,
+                    stringr::str_replace(basename(folder), stringr::fixed("DF Summaries_"), ""))
+    }, error = function(e) {
+      failed <<- c(failed, basename(filename))
+      warning("do.ds.det.fcn.checks: skipping ", basename(filename), " in ",
+              folder, " - ", conditionMessage(e), immediate. = TRUE)
+    })
   })
+
+  if (length(failed))
+    message(sprintf(paste("do.ds.det.fcn.checks: %d of %d candidate model(s)",
+                          "could not be checked in %s: %s"),
+                    length(failed), length(fl), basename(folder),
+                    paste(failed, collapse = ", ")))
+
+  invisible(failed)
 }
 
 
