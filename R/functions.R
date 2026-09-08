@@ -1601,7 +1601,16 @@ do.det.fcn.spec <- function(df.spec,
   if (dist_type == "N") {
     distdata <- dplyr::filter(
       distdata,
-      dataset == dataset,
+      # dataset == dataset,   # commented out - see Atlantic-DSM#76
+      # As written this was a self-comparison: `dataset` is the local
+      # variable from get.dataset(), not a column (the column is `Dataset`),
+      # so it evaluated to a length-1 TRUE and filtered nothing. Correcting
+      # it to `Dataset == dataset` would drop every SOMEC observation from
+      # every ddf while its effort stayed in segdata, because def.ddf.list
+      # has no SOMEC_* specs. That needs a per-SubProject decision about
+      # separate SOMEC ddfs first, so the clause is removed rather than
+      # fixed. Behaviour is unchanged; the code no longer claims to filter
+      # on something it does not.
       SurveyType == platform_class,
       FlySwim == behav,
       Alpha %in% spec.grps[[species]],
@@ -1616,7 +1625,16 @@ do.det.fcn.spec <- function(df.spec,
     # Filter perp distances for this species, behav, platform_class, dataset
     distdata <- dplyr::filter(
       distdata,
-      dataset == dataset,
+      # dataset == dataset,   # commented out - see Atlantic-DSM#76
+      # As written this was a self-comparison: `dataset` is the local
+      # variable from get.dataset(), not a column (the column is `Dataset`),
+      # so it evaluated to a length-1 TRUE and filtered nothing. Correcting
+      # it to `Dataset == dataset` would drop every SOMEC observation from
+      # every ddf while its effort stayed in segdata, because def.ddf.list
+      # has no SOMEC_* specs. That needs a per-SubProject decision about
+      # separate SOMEC ddfs first, so the clause is removed rather than
+      # fixed. Behaviour is unchanged; the code no longer claims to filter
+      # on something it does not.
       SurveyType == platform_class,
       FlySwim == behav,
       Alpha %in% spec.grps[[species]],
