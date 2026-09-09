@@ -1281,9 +1281,24 @@ get.dist_type <- function(nm) {
 #' per-species blocks can be left untouched across SubProjects with different
 #' survey coverage.
 #'
+#' The same silent-append happens one level down, when a field name *inside* a
+#' spec is misspelled - \code{$formula} for \code{$final.formula},
+#' \code{$final.notes} for \code{$notes}.  That one is never legitimate, and it
+#' is the worse of the two because nothing downstream reads the new element and
+#' \code{final.formula} keeps its \code{~1} default, so the detection function
+#' is quietly fitted without the intended covariate.  Five such lines had been
+#' sitting in \code{01.02} (Atlantic DSM issue #78), one of them costing
+#' NL_EXPL_DRL_RA's LESP its \code{~ Season} ship-flying term.  So an unknown
+#' field is a hard error here, where an unknown ddftype is only a warning.
+#'
 #' @param df.mod.list Named list (by species) of named lists of DDF specs.
 #' @param valid.names Character vector of the DDF spec names that should be
 #'   retained; defaults to the project global \code{def.ddf.list}'s names.
+#' @param valid.fields Character vector of the field names a spec may contain;
+#'   defaults to the project global \code{generic.ddf.spec}'s names.  Pass
+#'   \code{NULL} to skip the check - appropriate only for a
+#'   \code{df.mod.list} the fitting steps have already added their own fields
+#'   to, which is not how \code{01.02} calls it.
 #' @return \code{df.mod.list} with out-of-date entries removed.
 #' @examples
 #' \dontrun{
@@ -1291,10 +1306,36 @@ get.dist_type <- function(nm) {
 #' save(df.mod.list, file = dfModlistLoc)
 #' }
 #' @export
-prune.df.mod.list <- function(df.mod.list, valid.names = names(def.ddf.list)) {
+prune.df.mod.list <- function(df.mod.list, valid.names = names(def.ddf.list),
+                              valid.fields = names(generic.ddf.spec)) {
 
   checkmate::expect_list(df.mod.list, min.len = 1)
   checkmate::expect_character(valid.names, min.len = 1, any.missing = FALSE)
+  if (!is.null(valid.fields))
+    checkmate::expect_character(valid.fields, min.len = 1, any.missing = FALSE)
+
+  # A misspelled field name appends silently, and unlike a misspelled ddftype
+  # there is no SubProject in which that is expected - so stop rather than
+  # warn, and name every offender at once so one run finds them all.
+  if (!is.null(valid.fields)) {
+    bad <- df.mod.list %>%
+      purrr::imap(function(specs, species) {
+        specs %>%
+          purrr::map(~ setdiff(names(.x), valid.fields)) %>%
+          purrr::keep(~ length(.x) > 0) %>%
+          purrr::imap_chr(~ sprintf("  %s $%s: %s", species, .y,
+                                    paste(.x, collapse = ", ")))
+      }) %>%
+      unlist(use.names = FALSE)
+
+    if (length(bad) > 0)
+      stop(sprintf(
+        paste0("prune.df.mod.list: ddf spec field(s) that do not exist in ",
+               "generic.ddf.spec:\n%s\nAssigning to a name a list does not ",
+               "have appends it silently, so these were doing nothing. Valid ",
+               "fields are: %s"),
+        paste(bad, collapse = "\n"), paste(valid.fields, collapse = ", ")))
+  }
 
   dropped <- list()
 

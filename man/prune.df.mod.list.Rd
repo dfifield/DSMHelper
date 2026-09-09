@@ -4,13 +4,23 @@
 \alias{prune.df.mod.list}
 \title{Drop DDF spec entries that no longer correspond to a live ddftype}
 \usage{
-prune.df.mod.list(df.mod.list, valid.names = names(def.ddf.list))
+prune.df.mod.list(
+  df.mod.list,
+  valid.names = names(def.ddf.list),
+  valid.fields = names(generic.ddf.spec)
+)
 }
 \arguments{
 \item{df.mod.list}{Named list (by species) of named lists of DDF specs.}
 
 \item{valid.names}{Character vector of the DDF spec names that should be
 retained; defaults to the project global \code{def.ddf.list}'s names.}
+
+\item{valid.fields}{Character vector of the field names a spec may contain;
+defaults to the project global \code{generic.ddf.spec}'s names.  Pass
+\code{NULL} to skip the check - appropriate only for a
+\code{df.mod.list} the fitting steps have already added their own fields
+to, which is not how \code{01.02} calls it.}
 }
 \value{
 \code{df.mod.list} with out-of-date entries removed.
@@ -28,6 +38,16 @@ breaks the positional correspondence between \code{def.ddf.list} and
 This drops any such entries, reporting what was removed, so the hand-written
 per-species blocks can be left untouched across SubProjects with different
 survey coverage.
+
+The same silent-append happens one level down, when a field name \emph{inside} a
+spec is misspelled - \code{$formula} for \code{$final.formula},
+\code{$final.notes} for \code{$notes}.  That one is never legitimate, and it
+is the worse of the two because nothing downstream reads the new element and
+\code{final.formula} keeps its \code{~1} default, so the detection function
+is quietly fitted without the intended covariate.  Five such lines had been
+sitting in \code{01.02} (Atlantic DSM issue #78), one of them costing
+NL_EXPL_DRL_RA's LESP its \code{~ Season} ship-flying term.  So an unknown
+field is a hard error here, where an unknown ddftype is only a warning.
 }
 \examples{
 \dontrun{
