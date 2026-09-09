@@ -113,7 +113,7 @@ width beyond that measures the edge of the query, not the edge of the data.
 \examples{
 \dontrun{
 # In 00.01_Extract_data.Rmd, immediately before create.survey.data():
-measure.study.area.buffer(ecsas.ship.dat, study.area,
+measure.study.area.buffer(ecsas.ship.dat, training.study.area,
                           season.def = seasons[["Petrels"]])
 }
 }

@@ -40,8 +40,11 @@ ship, observer, and direction into transects.}
 where \code{InTransect == TRUE}.}
 
 \item{clip.area}{\code{sf} polygon that watches and observations are clipped
-to.  \code{NULL} (the default) falls back to \code{study.area} from the
-calling environment, which is the historical behaviour.}
+to.  \code{NULL} (the default) falls back to
+\code{training.study.area.buffered} from the calling environment. That
+fallback was \code{study.area} until issue #77 renamed the polygons; every
+caller in the pipeline passes \code{clip.area} explicitly, so it exists only
+so an interactive call does something sensible.}
 }
 \value{
 Named list with elements \code{distdata}, \code{watches}, and

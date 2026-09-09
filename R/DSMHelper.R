@@ -3,15 +3,16 @@
 #
 # TODO - functions that reference project-specific globals and need updating
 # before they will work outside the Atlantic DSM project:
-#   create.survey.data()        - references segProj, study.area
-#   create.segdata()            - references segProj, study.area, the.data
+#   create.survey.data()        - references segProj, training.study.area.buffered
+#   create.segdata()            - references segProj, the.data
 #   do.generic.render()         - references ResultsDir, RDir
 #   do_oneoff_render()          - sources 'analysis_settings.R' directly
 #   do.full.prelim()            - references spec.grps and other globals
 #   create_subproject_folders() - references GenericRDataDir, GenericShapeDir,
 #                                 predLayerDir, GISDir, SubProject
 #   get.seas.mean()             - references predgrid
-#   various env covar fns       - reference segProj, study.area, RasterDir
+#   various env covar fns       - reference segProj, training.study.area,
+#                                 RasterDir
 # ============================================================================
 
 #' Operators imported for use throughout DSMHelper

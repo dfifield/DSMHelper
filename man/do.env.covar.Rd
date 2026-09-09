@@ -25,5 +25,5 @@ the segment data and the prediction grid.
 }
 \details{
 Expects project globals \code{predLayerDir}, \code{segProj}, and
-\code{study.area}.
+\code{training.study.area}.
 }

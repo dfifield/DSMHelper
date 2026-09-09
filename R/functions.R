@@ -369,7 +369,7 @@ check.problem.data = function(alldat,
 #' @examples
 #' \dontrun{
 #' # In 00.01_Extract_data.Rmd, immediately before create.survey.data():
-#' measure.study.area.buffer(ecsas.ship.dat, study.area,
+#' measure.study.area.buffer(ecsas.ship.dat, training.study.area,
 #'                           season.def = seasons[["Petrels"]])
 #' }
 #' @export
@@ -626,6 +626,114 @@ measure.study.area.buffer <- function(watches,
 }
 
 
+#' Read a study-area polygon from a SubProject's shapefile folder
+#'
+#' Reads one shapefile layer and returns it ready for use as a study area: Z/M
+#' coordinates dropped and, when \code{crs} is given, projected.
+#'
+#' Issue #77 split the single study area into two roles - the area the model is
+#' TRAINED over and the area predictions are REPORTED over - each named by a
+#' setting (\code{TRAINING_STUDY_AREA_LAYER}, \code{PRED_STUDY_AREA_LAYER})
+#' giving a layer inside that SubProject's own \code{ShapeDir}. This is the one
+#' place that turns such a setting into a polygon, so both roles are read
+#' identically and a missing layer says which setting asked for it rather than
+#' failing somewhere downstream with a bare "Cannot open data source".
+#'
+#' \code{sf::st_zm()} is not optional. A study area read from a shapefile can
+#' carry Z or M coordinates - NL_EXPL_DRL_RA's does - and GEOS refuses them
+#' outright ("GEOS does not support XYM or XYZM geometries"), far from here.
+#'
+#' @param shape.dir Folder holding the shapefile, normally the SubProject's
+#'   \code{ShapeDir}.
+#' @param layer Layer name, without the \code{.shp} extension.
+#' @param crs Target CRS, normally \code{segProj}. \code{NULL} (the default)
+#'   leaves the layer in the CRS it was stored in, which is what a SubProject
+#'   that has yet to fit its projection needs.
+#' @param setting Name of the setting that supplied \code{layer}. Used only to
+#'   point the error message at what to fix.
+#' @return An \code{sf} object.
+#' @examples
+#' \dontrun{
+#' training.study.area <- read.study.area.layer(
+#'   ShapeDir, TRAINING_STUDY_AREA_LAYER, segProj,
+#'   setting = "TRAINING_STUDY_AREA_LAYER")
+#' }
+#' @export
+read.study.area.layer <- function(shape.dir, layer, crs = NULL,
+                                  setting = NULL) {
+  coll <- checkmate::makeAssertCollection()
+  checkmate::assert_string(shape.dir, add = coll)
+  checkmate::assert_string(layer, add = coll)
+  checkmate::assert_string(setting, null.ok = TRUE, add = coll)
+  checkmate::reportAssertions(coll)
+
+  shp <- file.path(shape.dir, paste0(layer, ".shp"))
+  if (!file.exists(shp))
+    stop(sprintf(
+      "read.study.area.layer: no layer '%s' in %s.%s",
+      layer, shape.dir,
+      if (is.null(setting)) ""
+      else sprintf(" It was named by %s in analysis_settings.R.", setting)))
+
+  sa <- sf::st_read(shp, quiet = TRUE) %>%
+    sf::st_zm()
+
+  if (!is.null(crs)) sa <- sf::st_transform(sa, crs)
+
+  sa
+}
+
+
+#' Load a SubProject's study-area polygons, asserting the set is current
+#'
+#' Drop-in replacement for \code{load(studyAreaLoc)} that guarantees the
+#' polygons issue #77 introduced are all present before anything reads them.
+#'
+#' Before #77 the file held \code{study.area} and \code{study.area.buffered}.
+#' It now holds \code{training.study.area},
+#' \code{training.study.area.buffered} and \code{pred.study.area}, plus the
+#' \code{study.area.layers} provenance vector. The names changed rather than
+#' gaining aliases on purpose: a step that goes on silently reporting over the
+#' wrong polygon is exactly the failure a two-polygon design makes possible, so
+#' a stale file has to stop the run rather than half-work.
+#'
+#' @param path Path to \code{study_area.rda}, normally \code{studyAreaLoc}.
+#' @param envir Environment to load the objects into; defaults to the caller's,
+#'   so this behaves like \code{load()} at the call site.
+#' @return Invisibly, the character vector of object names loaded.
+#' @examples
+#' \dontrun{
+#' load.study.areas(studyAreaLoc)
+#' }
+#' @export
+load.study.areas <- function(path, envir = parent.frame()) {
+  coll <- checkmate::makeAssertCollection()
+  checkmate::assert_string(path, add = coll)
+  checkmate::assert_environment(envir, add = coll)
+  checkmate::reportAssertions(coll)
+  checkmate::assert_file_exists(path, access = "r")
+
+  loaded <- load(path, envir = envir)
+
+  required <- c("training.study.area", "training.study.area.buffered",
+                "pred.study.area")
+  absent <- setdiff(required, loaded)
+
+  if (length(absent))
+    stop(sprintf(
+      paste0("load.study.areas: %s holds {%s} but not {%s}. That is a ",
+             "pre-issue-#77 study area file, written when there was one ",
+             "study area rather than a training one and a prediction one. ",
+             "Re-run 00.00.5_Create_study_area.Rmd for this SubProject."),
+      path, paste(loaded, collapse = ", "), paste(absent, collapse = ", ")))
+
+  for (nm in required)
+    checkmate::assert_class(get(nm, envir = envir), "sf", .var.name = nm)
+
+  invisible(loaded)
+}
+
+
 #' Build observation and watch tables from raw ECSAS data
 #'
 #' Takes raw ECSAS data, filters observations, clips both watches and
@@ -660,8 +768,11 @@ measure.study.area.buffer <- function(watches,
 #' @param intransect.only If \code{TRUE} (default), retain only observations
 #'   where \code{InTransect == TRUE}.
 #' @param clip.area \code{sf} polygon that watches and observations are clipped
-#'   to.  \code{NULL} (the default) falls back to \code{study.area} from the
-#'   calling environment, which is the historical behaviour.
+#'   to.  \code{NULL} (the default) falls back to
+#'   \code{training.study.area.buffered} from the calling environment. That
+#'   fallback was \code{study.area} until issue #77 renamed the polygons; every
+#'   caller in the pipeline passes \code{clip.area} explicitly, so it exists only
+#'   so an interactive call does something sensible.
 #' @return Named list with elements \code{distdata}, \code{watches}, and
 #'   optionally \code{transects}.
 #' @export
@@ -675,14 +786,20 @@ create.survey.data <- function(raw.dat = NULL,
                                intransect.only = TRUE,
                                clip.area = NULL) {
 
-  # Fall back to the caller's study.area so existing callers are unaffected.
-  # Resolved before validation so the assertion reports on what is actually
-  # used, whichever it came from.
+  # Fall back to the caller's training study area. Resolved before validation
+  # so the assertion reports on what is actually used, whichever it came from.
+  #
+  # The BUFFERED one, because that is what the clip is for: effort just outside
+  # the boundary anchors the spatial smooth (issue #33). The name changed with
+  # issue #77, which split the single study area into a training polygon and a
+  # prediction one - falling back to a name that no longer exists would fail
+  # here rather than at the call site.
   if (is.null(clip.area)) {
-    if (!exists("study.area", envir = parent.frame()))
-      stop("create.survey.data: clip.area is NULL and there is no study.area ",
-           "in the calling environment to fall back to.")
-    clip.area <- get("study.area", envir = parent.frame())
+    if (!exists("training.study.area.buffered", envir = parent.frame()))
+      stop("create.survey.data: clip.area is NULL and there is no ",
+           "training.study.area.buffered in the calling environment to fall ",
+           "back to.")
+    clip.area <- get("training.study.area.buffered", envir = parent.frame())
   }
 
   coll = checkmate::makeAssertCollection()
@@ -3264,10 +3381,10 @@ create.ncdf.rast <-
                 immediate. = TRUE)
 
       res <- terra::project(res, terra::rast(to), threads = TRUE) %>%
-        terra::mask(study.area)
+        terra::mask(training.study.area)
     } else if (!is.null(outproj))
       res <- terra::project(res, outproj, threads = TRUE) %>%
-      terra::mask(study.area)
+      terra::mask(training.study.area)
 
     # NB: terra::plot(), not bare plot(). This package's NAMESPACE has no
     # import() directives, so inside package code `plot` resolves up the
@@ -5513,7 +5630,7 @@ get.covar.netCDF.dates <- function(var.name){
 #' available and downloads missing ones if needed.
 #'
 #' Expects project globals \code{predLayerDir}, \code{segProj}, and
-#' \code{study.area}.
+#' \code{training.study.area}.
 #'
 #' @param env_covar_spec Single-row data frame from the project
 #'   \code{env_covar_spec} table with columns \code{var_name},
@@ -5586,7 +5703,7 @@ get.env.covar <- function(env_covar_spec,
 
   # Re-project, clip, etc
   final <- sf::st_transform(env_dat, segProj) %>%
-    `[`(study.area) %>%
+    `[`(training.study.area) %>%
     setNames(var_name) # b/c previous processing steps loose the name
 
   if (verbose)
@@ -5603,7 +5720,7 @@ get.env.covar <- function(env_covar_spec,
 #' the segment data and the prediction grid.
 #'
 #' Expects project globals \code{predLayerDir}, \code{segProj}, and
-#' \code{study.area}.
+#' \code{training.study.area}.
 #'
 #' @param env_covar_spec Single-row data frame from the project
 #'   \code{env_covar_spec} table.
@@ -5662,7 +5779,7 @@ do.env.covar <- function(env_covar_spec,
 
   # Re-project, clip, etc and save - xxx this line doesn't work
   final <- sf::st_transform(env.dat, segProj) %>%
-    `[`(study.area)
+    `[`(training.study.area)
 
   final
 }

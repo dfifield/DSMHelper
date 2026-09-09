@@ -28,5 +28,5 @@ available and downloads missing ones if needed.
 }
 \details{
 Expects project globals \code{predLayerDir}, \code{segProj}, and
-\code{study.area}.
+\code{training.study.area}.
 }
