@@ -4095,28 +4095,25 @@ get.combined.segdata <- function(segdata){
                                                     nchar(ddftype_levels[1]) - 1)) %>%
     dplyr::arrange(Sample.Label)
 
-  # There are now multiple consecutive rows for each segment.
-
-  # Figure out how many copies of each segment there are. Complain if not all the
-  # same. This relies on having a fixed symmetric setup where, for example,
-  # the aerial segments are copied the same number of times as the ship ones
-  # (ie once each for Water, Fly, and Strip)
+  # There are now multiple consecutive rows for each segment, but *not*
+  # necessarily the same number for every segment: create.dsm.data() drops
+  # copies for any ddftype with no observations, and which ddftypes are
+  # populated can differ by platform. A SubProject mixing Ship and Aerial
+  # effort can easily have e.g. 4 ship copies (W/F x D/N) alongside 1 aerial
+  # copy (W only) for the same species - measured on Atl IMRP ATPU, where
+  # aerial retains only AWD while ship retains SWD/SFD/SWN/SFN. A single
+  # global ncopies (the assumption this function used until DSMHelper 0.24.1)
+  # throws here; group by the per-segment run instead, which tolerates a
+  # different copy count per segment.
   rl <- rle(segdata$Sample.Label)
-  stopifnot(length(unique(rl$lengths)) == 1)
-  ncopies <- rl$lengths[1]
+  grp <- rep(seq_along(rl$lengths), rl$lengths)
+  first.in.grp <- !duplicated(grp)
 
-  # Keep every nth row, summing values within each group of ncopies segdata rows,
-  # and make it a column in  new data frame containing only every nth segdata row
-  # in order to get one row per segment. Note that rollapply() uses the full
-  # segdata (before selecting every nth row)
-
-  keep <- rep(c(TRUE, rep(FALSE, times = ncopies - 1)),
-              times = nrow(segdata) / ncopies)
-  res <- segdata[keep,] %>%
+  res <- segdata[first.in.grp, ] %>%
     dplyr::mutate(
-      estDens = zoo::rollapply(segdata$estDens, ncopies, by = ncopies, sum),
-      estAbund = zoo::rollapply(segdata$estAbund, ncopies, by = ncopies, sum),
-      rawCount = zoo::rollapply(segdata$rawCount, ncopies, by = ncopies, sum)
+      estDens = ave(segdata$estDens, grp, FUN = sum)[first.in.grp],
+      estAbund = ave(segdata$estAbund, grp, FUN = sum)[first.in.grp],
+      rawCount = ave(segdata$rawCount, grp, FUN = sum)[first.in.grp]
     ) %>%
     dplyr::select(-platform) # No longer makes any sense since it will have value of first row in group
 
