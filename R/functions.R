@@ -8603,6 +8603,19 @@ summarise.extrapolation.abundance <- function(cells, pred.raster) {
 #'   plots.
 #' @param brief If \code{TRUE} (default), skip the more expensive diagnostics
 #'   (concurvity, autocorrelogram, variograms).
+#' @param k.check.seed Seed for \code{mgcv::k.check()}, which resamples at
+#'   random. Defaults to a global \code{K_CHECK_SEED}.
+#' @param spatial.autocorr.max.n Most segments handed to DHARMa's spatial
+#'   autocorrelation test, which builds a dense n x n distance matrix. Defaults
+#'   to a global \code{SPATIAL_AUTOCORR_MAX_N}.
+#' @param spatial.autocorr.seed Seed for choosing that sample. Defaults to a
+#'   global \code{SPATIAL_AUTOCORR_SEED}.
+#'
+#'   Pass all three explicitly from a generic. Their defaults search from this
+#'   package's namespace, so they reach the global environment but never the
+#'   environment a generic sourced \code{analysis_settings.R} into - in a
+#'   \code{furrr} worker that means the hard-coded fallback, not the setting.
+#'   \code{\link{get.dsm.check.provenance}} records the values passed here.
 #' @return Invisibly, a named list of the statistics computed along the way -
 #'   \code{k.check}, \code{residuals}, \code{zeroinflation}, \code{spatial},
 #'   \code{overdispersion}, \code{oe.platform}, \code{oe.depth}, and with
@@ -8625,8 +8638,15 @@ check.dsm <- function(dsm_final,
                       modname,
                       segdata,
                       smoother.plots = FALSE,
-                      brief = TRUE # Only do partial diagnostics to speed it up
+                      brief = TRUE, # Only do partial diagnostics to speed it up
+                      k.check.seed = get0("K_CHECK_SEED", ifnotfound = 20260828),
+                      spatial.autocorr.max.n = get0("SPATIAL_AUTOCORR_MAX_N", ifnotfound = 5000),
+                      spatial.autocorr.seed = get0("SPATIAL_AUTOCORR_SEED", ifnotfound = 20260828)
 ) {
+  checkmate::expect_count(k.check.seed)
+  checkmate::expect_count(spatial.autocorr.max.n, positive = TRUE)
+  checkmate::expect_count(spatial.autocorr.seed)
+
   # accessing columns with segdata[, termlab] below doesn't work with tbls or
   # sf objects.
   segdata <- as.data.frame(segdata)
@@ -8722,7 +8742,7 @@ check.dsm <- function(dsm_final,
   # dsm_tw_allpred_abund_factor returned k-index 0.884, 0.789 and 0.897 for
   # s(x,y), which straddles the threshold this check reads. Without a seed the
   # verdict would not reproduce from one run to the next.
-  set.seed(get0("K_CHECK_SEED", ifnotfound = 20260828))
+  set.seed(k.check.seed)
   checks$k.check <- try(mgcv::k.check(dsm_final), silent = TRUE)
 
   # Remove "dsm" class to make DHARMa happy
@@ -8769,10 +8789,10 @@ check.dsm <- function(dsm_final,
       dplyr::arrange(match(loc, levels(factor(loc.id))))
     resids <- recal$scaledResiduals
     stopifnot(length(resids) == nrow(locs))
-    cap <- get0("SPATIAL_AUTOCORR_MAX_N", ifnotfound = 5000)
+    cap <- spatial.autocorr.max.n
     n.locs <- nrow(locs)
     if (n.locs > cap) {
-      set.seed(get0("SPATIAL_AUTOCORR_SEED", ifnotfound = 20260828))
+      set.seed(spatial.autocorr.seed)
       keep <- sort(sample(n.locs, cap))
       message(sprintf(
         "Spatial autocorrelation: %d locations, testing a random %d of them.",
@@ -10831,6 +10851,155 @@ cache.is.stale <- function(cache.file, inputs, label = basename(cache.file),
                                             units = "hours")),
                         format(in.times[worst], "%Y-%m-%d %H:%M"),
                         format(cache.time, "%Y-%m-%d %H:%M")))
+}
+
+#' Everything that decides a species' family CV scores, other than its models
+#'
+#' Stored in each \code{family_cv_parts/[species].rds} by the DSM model
+#' selection step and compared by \code{\link{saved.result.stale.reason}}
+#' before a part is reused, so a part scored on other folds or under another
+#' mgcv is refitted rather than silently reused. Only what reaches
+#' \code{\link{assign.blocks}} and \code{\link{run.family.cv}} belongs here: the
+#' verdict thresholds (\code{family.cv.tol}, \code{family.cv.criterion}, the
+#' divergence and outlier ratios) are applied to the saved scores afterwards,
+#' so changing them must not cost a refit.
+#'
+#' Not detected: a change to the code of \code{run.family.cv()} or
+#' \code{assign.blocks()}. Force a refit for that run.
+#'
+#' @param folds Integer, number of CV folds.
+#' @param block.size.m Numeric, CV block edge length in metres.
+#' @param nsim Integer, predictive draws per held-out segment.
+#' @param seed Integer, fold and simulation seed.
+#' @param balance.column Character or \code{NULL}, the column whose classes are
+#'   balanced across folds.
+#' @return Named list: the arguments, plus the installed \code{mgcv} version
+#'   (1.9-4 sent every \code{tw()} fit degenerate) and \code{blockCV} version
+#'   (4.0-0 changed the balancing, so the seed alone does not pin the folds).
+#' @examples
+#' \dontrun{
+#' get.family.cv.provenance(folds = 5, block.size.m = 1e5, nsim = 200,
+#'                      seed = 20260820, balance.column = "SurveyType")
+#' }
+#' @export
+get.family.cv.provenance <- function(folds, block.size.m, nsim, seed,
+                                     balance.column = NULL) {
+  checkmate::expect_count(folds, positive = TRUE)
+  checkmate::expect_number(block.size.m, lower = 0)
+  checkmate::expect_count(nsim, positive = TRUE)
+  checkmate::expect_count(seed)
+  checkmate::expect_string(balance.column, null.ok = TRUE)
+
+  list(mgcv           = as.character(utils::packageVersion("mgcv")),
+       blockCV        = as.character(utils::packageVersion("blockCV")),
+       folds          = folds,
+       block_size_m   = block.size.m,
+       nsim           = nsim,
+       seed           = seed,
+       balance_column = balance.column)
+}
+
+#' Everything that decides a species' saved DSM checks, other than its models
+#'
+#' Saved beside the interpretations in \code{[species]_dsm_checks.rda} by the
+#' DSM checking generic and compared by \code{\link{saved.result.stale.reason}}
+#' before they are reused, so checks made under other settings are redone
+#' rather than rolled up as current. The verdict thresholds are included
+#' because the file holds verdicts, not raw statistics: a change to
+#' \code{\link{default.check.thresholds}} makes every saved verdict stale.
+#'
+#' Not detected: a change to the code of \code{\link{check.dsm}} or
+#' \code{\link{interpret.dsm.checks}}. Force a re-check for that run.
+#'
+#' @param finalists.only Logical, whether only the family finalists are checked.
+#' @param brief Logical, \code{check.dsm(brief = )}.
+#' @param k.check.seed,spatial.autocorr.max.n,spatial.autocorr.seed The values
+#'   passed to \code{\link{check.dsm}}. Pass the same ones, or the record
+#'   describes a run that did not happen.
+#' @param thresholds Named list, the verdict thresholds in force.
+#' @return Named list: the arguments, plus the installed \code{mgcv} and
+#'   \code{DHARMa} versions.
+#' @examples
+#' \dontrun{
+#' get.dsm.check.provenance(finalists.only = TRUE, brief = FALSE,
+#'                      k.check.seed = 20260828, spatial.autocorr.max.n = 5000,
+#'                      spatial.autocorr.seed = 20260828)
+#' }
+#' @export
+get.dsm.check.provenance <- function(finalists.only, brief, k.check.seed,
+                                     spatial.autocorr.max.n, spatial.autocorr.seed,
+                                     thresholds = default.check.thresholds()) {
+  checkmate::expect_flag(finalists.only)
+  checkmate::expect_flag(brief)
+  checkmate::expect_count(k.check.seed)
+  checkmate::expect_count(spatial.autocorr.max.n, positive = TRUE)
+  checkmate::expect_count(spatial.autocorr.seed)
+  checkmate::expect_list(thresholds, names = "named")
+
+  list(mgcv                   = as.character(utils::packageVersion("mgcv")),
+       DHARMa                 = as.character(utils::packageVersion("DHARMa")),
+       finalists_only         = finalists.only,
+       brief                  = brief,
+       k_check_seed           = k.check.seed,
+       spatial_autocorr_max_n = spatial.autocorr.max.n,
+       spatial_autocorr_seed  = spatial.autocorr.seed,
+       thresholds             = thresholds)
+}
+
+#' Why a saved result cannot be reused, or NA if it can
+#'
+#' The reuse test for a step that saves an expensive per-species result and
+#' skips recomputing it next time. Existence alone is never trusted: that is how
+#' the finalist comparison once rolled up results from before the study-area
+#' buffer as current (Atlantic DSM issue #71). A result is stale when it is
+#' missing, when it was saved without a provenance record, when that record
+#' differs from the current one, or when any input is newer than it
+#' (\code{\link{cache.is.stale}}).
+#'
+#' @param result.file Character path to the saved result.
+#' @param inputs Character vector of paths the result was computed from.
+#' @param saved.provenance Named list stored with the result, or \code{NULL}
+#'   when none was stored.
+#' @param provenance Named list describing the current run, e.g. from
+#'   \code{\link{get.family.cv.provenance}} or \code{\link{get.dsm.check.provenance}}.
+#' @return \code{NA_character_} when the result can be reused, otherwise a
+#'   single string saying why not. Differing scalar fields are reported with
+#'   both values (\code{"mgcv 1.9-4 -> 1.9-3"}), others by name.
+#' @examples
+#' \dontrun{
+#' saved.result.stale.reason(part, suite, readRDS(part)$provenance,
+#'                           get.family.cv.provenance(5, 1e5, 200, 20260820))
+#' }
+#' @export
+saved.result.stale.reason <- function(result.file, inputs, saved.provenance,
+                                      provenance) {
+  checkmate::expect_string(result.file, min.chars = 1)
+  checkmate::expect_character(inputs, min.len = 1, any.missing = FALSE)
+  checkmate::expect_list(saved.provenance, names = "named", null.ok = TRUE)
+  checkmate::expect_list(provenance, names = "named")
+
+  if (!file.exists(result.file))
+    return("no saved result")
+  if (is.null(saved.provenance))
+    return("provenance unrecorded (saved before it was kept)")
+
+  fields  <- union(names(provenance), names(saved.provenance))
+  differs <- fields[!vapply(fields, function(f)
+    identical(saved.provenance[[f]], provenance[[f]]), logical(1))]
+  if (length(differs)) {
+    show <- function(x) if (is.null(x)) "unset" else format(x)
+    desc <- vapply(differs, function(f) {
+      old <- saved.provenance[[f]]
+      new <- provenance[[f]]
+      scalar <- function(x) is.null(x) || (is.atomic(x) && length(x) == 1)
+      if (scalar(old) && scalar(new))
+        sprintf("%s %s -> %s", f, show(old), show(new)) else f
+    }, character(1))
+    return(sprintf("settings differ: %s", paste(desc, collapse = ", ")))
+  }
+
+  stale <- cache.is.stale(result.file, inputs, quiet = TRUE)
+  if (stale) attr(stale, "reason") else NA_character_
 }
 
 #' The highest density this species was ever actually seen at, by season

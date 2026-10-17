@@ -4,7 +4,16 @@
 \alias{check.dsm}
 \title{Comprehensive diagnostics for a fitted DSM}
 \usage{
-check.dsm(dsm_final, modname, segdata, smoother.plots = FALSE, brief = TRUE)
+check.dsm(
+  dsm_final,
+  modname,
+  segdata,
+  smoother.plots = FALSE,
+  brief = TRUE,
+  k.check.seed = get0("K_CHECK_SEED", ifnotfound = 20260828),
+  spatial.autocorr.max.n = get0("SPATIAL_AUTOCORR_MAX_N", ifnotfound = 5000),
+  spatial.autocorr.seed = get0("SPATIAL_AUTOCORR_SEED", ifnotfound = 20260828)
+)
 }
 \arguments{
 \item{dsm_final}{Fitted \code{dsm} object.}
@@ -19,6 +28,22 @@ plots.}
 
 \item{brief}{If \code{TRUE} (default), skip the more expensive diagnostics
 (concurvity, autocorrelogram, variograms).}
+
+\item{k.check.seed}{Seed for \code{mgcv::k.check()}, which resamples at
+random. Defaults to a global \code{K_CHECK_SEED}.}
+
+\item{spatial.autocorr.max.n}{Most segments handed to DHARMa's spatial
+autocorrelation test, which builds a dense n x n distance matrix. Defaults
+to a global \code{SPATIAL_AUTOCORR_MAX_N}.}
+
+\item{spatial.autocorr.seed}{Seed for choosing that sample. Defaults to a
+global \code{SPATIAL_AUTOCORR_SEED}.
+
+Pass all three explicitly from a generic. Their defaults search from this
+package's namespace, so they reach the global environment but never the
+environment a generic sourced \code{analysis_settings.R} into - in a
+\code{furrr} worker that means the hard-coded fallback, not the setting.
+\code{\link{get.dsm.check.provenance}} records the values passed here.}
 }
 \value{
 Invisibly, a named list of the statistics computed along the way -
