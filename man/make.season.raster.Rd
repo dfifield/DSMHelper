@@ -2,23 +2,24 @@
 % Please edit documentation in R/functions.R
 \name{make.season.raster}
 \alias{make.season.raster}
-\title{Rasterize one variable from a seasonal sf prediction grid}
+\title{Rasterize one variable from a seasonal prediction grid}
 \usage{
-make.season.raster(season, obj, variable)
+make.season.raster(season, obj, variable, template)
 }
 \arguments{
 \item{season}{Character string season label used to filter \code{obj}.}
 
-\item{obj}{\code{sf} data frame with a \code{Season} column and a column
-named \code{variable}.}
+\item{obj}{\code{sf} data frame with \code{Season}, \code{x}, \code{y} and a
+column named \code{variable}, one row per cell within a season.}
 
 \item{variable}{Character string name of the column to rasterize.}
+
+\item{template}{\code{SpatRaster} to write onto - \code{genpredrast}.}
 }
 \value{
 A \code{SpatRaster} layer for the given season.
 }
 \description{
-Filters \code{obj} to \code{season}, converts to a \code{SpatVector}, and
-rasterizes \code{variable} onto a grid whose resolution is
-\code{predgridCellLength * 1000} metres (project global).
+Filters \code{obj} to \code{season} and writes \code{variable} into each
+row's own cell of \code{template} with \code{\link{cells.to.raster}}.
 }

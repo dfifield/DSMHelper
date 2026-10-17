@@ -4,17 +4,22 @@
 \alias{summarise.extrapolation.abundance}
 \title{Summarise how much predicted abundance sits in extrapolated cells}
 \usage{
-summarise.extrapolation.abundance(cells, pred.raster)
+summarise.extrapolation.abundance(cells, pred.raster, area.raster)
 }
 \arguments{
 \item{cells}{The \code{cells} tibble from \code{\link[=assess.extrapolation]{assess.extrapolation()}}.}
 
-\item{pred.raster}{\code{SpatRaster} of predicted abundance, on the same geometry
-\code{cells} was built against.}
+\item{pred.raster}{\code{SpatRaster} of predicted density, as \code{\link[=dsm.pred]{dsm.pred()}} writes
+it, on the same geometry \code{cells} was built against.}
+
+\item{area.raster}{\code{SpatRaster} of each cell's water area in km^2 on that
+geometry, \code{\link[=cell.area.file]{cell.area.file()}}. Density is weighted by it, so a clipped
+coastal cell counts for its own area rather than a full cell's (issue #90).}
 }
 \value{
 A list with \code{by_type} and \code{by_mic} tibbles (\code{cells}, \code{abundance},
-\code{pct_of_total}, most-concentrated first) and \code{total}, the summed surface.
+\code{pct_of_total}, most-concentrated first) and \code{total}, the abundance over
+every cell in \code{cells}.
 }
 \description{
 Joins an \code{\link[=assess.extrapolation]{assess.extrapolation()}} result to a prediction surface and reports,

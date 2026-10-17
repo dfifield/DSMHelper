@@ -2,20 +2,23 @@
 % Please edit documentation in R/functions.R
 \name{make.raster}
 \alias{make.raster}
-\title{Rasterize one variable from an sf object}
+\title{Rasterize one variable from a single-season prediction grid}
 \usage{
-make.raster(sfobj, variable)
+make.raster(sfobj, variable, template)
 }
 \arguments{
-\item{sfobj}{\code{sf} object containing the variable to rasterize.}
+\item{sfobj}{\code{sf} object with \code{x}, \code{y} and the variable, one
+row per cell.}
 
 \item{variable}{Character string name of the column to rasterize.}
+
+\item{template}{\code{SpatRaster} to write onto - \code{genpredrast}.}
 }
 \value{
 A single-layer \code{SpatRaster}.
 }
 \description{
-Creates a raster template from the extent of \code{sfobj} at resolution
-\code{predgridCellLength * 1000} metres (project global) and rasterizes
-\code{variable}.
+Writes \code{variable} into each row's own cell of \code{template} with
+\code{\link{cells.to.raster}} - the same geometry \code{\link{dsm.pred}}
+writes its rasters on, so cell indices from one address the other.
 }

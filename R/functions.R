@@ -2484,31 +2484,92 @@ get.gps.length <- function(watch, posns) {
 }
 
 
-#' Rasterize one variable from a seasonal sf prediction grid
+#' Write one value per prediction-grid row into its own cell of the analysis grid
 #'
-#' Filters \code{obj} to \code{season}, converts to a \code{SpatVector}, and
-#' rasterizes \code{variable} onto a grid whose resolution is
-#' \code{predgridCellLength * 1000} metres (project global).
+#' Each row of the prediction grid is one cell of \code{genpredrast}, clipped to
+#' the study area in \code{00.03}. Its \code{x}/\code{y} are the centroid of the
+#' clipped piece, and the centroid of any part of a square lies inside that
+#' square, so \code{cellFromXY()} on the template recovers the cell each row came
+#' from. The value is written there directly.
+#'
+#' This replaced polygon rasterisation onto a template built from the clipped
+#' polygons' extent (issue #90), which went wrong in two ways at once: the
+#' template was an exact \code{predgridCellLength} lattice with its own origin,
+#' not \code{genpredrast}'s (whose cells are rescaled to tile the study area,
+#' issue #91), and \code{terra::rasterize()} fills a cell only when a polygon
+#' covers its centre, so a coastal cell clipped to a sliver vanished. Measured on
+#' Atl IMRP: 1,122 of 16,004 cells, 1.57\% of the area, absent from every
+#' prediction raster.
+#'
+#' @param obj Data frame or \code{sf} with \code{x}, \code{y} (projected
+#'   centroids, as \code{00.03} writes them) and a column named \code{variable};
+#'   one row per cell.
+#' @param variable Character string name of the column to write.
+#' @param template \code{SpatRaster} whose lattice to write onto -
+#'   \code{genpredrast}.
+#' @return A single-layer \code{SpatRaster} on \code{template}'s geometry, named
+#'   \code{variable}, \code{NA} outside the prediction grid.
+#' @examples
+#' \dontrun{
+#' g <- terra::rast(file.path(RasterDir, "genpredrast.img"))
+#' area <- cells.to.raster(predgrid, "area", g)
+#' }
+#' @export
+cells.to.raster <- function(obj, variable, template) {
+  checkmate::expect_data_frame(obj, min.rows = 1)
+  checkmate::expect_string(variable, min.chars = 1)
+  checkmate::expect_names(names(obj), must.include = c("x", "y", variable))
+  checkmate::expect_class(template, "SpatRaster")
+
+  cell <- terra::cellFromXY(template, cbind(obj$x, obj$y))
+  if (anyNA(cell))
+    stop(sprintf("cells.to.raster: %d row(s) fall outside the template", sum(is.na(cell))))
+  if (anyDuplicated(cell))
+    stop(sprintf(paste0("cells.to.raster: %d row(s) share a template cell with ",
+                        "another row - obj holds more than one row per cell ",
+                        "(several seasons or platform levels?), or it is not on ",
+                        "this template's lattice"),
+                 sum(duplicated(cell))))
+
+  vals <- rep(NA_real_, terra::ncell(template))
+  vals[cell] <- as.numeric(obj[[variable]])
+  r <- terra::rast(template, nlyrs = 1)
+  terra::values(r) <- vals
+  names(r) <- variable
+  r
+}
+
+#' Where the prediction-cell area raster lives
+#'
+#' One file per SubProject, beside the prediction rasters, holding each cell's
+#' water area in km^2 on the same geometry. Density x this raster, summed, is the
+#' abundance \code{03.00} reports as \code{sum(NHat)}; density x
+#' \code{predgridCellArea} is not, because coastal cells are clipped smaller.
+#' \code{\link{dsm.pred}} writes it.
+#'
+#' @param pred.dir Character path, normally \code{predDir}.
+#' @return Character path.
+#' @export
+cell.area.file <- function(pred.dir) {
+  checkmate::expect_string(pred.dir, min.chars = 1)
+  file.path(pred.dir, "cell_area_sqkm.tif")
+}
+
+#' Rasterize one variable from a seasonal prediction grid
+#'
+#' Filters \code{obj} to \code{season} and writes \code{variable} into each
+#' row's own cell of \code{template} with \code{\link{cells.to.raster}}.
 #'
 #' @param season Character string season label used to filter \code{obj}.
-#' @param obj \code{sf} data frame with a \code{Season} column and a column
-#'   named \code{variable}.
+#' @param obj \code{sf} data frame with \code{Season}, \code{x}, \code{y} and a
+#'   column named \code{variable}, one row per cell within a season.
 #' @param variable Character string name of the column to rasterize.
+#' @param template \code{SpatRaster} to write onto - \code{genpredrast}.
 #' @return A \code{SpatRaster} layer for the given season.
 #' @export
-make.season.raster <- function(season, obj, variable) {
-  v <- dplyr::filter(obj, Season == season) %>%
-    # Convert sf to SpatVector
-    terra::vect()
-
-  # Create a raster template with the same extent and resolution. Assumes
-  # predgridCellLength is in km and raster projection units are metres.
-  r <- terra::rast(v, resolution = predgridCellLength * 1000)
-
-  # Rasterize, using an attribute field (e.g., "ID")
-  ret <- terra::rasterize(v, r, field = variable)
-
-  ret
+make.season.raster <- function(season, obj, variable, template) {
+  checkmate::expect_string(season, min.chars = 1)
+  cells.to.raster(dplyr::filter(obj, .data$Season == season), variable, template)
 }
 
 #' Copy all objects from one environment to another
@@ -4629,8 +4690,13 @@ compare_predictions <- function(
 #' \code{Atl IMRP} species-seasons whose families disagree by more than 5x are
 #' the four most concentrated.
 #'
-#' @param paths Character vector of raster files, one per species-season.
+#' @param paths Character vector of density raster files, one per
+#'   species-season, as \code{\link{dsm.pred}} writes them.
 #' @param species,season Labels the same length as \code{paths}.
+#' @param area.raster \code{SpatRaster} of each cell's water area in km^2 on
+#'   the same geometry, \code{\link{cell.area.file}}. Shares of the total are
+#'   shares of abundance (density x area), so a clipped coastal cell weighs its
+#'   own area rather than a full cell's (issue #90).
 #' @param top_n How many of the largest cells to accumulate. Default 10.
 #' @param map_limit Optional density above which the mapping code hides a cell,
 #'   i.e. \code{MAX_DENS_VALUE}. Worth passing, because that limit is applied
@@ -4639,8 +4705,10 @@ compare_predictions <- function(
 #'   versioned folder and shared. So the cells most likely to dominate a total
 #'   are exactly the ones absent from the map you would check it against.
 #' @return A tibble with one row per raster: \code{species}, \code{season},
-#'   \code{cells} (finite cells), \code{total}, \code{max_cell}, and
-#'   \code{pct_top_n}, sorted with the most concentrated first. With
+#'   \code{cells} (finite cells), \code{total} (abundance, birds),
+#'   \code{max_cell} (the largest density), and \code{pct_top_n} (share of the
+#'   abundance in the \code{top_n} cells holding the most birds), sorted with
+#'   the most concentrated first. With
 #'   \code{map_limit}, also \code{cells_over_map_limit} and
 #'   \code{pct_total_over_map_limit}: how much of the shipped total is invisible
 #'   on the maps. A raster totalling zero gets \code{NA} concentration rather
@@ -4650,14 +4718,17 @@ compare_predictions <- function(
 #'   extrapolation status from [assess.extrapolation()].
 #' @examples
 #' \dontrun{
-#' summarise.prediction.concentration(files, comb$species, comb$season)
+#' summarise.prediction.concentration(files, comb$species, comb$season,
+#'   area.raster = terra::rast(cell.area.file(predDir)))
 #' }
 #' @export
-summarise.prediction.concentration <- function(paths, species, season, top_n = 10,
+summarise.prediction.concentration <- function(paths, species, season,
+                                               area.raster, top_n = 10,
                                                map_limit = NULL) {
   checkmate::expect_character(paths, min.len = 1, any.missing = FALSE)
   checkmate::expect_atomic(species, len = length(paths))
   checkmate::expect_atomic(season, len = length(paths))
+  checkmate::expect_class(area.raster, "SpatRaster")
   checkmate::expect_count(top_n, positive = TRUE)
   checkmate::expect_number(map_limit, lower = 0, null.ok = TRUE)
 
@@ -4670,12 +4741,16 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
                             pct_total_over_map_limit = NA_real_,
                             max_cell_x = NA_real_, max_cell_y = NA_real_))
     r <- terra::rast(p)
+    terra::compareGeom(r, area.raster, stopOnError = TRUE)
     vall <- terra::values(r)[, 1]
     keep <- is.finite(vall)
     v <- vall[keep]
-    tot <- sum(v)
-    top <- sum(utils::head(sort(v, decreasing = TRUE), top_n))
-    over <- if (is.null(map_limit)) v[0] else v[v > map_limit]
+    # Birds per cell. Density alone would weigh a 5 km2 coastal sliver like a
+    # full cell.
+    n <- v * terra::values(area.raster)[, 1][keep]
+    tot <- sum(n, na.rm = TRUE)
+    top <- sum(utils::head(sort(n, decreasing = TRUE), top_n))
+    over <- if (is.null(map_limit)) n[0] else n[v > map_limit]
     # Coordinates of the largest cell, so callers can ask what is special about
     # it - 03.70 uses them to look up its extrapolation status.
     imax <- if (length(v)) which(keep)[which.max(v)] else NA_integer_
@@ -4907,8 +4982,11 @@ is.broken.surface <- function(max_over_obs, n_over_limit, ref.mult) {
 #' @param season Season labels, the same length as `paths1`.
 #' @param species Character string species code, carried into the output.
 #' @param model1,model2 Character strings naming the two models.
-#' @param cell.area Cell area in km^2, i.e. `predgridCellArea`. The rasters hold
-#'   density, so this is what turns a summed surface into an abundance.
+#' @param area.raster `SpatRaster` of each cell's water area in km^2, on the
+#'   same geometry - [cell.area.file()], which [dsm.pred()] writes. The rasters
+#'   hold density, so `sum(density x area)` is the abundance. A constant
+#'   `predgridCellArea` is not: coastal cells are clipped smaller, by 7.6% of
+#'   the total area on Atl IMRP (issue #90).
 #' @param top_n How many of the largest cells to accumulate and to list. Default
 #'   10, matching `PRED_CONCENTRATION_TOP_N`.
 #' @param spike.ratio A cell counts as a spike when it exceeds this multiple of
@@ -4965,11 +5043,12 @@ is.broken.surface <- function(max_over_obs, n_over_limit, ref.mult) {
 #'   season = season.names, species = "ATPU",
 #'   model1 = "dsm_tw_allpred_abund_factor",
 #'   model2 = "dsm_nb_allpred_abund_factor",
-#'   cell.area = predgridCellArea, map.limit = MAX_DENS_VALUE)
+#'   area.raster = terra::rast(cell.area.file(predDir)),
+#'   map.limit = MAX_DENS_VALUE)
 #' }
 #' @export
 compare.finalist.surfaces <- function(paths1, paths2, season, species,
-                                      model1, model2, cell.area,
+                                      model1, model2, area.raster,
                                       top_n = 10, spike.ratio = 10,
                                       map.limit = NULL, ref.density = NULL,
                                       ref.mult = 100) {
@@ -4979,7 +5058,7 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
   checkmate::expect_string(species, min.chars = 1)
   checkmate::expect_string(model1, min.chars = 1)
   checkmate::expect_string(model2, min.chars = 1)
-  checkmate::expect_number(cell.area, lower = 0)
+  checkmate::expect_class(area.raster, "SpatRaster")
   checkmate::expect_count(top_n, positive = TRUE)
   checkmate::expect_number(spike.ratio, lower = 1)
   checkmate::expect_number(map.limit, lower = 0, null.ok = TRUE)
@@ -5009,9 +5088,11 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
     r1 <- terra::rast(p1)
     r2 <- terra::rast(p2)
     terra::compareGeom(r1, r2, stopOnError = TRUE)
+    terra::compareGeom(r1, area.raster, stopOnError = TRUE)
 
     v1all <- terra::values(r1)[, 1]
     v2all <- terra::values(r2)[, 1]
+    area  <- terra::values(area.raster)[, 1]
 
     # Each model's own finite cells for its own totals and spike measures, the
     # intersection for anything pairwise. These are the same set in every case
@@ -5062,8 +5143,8 @@ compare.finalist.surfaces <- function(paths1, paths2, season, species,
       dplyr::bind_cols(dplyr::rename_with(s1, ~ paste0(.x, "1")),
                        dplyr::rename_with(s2, ~ paste0(.x, "2"))) %>%
       dplyr::mutate(
-        abund1       = .data$total1 * cell.area,
-        abund2       = .data$total2 * cell.area,
+        abund1       = sum(v1all[ok1] * area[ok1], na.rm = TRUE),
+        abund2       = sum(v2all[ok2] * area[ok2], na.rm = TRUE),
         total_ratio  = if (isTRUE(s2$total > 0)) s1$total / s2$total
                        else NA_real_,
         max_ratio    = if (isTRUE(s2$max > 0)) s1$max / s2$max else NA_real_,
@@ -5874,28 +5955,20 @@ create_subproject_folders <- function(subproj) {
 }
 
 
-#' Rasterize one variable from an sf object
+#' Rasterize one variable from a single-season prediction grid
 #'
-#' Creates a raster template from the extent of \code{sfobj} at resolution
-#' \code{predgridCellLength * 1000} metres (project global) and rasterizes
-#' \code{variable}.
+#' Writes \code{variable} into each row's own cell of \code{template} with
+#' \code{\link{cells.to.raster}} - the same geometry \code{\link{dsm.pred}}
+#' writes its rasters on, so cell indices from one address the other.
 #'
-#' @param sfobj \code{sf} object containing the variable to rasterize.
+#' @param sfobj \code{sf} object with \code{x}, \code{y} and the variable, one
+#'   row per cell.
 #' @param variable Character string name of the column to rasterize.
+#' @param template \code{SpatRaster} to write onto - \code{genpredrast}.
 #' @return A single-layer \code{SpatRaster}.
 #' @export
-make.raster <- function(sfobj, variable){
-  # Convert sf to SpatVector
-  v <- terra::vect(sfobj)
-
-  # Create a raster template with the same extent and resolution. Assumes
-  # predgridCellLength is in km and raster projection units are metres.
-  r <- terra::rast(v, resolution = predgridCellLength * 1000)
-
-  # Rasterize, using an attribute field (e.g., "ID")
-  ret <- terra::rasterize(v, r, field = variable)
-
-  ret
+make.raster <- function(sfobj, variable, template) {
+  cells.to.raster(sfobj, variable, template)
 }
 
 #' Check whether a gam/bam was fitted with discrete = TRUE
@@ -8311,13 +8384,13 @@ segment.id.from.label <- function(sample.label) {
 #' The assessment itself needs only the segments and the prediction grid, so it
 #' is run **before** `03.00_Do_all_prediction.Rmd` - its findings are an input to
 #' masking, not a commentary on predictions already made. `pred.raster` is
-#' therefore optional. When it is `NULL` the target geometry is rasterized from
-#' `predgrid` by [make.raster()], which is the same template
-#' [make.season.raster()] builds when the predictions are written, so the `cell`
-#' indices in the returned `cells` tibble address the prediction rasters that
-#' `03.00` will later write. Verified on Atl IMRP ATPU Fall: identical
-#' resolution, extent, CRS and 222 x 154 dimensions, 12,970 non-`NA` cells on
-#' each, and no cell non-`NA` in one but not the other.
+#' therefore optional. When it is `NULL` the target geometry is `predgrid`
+#' written onto `template` by [make.raster()] - the lattice
+#' [make.season.raster()] writes the predictions onto, so the `cell` indices in
+#' the returned `cells` tibble address the prediction rasters that `03.00` will
+#' later write. Both write each grid row into its own `genpredrast` cell, so
+#' that holds by construction rather than by two templates happening to agree
+#' (issue #90).
 #'
 #' Passing a `pred.raster` explicitly is still supported and gives the same
 #' answer; it is worth doing only when assessing a surface that is not on the
@@ -8330,8 +8403,10 @@ segment.id.from.label <- function(sample.label) {
 #' @param predgrid `sf` prediction grid with monthly covariate columns, as
 #'   loaded from `prediction_grids.rda`.
 #' @param pred.raster `SpatRaster` defining the target geometry, or `NULL`
-#'   (the default) to build one from `predgrid`. See *Running before the
-#'   predictions exist*.
+#'   (the default) to build one from `predgrid` on `template`. See *Running
+#'   before the predictions exist*.
+#' @param template `SpatRaster`, `genpredrast`. Required when `pred.raster` is
+#'   `NULL`.
 #' @param covariate.names Character vector of covariates to assess. Defaults to
 #'   the project global `extrap.covars`.
 #' @param crs Projected coordinate system. Defaults to the project global
@@ -8367,6 +8442,7 @@ segment.id.from.label <- function(sample.label) {
 #' @export
 assess.extrapolation <- function(species, season, segdata, predgrid,
                                  pred.raster = NULL,
+                                 template = NULL,
                                  covariate.names = extrap.covars,
                                  crs = segProj,
                                  resolution = predgridCellLength * 1000,
@@ -8378,6 +8454,9 @@ assess.extrapolation <- function(species, season, segdata, predgrid,
   checkmate::expect_class(predgrid, "sf")
   if (!is.null(pred.raster))
     checkmate::expect_class(pred.raster, "SpatRaster")
+  checkmate::expect_class(template, "SpatRaster", null.ok = TRUE)
+  if (is.null(pred.raster) && is.null(template))
+    stop("assess.extrapolation: pass pred.raster or template (genpredrast)")
   checkmate::expect_character(covariate.names, min.len = 1, any.missing = FALSE)
   checkmate::expect_number(resolution, lower = 0)
   checkmate::expect_flag(compute.nearby)
@@ -8456,15 +8535,10 @@ assess.extrapolation <- function(species, season, segdata, predgrid,
       verbose           = verbose)
 
   # No prediction raster to resample onto - this normally runs before 03.00 has
-  # written any. Rasterizing the grid itself gives the same geometry those
-  # rasters will have; see "Running before the predictions exist" above.
-  if (is.null(pred.raster)) {
-    template.field <- intersect(c("area", "x", "depth"), names(predgrid))[1]
-    if (is.na(template.field))
-      stop("assess.extrapolation: predgrid has no column to build a raster ",
-           "template from (looked for area, x, depth). Pass pred.raster.")
-    pred.raster <- make.raster(predgrid, template.field)
-  }
+  # written any. Writing the grid onto template gives the geometry those rasters
+  # will have; see "Running before the predictions exist" above.
+  if (is.null(pred.raster))
+    pred.raster <- make.raster(predgrid, "area", template)
 
   cells <- extrapolation.cells.on.raster(extrap$extrapolation, pred.raster,
                                          covariate.names)
@@ -8546,16 +8620,23 @@ extrapolation.cells.on.raster <- function(ex, pred.raster, covariate.names) {
 #' `03.70_Save_chosen_model_predictions.Rmd`.
 #'
 #' @param cells The `cells` tibble from [assess.extrapolation()].
-#' @param pred.raster `SpatRaster` of predicted abundance, on the same geometry
-#'   `cells` was built against.
+#' @param pred.raster `SpatRaster` of predicted density, as [dsm.pred()] writes
+#'   it, on the same geometry `cells` was built against.
+#' @param area.raster `SpatRaster` of each cell's water area in km^2 on that
+#'   geometry, [cell.area.file()]. Density is weighted by it, so a clipped
+#'   coastal cell counts for its own area rather than a full cell's (issue #90).
 #' @return A list with `by_type` and `by_mic` tibbles (`cells`, `abundance`,
-#'   `pct_of_total`, most-concentrated first) and `total`, the summed surface.
+#'   `pct_of_total`, most-concentrated first) and `total`, the abundance over
+#'   every cell in `cells`.
 #' @export
-summarise.extrapolation.abundance <- function(cells, pred.raster) {
+summarise.extrapolation.abundance <- function(cells, pred.raster, area.raster) {
   checkmate::expect_data_frame(cells)
   checkmate::expect_class(pred.raster, "SpatRaster")
+  checkmate::expect_class(area.raster, "SpatRaster")
+  terra::compareGeom(pred.raster, area.raster, stopOnError = TRUE)
 
-  cells$pred <- terra::values(pred.raster)[, 1][cells$cell]
+  cells$pred <- terra::values(pred.raster)[, 1][cells$cell] *
+    terra::values(area.raster)[, 1][cells$cell]
   total <- sum(cells$pred, na.rm = TRUE)
   pct   <- function(x) if (total > 0) 100 * sum(x, na.rm = TRUE) / total else NA_real_
 
@@ -9836,8 +9917,13 @@ check.platform.combination <- function(model, tolerance = 0.15) {
 #' not reach \code{dsm::dsm_var_gam()} in the variance step, which takes no
 #' \code{discrete} argument - only refitting without discrete does.
 #'
+#' The rasters hold density and are written onto \code{template}, one value per
+#' cell (\code{\link{cells.to.raster}}). Beside them it writes
+#' \code{\link{cell.area.file}}: each cell's water area on the same geometry, so
+#' that summing density x area over a raster gives back \code{sum(NHat)}.
+#'
 #' Expects project globals \code{ShapeDir}, \code{predDir}, \code{season.names},
-#' and \code{predgridCellArea}.
+#' and \code{predgridCellArea} (used only in the file names).
 #'
 #' @param modname Character string model name; used to look up the model in
 #'   \code{mod.res}.
@@ -9846,6 +9932,8 @@ check.platform.combination <- function(model, tolerance = 0.15) {
 #' @param predgrid \code{sf} prediction grid with one row per
 #'   (cell × season × platform) combination and all model predictors present.
 #'   The \code{area} column is used as the prediction offset.
+#' @param template \code{SpatRaster} the rasters are written onto -
+#'   \code{genpredrast}, the lattice \code{predgrid} was cut from.
 #' @return \code{predgrid} augmented with \code{NHat}, \code{Dens}, and
 #'   \code{subset} columns, with rows for each platform level plus a
 #'   \code{"Combined"} set.
@@ -9854,7 +9942,9 @@ dsm.pred <-
   function(modname,
            species,
            mod.res,
-           predgrid) {
+           predgrid,
+           template) {
+    checkmate::expect_class(template, "SpatRaster")
 
     message(sprintf("Predicting %s for dsm model %s", species,
                     modname))
@@ -10009,12 +10099,36 @@ dsm.pred <-
     # create 4-lyr seasonal raster of combined values for plotting and
     # saving
     message("Creating and saving seasonal rasters.")
+    combined <- dplyr::filter(ret, subset == "Combined")
     pp_raster <- season.names %>%
       purrr::map(make.season.raster,
-                 obj = dplyr::filter(ret, subset == "Combined"),
-                 variable = "Dens") %>%
+                 obj = combined,
+                 variable = "Dens",
+                 template = template) %>%
       terra::rast()
     names(pp_raster) <- season.names
+
+    # Each cell's water area, on the same geometry. Identical for every season,
+    # species and model, so it is written only when absent or different: 02.15
+    # calls this from several workers at once, and they must not race to
+    # overwrite one file. A grid rebuilt by 00.03 differs, and replaces it.
+    area_raster <- make.season.raster(season.names[1], combined, "area", template)
+    area_file <- cell.area.file(predDir)
+    current <- file.exists(area_file) && isTRUE(tryCatch({
+      old <- terra::rast(area_file)
+      terra::compareGeom(old, area_raster, stopOnError = FALSE) &&
+        isTRUE(all.equal(terra::values(old)[, 1], terra::values(area_raster)[, 1],
+                         tolerance = 1e-6))
+    }, error = function(e) FALSE))
+    if (!current) {
+      tmp <- tempfile(tmpdir = predDir, fileext = ".tif")
+      terra::writeRaster(area_raster, tmp, datatype = "FLT4S")
+      if (!file.rename(tmp, area_file)) {
+        unlink(tmp)
+        if (!file.exists(area_file))
+          stop("dsm.pred: could not write ", area_file)
+      }
+    }
 
     # produce 4 panel plot. Not necessary since this is done at end of Generic_3_prediction.rmd
     # plot(pp_raster, main = paste(season.names, paste(species, modname, sep = "_")))

@@ -11,7 +11,7 @@ compare.finalist.surfaces(
   species,
   model1,
   model2,
-  cell.area,
+  area.raster,
   top_n = 10,
   spike.ratio = 10,
   map.limit = NULL,
@@ -30,8 +30,11 @@ grid; the geometries are checked.}
 
 \item{model1, model2}{Character strings naming the two models.}
 
-\item{cell.area}{Cell area in km^2, i.e. \code{predgridCellArea}. The rasters hold
-density, so this is what turns a summed surface into an abundance.}
+\item{area.raster}{\code{SpatRaster} of each cell's water area in km^2, on the
+same geometry - \code{\link[=cell.area.file]{cell.area.file()}}, which \code{\link[=dsm.pred]{dsm.pred()}} writes. The rasters
+hold density, so \verb{sum(density x area)} is the abundance. A constant
+\code{predgridCellArea} is not: coastal cells are clipped smaller, by 7.6\% of
+the total area on Atl IMRP (issue #90).}
 
 \item{top_n}{How many of the largest cells to accumulate and to list. Default
 10, matching \code{PRED_CONCENTRATION_TOP_N}.}
@@ -172,6 +175,7 @@ compare.finalist.surfaces(
   season = season.names, species = "ATPU",
   model1 = "dsm_tw_allpred_abund_factor",
   model2 = "dsm_nb_allpred_abund_factor",
-  cell.area = predgridCellArea, map.limit = MAX_DENS_VALUE)
+  area.raster = terra::rast(cell.area.file(predDir)),
+  map.limit = MAX_DENS_VALUE)
 }
 }

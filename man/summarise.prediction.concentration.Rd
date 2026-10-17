@@ -8,14 +8,21 @@ summarise.prediction.concentration(
   paths,
   species,
   season,
+  area.raster,
   top_n = 10,
   map_limit = NULL
 )
 }
 \arguments{
-\item{paths}{Character vector of raster files, one per species-season.}
+\item{paths}{Character vector of density raster files, one per
+species-season, as \code{\link{dsm.pred}} writes them.}
 
 \item{species, season}{Labels the same length as \code{paths}.}
+
+\item{area.raster}{\code{SpatRaster} of each cell's water area in km^2 on
+the same geometry, \code{\link{cell.area.file}}. Shares of the total are
+shares of abundance (density x area), so a clipped coastal cell weighs its
+own area rather than a full cell's (issue #90).}
 
 \item{top_n}{How many of the largest cells to accumulate. Default 10.}
 
@@ -28,8 +35,10 @@ are exactly the ones absent from the map you would check it against.}
 }
 \value{
 A tibble with one row per raster: \code{species}, \code{season},
-\code{cells} (finite cells), \code{total}, \code{max_cell}, and
-\code{pct_top_n}, sorted with the most concentrated first. With
+\code{cells} (finite cells), \code{total} (abundance, birds),
+\code{max_cell} (the largest density), and \code{pct_top_n} (share of the
+abundance in the \code{top_n} cells holding the most birds), sorted with
+the most concentrated first. With
 \code{map_limit}, also \code{cells_over_map_limit} and
 \code{pct_total_over_map_limit}: how much of the shipped total is invisible
 on the maps. A raster totalling zero gets \code{NA} concentration rather
@@ -63,6 +72,7 @@ the four most concentrated.
 }
 \examples{
 \dontrun{
-summarise.prediction.concentration(files, comb$species, comb$season)
+summarise.prediction.concentration(files, comb$species, comb$season,
+  area.raster = terra::rast(cell.area.file(predDir)))
 }
 }

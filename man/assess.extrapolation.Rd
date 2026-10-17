@@ -10,6 +10,7 @@ assess.extrapolation(
   segdata,
   predgrid,
   pred.raster = NULL,
+  template = NULL,
   covariate.names = extrap.covars,
   crs = segProj,
   resolution = predgridCellLength * 1000,
@@ -29,8 +30,11 @@ assess.extrapolation(
 loaded from \code{prediction_grids.rda}.}
 
 \item{pred.raster}{\code{SpatRaster} defining the target geometry, or \code{NULL}
-(the default) to build one from \code{predgrid}. See \emph{Running before the
-predictions exist}.}
+(the default) to build one from \code{predgrid} on \code{template}. See \emph{Running
+before the predictions exist}.}
+
+\item{template}{\code{SpatRaster}, \code{genpredrast}. Required when \code{pred.raster} is
+\code{NULL}.}
 
 \item{covariate.names}{Character vector of covariates to assess. Defaults to
 the project global \code{extrap.covars}.}
@@ -86,13 +90,13 @@ back \code{NA} and are counted in the return value rather than guessed at.
 The assessment itself needs only the segments and the prediction grid, so it
 is run \strong{before} \verb{03.00_Do_all_prediction.Rmd} - its findings are an input to
 masking, not a commentary on predictions already made. \code{pred.raster} is
-therefore optional. When it is \code{NULL} the target geometry is rasterized from
-\code{predgrid} by \code{\link[=make.raster]{make.raster()}}, which is the same template
-\code{\link[=make.season.raster]{make.season.raster()}} builds when the predictions are written, so the \code{cell}
-indices in the returned \code{cells} tibble address the prediction rasters that
-\code{03.00} will later write. Verified on Atl IMRP ATPU Fall: identical
-resolution, extent, CRS and 222 x 154 dimensions, 12,970 non-\code{NA} cells on
-each, and no cell non-\code{NA} in one but not the other.
+therefore optional. When it is \code{NULL} the target geometry is \code{predgrid}
+written onto \code{template} by \code{\link[=make.raster]{make.raster()}} - the lattice
+\code{\link[=make.season.raster]{make.season.raster()}} writes the predictions onto, so the \code{cell} indices in
+the returned \code{cells} tibble address the prediction rasters that \code{03.00} will
+later write. Both write each grid row into its own \code{genpredrast} cell, so
+that holds by construction rather than by two templates happening to agree
+(issue #90).
 
 Passing a \code{pred.raster} explicitly is still supported and gives the same
 answer; it is worth doing only when assessing a surface that is not on the

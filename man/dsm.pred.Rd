@@ -4,7 +4,7 @@
 \alias{dsm.pred}
 \title{Generate density predictions from a DSM model}
 \usage{
-dsm.pred(modname, species, mod.res, predgrid)
+dsm.pred(modname, species, mod.res, predgrid, template)
 }
 \arguments{
 \item{modname}{Character string model name; used to look up the model in
@@ -17,6 +17,9 @@ dsm.pred(modname, species, mod.res, predgrid)
 \item{predgrid}{\code{sf} prediction grid with one row per
 (cell × season × platform) combination and all model predictors present.
 The \code{area} column is used as the prediction offset.}
+
+\item{template}{\code{SpatRaster} the rasters are written onto -
+\code{genpredrast}, the lattice \code{predgrid} was cut from.}
 }
 \value{
 \code{predgrid} augmented with \code{NHat}, \code{Dens}, and
@@ -36,6 +39,11 @@ composition of the grid it happens to be predicted alongside. Note this does
 not reach \code{dsm::dsm_var_gam()} in the variance step, which takes no
 \code{discrete} argument - only refitting without discrete does.
 
+The rasters hold density and are written onto \code{template}, one value per
+cell (\code{\link{cells.to.raster}}). Beside them it writes
+\code{\link{cell.area.file}}: each cell's water area on the same geometry, so
+that summing density x area over a raster gives back \code{sum(NHat)}.
+
 Expects project globals \code{ShapeDir}, \code{predDir}, \code{season.names},
-and \code{predgridCellArea}.
+and \code{predgridCellArea} (used only in the file names).
 }
