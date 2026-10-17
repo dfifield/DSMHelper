@@ -58,8 +58,9 @@ A season with no observations at all gets no reference rather than a
 ceiling of zero. \code{NULL} leaves the \verb{*_obs} columns \code{NA}.}
 
 \item{ref.mult}{How many times \code{ref.density} a cell must exceed to be
-counted in \code{n_over_obs}. Default 100, measured rather than picked -- see
-the calibration section.}
+counted in \code{n_over_obs}. Default 100. See the calibration section: this
+multiple alone no longer separates sound from broken surfaces, and
+\code{\link[=is.broken.surface]{is.broken.surface()}} is what decides.}
 }
 \value{
 A list of two tibbles:
@@ -113,27 +114,21 @@ that is what \code{map.limit} is for.
 \section{Calibrating the plausibility ceiling}{
 
 \code{max_over_obs} -- the largest predicted cell over the largest density ever
-observed on a segment of the same species and season -- separates the
-populations that a flat limit cannot. Measured over 88 \code{NL_EXPL_DRL_RA}
-surfaces:
+observed on a segment of the same species and season -- is the measure a
+flat limit cannot replace, but on its own it no longer separates sound
+surfaces from broken ones. Which surfaces count as broken is decided by
+\code{\link[=is.broken.surface]{is.broken.surface()}}, which also tests \code{n_over_limit}; see that function
+for why.
 
-\itemize{
-\item median \strong{0.075}. The typical surface peaks thirteen times \emph{below}
-anything ever seen, which is what should happen: a prediction cell is a
-seasonal mean over ten years and an observed segment density is one
-encounter on one day.
-\item 75th percentile 0.23, 90th 4.2, 95th 16.2. Twelve surfaces exceed 1.
-\item The legitimate tail tops out at \strong{32.5} (LESP Winter under \code{nb}),
-with Shearwaters Spring at 19.0 and 11.1 -- concentrated, plausible,
-flock-driven surfaces.
-\item Then a gap of five orders of magnitude to \strong{7.7e6}, Petrels Winter
-under \code{tw}.
-}
-
-\code{ref.mult = 100} sits in that gap: three times above the worst legitimate
-surface and four orders of magnitude below the pathology. It is a wide gap,
-so the exact value is not delicate -- anything from 50 to 1,000 separates the
-same two sets.
+When \code{ref.mult = 100} was set, over 88 \code{NL_EXPL_DRL_RA} surfaces, the
+legitimate tail topped out at 32.5x and the next value up was 7.7e6x, a gap
+of five orders of magnitude. The gap has since closed (issue #87): on
+current models the worst sound surface is 5.81x (NL, 2026-09-05) or 1.31x
+(\verb{Atl IMRP}, 2026-10-15), while broken surfaces start at \strong{21.6x} (\verb{Atl IMRP} Murres Spring \code{tw}, 34 cells over \code{MAX_DENS_VALUE}) and 75.4x (NL
+Petrels Winter \code{nb}, 799 cells). Both are below 100. The typical sound
+surface still peaks far below its ceiling -- median 0.024 on \verb{Atl IMRP},
+0.047 on NL -- because a prediction cell is a seasonal mean over ten years
+and an observed segment density is one encounter on one day.
 
 Compare what the flat \code{MAX_DENS_VALUE} of 10,000 does on the same data. It
 fires on 3 of 88 surfaces, and it cannot do better, because it is set near

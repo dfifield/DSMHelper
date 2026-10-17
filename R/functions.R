@@ -4785,6 +4785,49 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
     gini           = .gini(v))
 }
 
+#' Is a prediction surface broken rather than merely concentrated?
+#'
+#' The single rule for calling a surface broken, used by `02.15` and by
+#' [write.finalist.summary.page()] so they cannot disagree. A surface is broken
+#' when **either** of these holds:
+#'
+#' \itemize{
+#'   \item any cell exceeds `map.limit` (`n_over_limit > 0`), or
+#'   \item its largest cell exceeds `ref.mult` times the highest density ever
+#'     observed for that species and season (`max_over_obs > ref.mult`).
+#' }
+#'
+#' `n_over_limit` is the test that has separated perfectly on every
+#' measurement so far: it is 0 for all 42 sound `NL_EXPL_DRL_RA`
+#' species-seasons (2026-09-05) and all 110 sound `Atl IMRP` surfaces
+#' (2026-10-15), and between 34 and 3,643 for every broken one. The
+#' ceiling-multiple test alone missed two broken surfaces: `Atl IMRP` Murres
+#' Spring `tw` at 21.6x, then the shipped Murres model, and NL Petrels Winter
+#' `nb` at 75.4x (issue #87). It is kept as the second arm because it is the
+#' only test that can catch a small species whose surface has gone hundreds of
+#' times past anything seen, but stays below a flat 10,000 birds/km^2.
+#'
+#' An `NA` in either argument counts as not firing, so a season with no
+#' observed reference can still be called broken on `n_over_limit`.
+#'
+#' @param max_over_obs Numeric vector, the largest predicted cell over the
+#'   observed ceiling, as returned by [compare.finalist.surfaces()].
+#' @param n_over_limit Numeric vector the same length, the number of cells
+#'   above `map.limit`.
+#' @param ref.mult Number, the ceiling multiple, i.e. `PRED_OBS_CEILING_MULT`.
+#' @return A logical vector the same length as the inputs, never `NA`.
+#' @examples
+#' is.broken.surface(c(0.02, 21.6, 128, NA), c(0, 34, 118, 5), ref.mult = 100)
+#' # FALSE TRUE TRUE TRUE
+#' @export
+is.broken.surface <- function(max_over_obs, n_over_limit, ref.mult) {
+  checkmate::expect_numeric(max_over_obs)
+  checkmate::expect_numeric(n_over_limit, len = length(max_over_obs))
+  checkmate::expect_number(ref.mult, lower = 1)
+
+  (n_over_limit > 0) %in% TRUE | (max_over_obs > ref.mult) %in% TRUE
+}
+
 #' Compare the prediction surfaces of two models, cell by cell
 #'
 #' Answers what the family cross-validation and the in-sample diagnostics both
@@ -4812,27 +4855,22 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 #'
 #' @section Calibrating the plausibility ceiling:
 #' `max_over_obs` -- the largest predicted cell over the largest density ever
-#' observed on a segment of the same species and season -- separates the
-#' populations that a flat limit cannot. Measured over 88 `NL_EXPL_DRL_RA`
-#' surfaces:
+#' observed on a segment of the same species and season -- is the measure a
+#' flat limit cannot replace, but on its own it no longer separates sound
+#' surfaces from broken ones. Which surfaces count as broken is decided by
+#' [is.broken.surface()], which also tests `n_over_limit`; see that function
+#' for why.
 #'
-#' \itemize{
-#'   \item median **0.075**. The typical surface peaks thirteen times *below*
-#'     anything ever seen, which is what should happen: a prediction cell is a
-#'     seasonal mean over ten years and an observed segment density is one
-#'     encounter on one day.
-#'   \item 75th percentile 0.23, 90th 4.2, 95th 16.2. Twelve surfaces exceed 1.
-#'   \item The legitimate tail tops out at **32.5** (LESP Winter under `nb`),
-#'     with Shearwaters Spring at 19.0 and 11.1 -- concentrated, plausible,
-#'     flock-driven surfaces.
-#'   \item Then a gap of five orders of magnitude to **7.7e6**, Petrels Winter
-#'     under `tw`.
-#' }
-#'
-#' `ref.mult = 100` sits in that gap: three times above the worst legitimate
-#' surface and four orders of magnitude below the pathology. It is a wide gap,
-#' so the exact value is not delicate -- anything from 50 to 1,000 separates the
-#' same two sets.
+#' When `ref.mult = 100` was set, over 88 `NL_EXPL_DRL_RA` surfaces, the
+#' legitimate tail topped out at 32.5x and the next value up was 7.7e6x, a gap
+#' of five orders of magnitude. The gap has since closed (issue #87): on
+#' current models the worst sound surface is 5.81x (NL, 2026-09-05) or 1.31x
+#' (`Atl IMRP`, 2026-10-15), while broken surfaces start at **21.6x** (`Atl
+#' IMRP` Murres Spring `tw`, 34 cells over `MAX_DENS_VALUE`) and 75.4x (NL
+#' Petrels Winter `nb`, 799 cells). Both are below 100. The typical sound
+#' surface still peaks far below its ceiling -- median 0.024 on `Atl IMRP`,
+#' 0.047 on NL -- because a prediction cell is a seasonal mean over ten years
+#' and an observed segment density is one encounter on one day.
 #'
 #' Compare what the flat `MAX_DENS_VALUE` of 10,000 does on the same data. It
 #' fires on 3 of 88 surfaces, and it cannot do better, because it is set near
@@ -4892,8 +4930,9 @@ summarise.prediction.concentration <- function(paths, species, season, top_n = 1
 #'   A season with no observations at all gets no reference rather than a
 #'   ceiling of zero. `NULL` leaves the `*_obs` columns `NA`.
 #' @param ref.mult How many times `ref.density` a cell must exceed to be
-#'   counted in `n_over_obs`. Default 100, measured rather than picked -- see
-#'   the calibration section.
+#'   counted in `n_over_obs`. Default 100. See the calibration section: this
+#'   multiple alone no longer separates sound from broken surfaces, and
+#'   [is.broken.surface()] is what decides.
 #' @return A list of two tibbles:
 #'   \describe{
 #'     \item{`$seasons`}{One row per season. Per-model columns are suffixed `1`
@@ -11087,21 +11126,25 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
   n_se <- length(unique(seasons$season))
 
   # ---- the headline -------------------------------------------------------
-  # Worst surface by how far it exceeds what was actually observed. That is the
-  # measure with a defensible zero point; if no reference was available it falls
-  # back to the flat limit, and if neither fired the page says nothing is wrong.
-  imp <- seasons %>%
-    dplyr::select(dplyr::any_of(c("species", "season", "max_over_obs1",
-                                  "max_over_obs2"))) %>%
-    tidyr::pivot_longer(dplyr::starts_with("max_over_obs"),
-                        names_to = "which", values_to = "r") %>%
-    dplyr::filter(!is.na(.data$r)) %>%
-    dplyr::arrange(dplyr::desc(.data$r))
+  # Which surfaces are broken is decided by is.broken.surface(), the same rule
+  # 02.15 uses. Of those, the headline names the one that exceeds what was
+  # actually observed by the most, since that is the measure with a defensible
+  # zero point; a broken surface with no observed reference ranks last. If none
+  # is broken the page says nothing is wrong.
+  fam.col <- function(stem, i) {
+    v <- seasons[[paste0(stem, i)]]
+    if (is.null(v)) rep(NA_real_, nrow(seasons)) else as.numeric(v)
+  }
+  imp <- dplyr::bind_rows(lapply(1:2, function(i) tibble::tibble(
+    species = seasons$species, season = seasons$season, fam.i = i,
+    r = fam.col("max_over_obs", i), n.lim = fam.col("n_over_limit", i)))) %>%
+    dplyr::filter(is.broken.surface(.data$r, .data$n.lim, ref.mult)) %>%
+    dplyr::arrange(is.na(.data$r), dplyr::desc(.data$r), dplyr::desc(.data$n.lim))
 
-  worst <- if (nrow(imp) && imp$r[1] > ref.mult) {
+  worst <- if (nrow(imp)) {
     w <- seasons %>% dplyr::filter(.data$species == imp$species[1],
                                    .data$season == imp$season[1])
-    list(row = w, fam = if (imp$which[1] == "max_over_obs1") k1 else k2,
+    list(row = w, fam = if (imp$fam.i[1] == 1) k1 else k2,
          ratio = imp$r[1])
   } else NULL
 
@@ -11147,8 +11190,10 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
         (.data$total_ratio > 1.5 | .data$total_ratio < 1 / 1.5),
       .cd = xor(.data$pct_top_n1 >= warn.pct,
                 .data$pct_top_n2 >= warn.pct) %in% TRUE,
-      .rd = if (is.null(seasons$max_over_obs1)) FALSE else
-        (.data$max_over_obs1 > ref.mult | .data$max_over_obs2 > ref.mult) %in% TRUE) %>%
+      .rd = is.broken.surface(fam.col("max_over_obs", 1),
+                              fam.col("n_over_limit", 1), ref.mult) |
+            is.broken.surface(fam.col("max_over_obs", 2),
+                              fam.col("n_over_limit", 2), ref.mult)) %>%
     dplyr::filter(.data$.td | .data$.cd | .data$.rd) %>%
     dplyr::arrange(dplyr::desc(.data$.rd),
                    dplyr::desc(abs(log(.data$total_ratio))))
@@ -11177,19 +11222,45 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
       '<h2>No surface exceeds what was observed.</h2>',
       '<p>Across all %d species-seasons, neither family predicts a cell more ',
       'than %s times the highest density ever recorded on a segment of the same ',
-      'species and season. Where the two families differ they differ in degree, ',
+      'species and season%s. Where the two families differ they differ in degree, ',
       'not in kind, and the table below says where.</p></div>'),
-      nrow(seasons), format(ref.mult, big.mark = ","))
+      nrow(seasons), format(ref.mult, big.mark = ","),
+      if (is.null(map.limit)) "" else
+        sprintf(", or above %s birds/km<sup>2</sup> anywhere",
+                format(map.limit, big.mark = ",")))
   } else {
     w <- worst$row
+    i <- if (worst$fam == k1) 1 else 2
     other <- if (worst$fam == k1) k2 else k1
     a.tot <- w$abund1; b.tot <- w$abund2
     big <- if (worst$fam == k1) a.tot else b.tot
     sml <- if (worst$fam == k1) b.tot else a.tot
-    n.over <- if (worst$fam == k1) w$n_over_obs1 else w$n_over_obs2
-    p.over <- if (worst$fam == k1) w$pct_over_obs1 else w$pct_over_obs2
     mx <- if (worst$fam == k1) w$max1 else w$max2
     obs <- if (!is.null(w$obs_max1)) w$obs_max1 else NA_real_
+
+    # Count the cells by whichever arm of is.broken.surface() fired. A surface
+    # broken on n_over_limit alone (issue #87: Murres Spring tw at 21.6x) has no
+    # cells past ref.mult times the ceiling, and saying "0 cells" would read as
+    # nothing wrong.
+    n.ref <- w[[paste0("n_over_obs", i)]]
+    if (isTRUE(n.ref > 0)) {
+      n.over <- n.ref
+      p.over <- w[[paste0("pct_over_obs", i)]]
+      crit <- sprintf(paste0(
+        'more than %s&times; the highest density ever recorded on a segment of ',
+        'this species and season (%s birds/km<sup>2</sup>),'),
+        format(ref.mult, big.mark = ","), .hnum(obs))
+      crit.label <- "Cells past the observed ceiling"
+    } else {
+      n.over <- w[[paste0("n_over_limit", i)]]
+      p.over <- w[[paste0("pct_over_limit", i)]]
+      crit <- sprintf(paste0(
+        'above %s birds/km<sup>2</sup>, which the maps hide and the rasters keep. ',
+        'Its largest cell is %s&times; the highest density ever recorded on a ',
+        'segment of this species and season (%s birds/km<sup>2</sup>),'),
+        format(map.limit, big.mark = ","), .hnum(worst$ratio, 2), .hnum(obs))
+      crit.label <- "Cells over the map limit"
+    }
 
     # A log axis spanning both totals, rounded out to whole decades, so the two
     # bars are honestly placed rather than merely ordered.
@@ -11213,8 +11284,7 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
       '<div class="finding"><p class="eyebrow">What the comparison found</p>',
       '<h2>%s in %s is not a tie. It is a runaway.</h2>',
       '<p>Under <span class="fam fam-%s">%s</span>%s the surface puts ',
-      '<strong>%s cells</strong> more than %s&times; the highest density ever ',
-      'recorded on a segment of this species and season (%s birds/km<sup>2</sup>), ',
+      '<strong>%s cells</strong> %s ',
       'peaking at %s. Those cells hold %s of the seasonal total. The ',
       '<span class="fam fam-%s">%s</span> finalist, fitted to the same segments ',
       'on the same grid, gives a total %s. The two surfaces correlate at %s.</p>',
@@ -11233,7 +11303,7 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
       '<p class="caption">Seasonal totals on a log scale &mdash; the bar length is ',
       'the exponent. On a linear scale the smaller bar would be invisible.</p>',
       '<dl class="stats">',
-      '<div class="stat is-crit"><dt>Cells past the observed ceiling</dt>',
+      '<div class="stat is-crit"><dt>%s</dt>',
       '<dd>%s<span class="unit">of %s, under <span class="fam fam-%s">%s</span></span></dd></div>',
       '<div class="stat is-crit"><dt>Their share of the total</dt>',
       '<dd>%s<span class="unit">the surface <em>is</em> the outliers</span></dd></div>',
@@ -11245,14 +11315,14 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
       if (!is.null(w$incumbent) && !is.na(w$incumbent) &&
           grepl(paste0("_", worst$fam, "_"), w$incumbent))
         " &mdash; the model this species currently ships &mdash; " else ", ",
-      format(n.over, big.mark = ","), format(ref.mult, big.mark = ","),
-      .hnum(obs), .hnum(mx), .pct(p.over, 4),
+      format(n.over, big.mark = ","), crit, .hnum(mx), .pct(p.over, 4),
       if (worst$fam == k1) "b" else "a", .esc(other),
       sprintf("%s times smaller", .hnum(big / sml)),
       .hnum(w$pearson_r, 2),
       "a", .esc(k1), posn(a.tot), posn(a.tot), .hnum(a.tot),
       "b", .esc(k2), posn(b.tot), 100 - posn(b.tot), .hnum(b.tot),
       ticks,
+      crit.label,
       format(n.over, big.mark = ","), format(w$cells1, big.mark = ","),
       "a", .esc(worst$fam),
       .pct(p.over, 4), .hnum(mx), .hnum(w$pearson_r, 2))
@@ -11332,6 +11402,11 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
     reference &mdash; below it, as it should be, since a prediction cell is a
     seasonal mean over ten years and an observed segment density is a single
     encounter on a single day.</p>
+    <p>A surface is called <strong>broken</strong> when it either exceeds that
+    multiple or puts any cell above %s birds/km&sup2;. The multiple alone has
+    missed broken surfaces sitting at 21.6&times; and 75.4&times; their
+    ceilings, each with dozens to hundreds of cells over the flat limit, while
+    no sound surface yet measured has put a single cell over it.</p>
   </div>
 </section>
 
@@ -11364,6 +11439,7 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
     .hnum(max(c(seasons$obs_max1, seasons$obs_max2), na.rm = TRUE)),
     format(ref.mult, big.mark = ","),
     .hnum(med(c(seasons$max_over_obs1, seasons$max_over_obs2)), 2),
+    if (is.null(map.limit)) "the map limit" else format(map.limit, big.mark = ","),
     nrow(seasons))
 
   writeLines(c(.finalist.page.head(), body, "</body>", "</html>"), path)
