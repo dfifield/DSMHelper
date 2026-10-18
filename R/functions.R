@@ -2912,7 +2912,10 @@ create.segdata <- function(the.data,
     ) %>%
       sf::st_as_sf() %>%
       dplyr::rename(!!out.name := value) %>%
-      dplyr::select(-layer) # layer is off by one, though the value is correct
+      # terra < 1.9 also returned a `layer` column, off by one though the value
+      # was correct; 1.9.50 returns only `value` (checked 2026-10-18 against a
+      # direct per-layer extract). any_of() drops it under either.
+      dplyr::select(-dplyr::any_of("layer"))
 
     if (all(has.sst)) return(got)
 
