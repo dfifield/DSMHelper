@@ -4,7 +4,14 @@
 \alias{create.segdata}
 \title{Build segment data with environmental covariates from watch data}
 \usage{
-create.segdata(the.data, inproj, outproj, scale.factors, verbose = FALSE)
+create.segdata(
+  the.data,
+  inproj,
+  outproj,
+  scale.factors,
+  raster.ext = ".img",
+  verbose = FALSE
+)
 }
 \arguments{
 \item{the.data}{Named list with at least a \code{watches} element (as
@@ -16,6 +23,12 @@ returned by \code{\link{create.survey.data}}).}
 
 \item{scale.factors}{Named list of mean and SD values used to standardise
 each covariate (e.g. \code{list(depth_mean = x, depth_sd = y, ...)}).}
+
+\item{raster.ext}{File extension of the covariate rasters, including the
+dot: \code{".img"} or \code{".tif"}. The project sets it per SubProject
+as \code{ENV_RASTER_EXT}, because a SubProject's rasters change format only
+when it is rebuilt from \code{00.02} (issue #60). Defaults to \code{".img"}
+so a SubProject not yet rebuilt reads what it has on disk.}
 
 \item{verbose}{If \code{TRUE}, print progress messages.}
 }

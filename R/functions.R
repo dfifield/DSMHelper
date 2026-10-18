@@ -2766,6 +2766,11 @@ align.raster.crs <- function(r,
 #' @param outproj EPSG code or CRS for output segdata.
 #' @param scale.factors Named list of mean and SD values used to standardise
 #'   each covariate (e.g. \code{list(depth_mean = x, depth_sd = y, ...)}).
+#' @param raster.ext File extension of the covariate rasters, including the
+#'   dot: \code{".img"} or \code{".tif"}. The project sets it per SubProject
+#'   as \code{ENV_RASTER_EXT}, because a SubProject's rasters change format only
+#'   when it is rebuilt from \code{00.02} (issue #60). Defaults to \code{".img"}
+#'   so a SubProject not yet rebuilt reads what it has on disk.
 #' @param verbose If \code{TRUE}, print progress messages.
 #' @return \code{sf} data frame of segment data with covariates attached.
 #' @export
@@ -2773,7 +2778,9 @@ create.segdata <- function(the.data,
                            inproj,
                            outproj,
                            scale.factors,
+                           raster.ext = ".img",
                            verbose = FALSE) {
+  checkmate::expect_choice(raster.ext, c(".img", ".tif"))
 
   # create initial segdata and reproject
   if (verbose) message("Creating initial segdata from watches")
@@ -2804,20 +2811,20 @@ create.segdata <- function(the.data,
 
   ### Depth and other static rasters
   #
-  # Every raster read here is passed through align.raster.crs(). They are
-  # written as .img, whose HFA driver does not round-trip an anonymous datum,
+  # Every raster read here is passed through align.raster.crs(). Until a
+  # SubProject is rebuilt they are .img (raster.ext), whose HFA driver does not round-trip an anonymous datum,
   # so on a SubProject whose segProj carries +ellps= but no +datum= the WKT
   # that comes back differs from outproj in its NAMES only. That is enough for
   # terra::extract() to reproject the vector and warn once per extract. The
   # restamp is measured, not assumed - see ?align.raster.crs, which also
   # records why the reprojection was harmless when this was diagnosed.
   # Depth
-  depth <- terra::rast(file.path(predLayerStudyAreaDir, "depth.img")) %>%
-    align.raster.crs(outproj, what = "depth.img", verbose = verbose)
+  depth <- terra::rast(file.path(predLayerStudyAreaDir, paste0("depth", raster.ext))) %>%
+    align.raster.crs(outproj, what = "depth", verbose = verbose)
 
   # Depth gradient
-  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, "depth.g.img")) %>%
-    align.raster.crs(outproj, what = "depth.g.img", verbose = verbose)
+  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, paste0("depth.g", raster.ext))) %>%
+    align.raster.crs(outproj, what = "depth.g", verbose = verbose)
 
   # SST
   #
@@ -2831,9 +2838,9 @@ create.segdata <- function(the.data,
   # depth. Loud, because the right fix is usually to download the missing month.
   sst.available <- dates.needed[
     file.exists(file.path(predLayerStudyAreaDir, "sst",
-                          paste0("sst.", dates.needed, ".img"))) &
+                          paste0("sst.", dates.needed, raster.ext))) &
     file.exists(file.path(predLayerStudyAreaDir, "sst",
-                          paste0("sst.g.", dates.needed, ".img")))]
+                          paste0("sst.g.", dates.needed, raster.ext)))]
 
   sst.missing <- setdiff(dates.needed, sst.available)
   if (length(sst.missing)) {
@@ -2852,12 +2859,12 @@ create.segdata <- function(the.data,
     stop("create.segdata: no SST raster exists for any month in the segment data.")
 
   sst <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
-                               paste0("sst.", sst.available, ".img"))) %>%
+                               paste0("sst.", sst.available, raster.ext))) %>%
     align.raster.crs(outproj, what = "sst rasters", verbose = verbose)
 
   # SST gradient
   sst.g <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
-                                 paste0("sst.g.", sst.available, ".img"))) %>%
+                                 paste0("sst.g.", sst.available, raster.ext))) %>%
     align.raster.crs(outproj, what = "sst.g rasters", verbose = verbose)
 
   ###---------------------------------------------------------------------------
@@ -3078,7 +3085,7 @@ recreate.sst.mnth.from.files <- function(folder, pattern){
   r <- purrr::map(files, raster) %>%
     stack
   names(r) <- basename(files) %>%
-    stringr::str_replace(stringr::fixed(".img"), "")
+    stringr::str_remove("[.](img|tif)$")
   r
 }
 
