@@ -4,7 +4,13 @@
 \alias{read.study.area.layer}
 \title{Read a study-area polygon from a SubProject's shapefile folder}
 \usage{
-read.study.area.layer(shape.dir, layer, crs = NULL, setting = NULL)
+read.study.area.layer(
+  shape.dir,
+  layer,
+  crs = NULL,
+  setting = NULL,
+  densify.km = 1
+)
 }
 \arguments{
 \item{shape.dir}{Folder holding the shapefile, normally the SubProject's
@@ -18,6 +24,10 @@ that has yet to fit its projection needs.}
 
 \item{setting}{Name of the setting that supplied \code{layer}. Used only to
 point the error message at what to fix.}
+
+\item{densify.km}{Longest edge segment to leave, in km. Converted to degrees
+(at 111.32 km per degree) for a geographic layer. \code{NULL} skips
+densifying.}
 }
 \value{
 An \code{sf} object.
@@ -38,6 +48,20 @@ failing somewhere downstream with a bare "Cannot open data source".
 \code{sf::st_zm()} is not optional. A study area read from a shapefile can
 carry Z or M coordinates - NL_EXPL_DRL_RA's does - and GEOS refuses them
 outright ("GEOS does not support XYM or XYZM geometries"), far from here.
+
+\strong{Edges are densified in the layer's own CRS, before it is projected}
+(issue #97). A polygon edge is a straight line between two vertices in
+whatever CRS an operation runs in, and a long edge is a different line in
+lon/lat and in \code{segProj}: NL_EXPL_DRL_RA's 9-vertex training area has a
+south edge along 38.1N whose Albers chord bows ~100 km north of the
+parallel. Adding a vertex every \code{densify.km} along each edge, as drawn,
+pins the edge to the line its author drew, in every CRS it is later read in.
+A geographic layer is densified planar in lon/lat, because that is
+how a GIS draws it - along the parallel, not the great circle. It changes
+nothing material for a layer whose vertices are already closer than
+\code{densify.km}, and adds no vertex outside the layer's lat/lon range, so
+a projection fitted to that range (\code{dftools::pick_aea_projection()})
+does not move.
 }
 \examples{
 \dontrun{

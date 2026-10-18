@@ -42,8 +42,17 @@ pre-downloaded raster files, scales all covariates, and saves the result
 as both an RData file and a shapefile.
 }
 \details{
-Expects project globals \code{predLayerStudyAreaDir}, \code{segdatloc},
+Expects project globals \code{predLayerGridDir}, \code{segdatloc},
 and \code{ShapeDir} in the calling environment.
+
+\strong{Covariates come from the UNMASKED analysis-grid rasters}
+(\code{predLayerGridDir}), not the copies masked to the study area
+(issue #97). Masking is a prediction-grid matter: \code{rasterize()} keeps a
+cell only if its centre is inside the polygon, so a segment inside the study
+area but in a boundary cell whose centre is not got NA and was dropped - 84
+on NL_EXPL_DRL_RA, all within 5.4 km of the edge. The unmasked rasters cover
+\code{gradrast}, \code{GRADIENT_BUFFER_CELLS} beyond the training area, and
+hold the same values cell for cell where both exist.
 
 \strong{This function does no spatial clipping.} It carried a
 \code{study.area} argument until DSMHelper 0.15.0 and never referenced it,
@@ -51,7 +60,7 @@ while the documentation claimed the function clipped to the study area - it
 does not, and the argument is gone. A segment's presence in the output is
 decided entirely upstream, by the \code{clip.area} passed to
 \code{\link{create.survey.data}}; its covariates come from the rasters in
-\code{predLayerStudyAreaDir}, whose extent is set by \code{genpredrast} in
+\code{predLayerGridDir}, whose extent is \code{gradrast}'s, built from \code{genpredrast} in
 \code{00.02_Extract_env_rasters.rmd}. Those two must agree: a segment
 outside the raster extent gets NA covariates here and is then dropped
 outright by the NA filter in \code{Generic_2_dsm.Rmd}. That is the failure

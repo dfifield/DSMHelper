@@ -643,6 +643,20 @@ measure.study.area.buffer <- function(watches,
 #' carry Z or M coordinates - NL_EXPL_DRL_RA's does - and GEOS refuses them
 #' outright ("GEOS does not support XYM or XYZM geometries"), far from here.
 #'
+#' \strong{Edges are densified in the layer's own CRS, before it is projected}
+#' (issue #97). A polygon edge is a straight line between two vertices in
+#' whatever CRS an operation runs in, and a long edge is a different line in
+#' lon/lat and in \code{segProj}: NL_EXPL_DRL_RA's 9-vertex training area has a
+#' south edge along 38.1N whose Albers chord bows ~100 km north of the
+#' parallel. Adding a vertex every \code{densify.km} along each edge, as drawn,
+#' pins the edge to the line its author drew, in every CRS it is later read in.
+#' A geographic layer is densified planar in lon/lat, because that is
+#' how a GIS draws it - along the parallel, not the great circle. It changes
+#' nothing material for a layer whose vertices are already closer than
+#' \code{densify.km}, and adds no vertex outside the layer's lat/lon range, so
+#' a projection fitted to that range (\code{dftools::pick_aea_projection()})
+#' does not move.
+#'
 #' @param shape.dir Folder holding the shapefile, normally the SubProject's
 #'   \code{ShapeDir}.
 #' @param layer Layer name, without the \code{.shp} extension.
@@ -651,6 +665,9 @@ measure.study.area.buffer <- function(watches,
 #'   that has yet to fit its projection needs.
 #' @param setting Name of the setting that supplied \code{layer}. Used only to
 #'   point the error message at what to fix.
+#' @param densify.km Longest edge segment to leave, in km. Converted to degrees
+#'   (at 111.32 km per degree) for a geographic layer. \code{NULL} skips
+#'   densifying.
 #' @return An \code{sf} object.
 #' @examples
 #' \dontrun{
@@ -660,11 +677,13 @@ measure.study.area.buffer <- function(watches,
 #' }
 #' @export
 read.study.area.layer <- function(shape.dir, layer, crs = NULL,
-                                  setting = NULL) {
+                                  setting = NULL, densify.km = 1) {
   coll <- checkmate::makeAssertCollection()
   checkmate::assert_string(shape.dir, add = coll)
   checkmate::assert_string(layer, add = coll)
   checkmate::assert_string(setting, null.ok = TRUE, add = coll)
+  checkmate::assert_number(densify.km, lower = 0, finite = TRUE, null.ok = TRUE,
+                           add = coll)
   checkmate::reportAssertions(coll)
 
   shp <- file.path(shape.dir, paste0(layer, ".shp"))
@@ -678,9 +697,62 @@ read.study.area.layer <- function(shape.dir, layer, crs = NULL,
   sa <- sf::st_read(shp, quiet = TRUE) %>%
     sf::st_zm()
 
+  if (!is.null(densify.km) && densify.km > 0) {
+    if (isTRUE(sf::st_is_longlat(sa))) {
+      max.len <- densify.km / 111.32
+    } else {
+      if (!identical(sf::st_crs(sa)$units_gdal, "metre"))
+        stop("read.study.area.layer: layer '", layer, "' is neither geographic ",
+             "nor in metres; cannot densify it. Pass densify.km = NULL.")
+      max.len <- densify.km * 1000
+    }
+    # Planar in the layer's own coordinates, so with the CRS removed: sf would
+    # otherwise densify a geographic layer along great circles (and need
+    # lwgeom to do it), not along the lines as drawn.
+    src.crs <- sf::st_crs(sa)
+    sf::st_crs(sa) <- NA
+    sa <- sf::st_segmentize(sa, dfMaxLength = max.len)
+    sf::st_crs(sa) <- src.crs
+  }
+
   if (!is.null(crs)) sa <- sf::st_transform(sa, crs)
 
   sa
+}
+
+
+#' Keep the points that fall in a clip polygon, deciding it in the polygon's CRS
+#'
+#' Every clip in the pipeline must read the study-area edges the same way,
+#' and a long polygon edge is a different line in lon/lat and in a projection
+#' (issue #97). \code{create.survey.data()} used to clip in lon/lat, by
+#' transforming the polygon to EPSG:4326 for \code{rmapshaper::ms_clip()}, while
+#' \code{genpredrast}, the prediction grid and the soap knots were all decided
+#' in \code{segProj}. On NL_EXPL_DRL_RA that kept 60 segments in a sliver the
+#' covariate grid did not cover, and they then lost their covariates silently.
+#' This decides membership in \code{clip.area}'s own CRS - \code{segProj} for
+#' every polygon in \code{study_area.rda} - and refuses a geographic one.
+#'
+#' @param pts \code{sf} points, in any CRS.
+#' @param clip.area \code{sf} polygon in a projected CRS.
+#' @return The rows of \code{pts} that intersect \code{clip.area}, transformed
+#'   to \code{clip.area}'s CRS. Zero rows if none do.
+#' @examples
+#' \dontrun{
+#' kept <- clip.points.to.area(watch_pts, training.study.area.buffered)
+#' }
+#' @export
+clip.points.to.area <- function(pts, clip.area) {
+  checkmate::expect_class(pts, "sf")
+  checkmate::expect_class(clip.area, "sf")
+  if (isTRUE(sf::st_is_longlat(clip.area)))
+    stop("clip.points.to.area: clip.area is in a geographic CRS. Clip in the ",
+         "analysis CRS (segProj), the one genpredrast and the prediction grid ",
+         "are built in, so every step reads the study-area edges alike (#97).")
+
+  pts %>%
+    sf::st_transform(sf::st_crs(clip.area)) %>%
+    sf::st_filter(clip.area)
 }
 
 
@@ -881,33 +953,23 @@ create.survey.data <- function(raw.dat = NULL,
     watches <- dplyr::filter(watches, !(WatchID %in% dups))
   }
 
-  # clip to clip.area, which is the study area buffered by
+  # clip to clip.area, which is the training study area buffered by
   # STUDY_AREA_BUFFER_KM where the SubProject sets one - see the roxygen above.
-  #
-  # NB: rmapshaper::ms_clip() throws "Not compatible with STRSXP: [type=list]"
-  # rather than returning an empty result when nothing overlaps, so check for
-  # overlap first. This happens for a whole dataset when the clip area has no
-  # coverage by this survey type at all.
+  # Decided in clip.area's own CRS (segProj), the CRS genpredrast and the
+  # prediction grid are built in, never in lon/lat (issue #97).
   watch_pts <- watches %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
-    sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
     dplyr::select(WatchID) # just keep WatchID
-  clip_area_4326 <- clip.area %>% sf::st_transform(sf::st_crs(4326))
 
-  if (nrow(sf::st_filter(watch_pts, clip_area_4326)) == 0) {
+  watches <- watch_pts %>%
+    clip.points.to.area(clip.area) %>%
+    dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
+    sf::st_transform(outproj)
+
+  if (nrow(watches) == 0)
     warning(sprintf(
       "create.survey.data: no %s watches overlap clip.area - returning no watches",
       dataset), immediate. = TRUE)
-    watches <- watch_pts %>%
-      dplyr::slice(0) %>%
-      dplyr::left_join(watches, by = "WatchID") %>%
-      sf::st_transform(outproj)
-  } else {
-    watches <- watch_pts %>%
-      rmapshaper::ms_clip(clip_area_4326) %>%   # do the clipping -
-      dplyr::left_join(watches, by = "WatchID") %>%  # add other cols back in
-      sf::st_transform(outproj)
-  }
 
 
   # Create transects: combine watches on on same day, same ship, same observer
@@ -1056,33 +1118,22 @@ create.survey.data <- function(raw.dat = NULL,
   if (nrow(obs) == 0)
     warning("No observations left after filtering!", immediate. = TRUE)
 
-  # Clip to clip.area, exactly as the watches were above.
-  #
-  # NB: see the note on the watches clip above - ms_clip() errors rather than
-  # returning an empty result when nothing overlaps, so check for overlap
-  # first. Unlike the watches case this can fire even when the survey type does
-  # cover the clip area, if it simply recorded no in-transect observations
-  # inside it.
+  # Clip to clip.area, exactly as the watches were above. Unlike the watches
+  # this can come back empty even when the survey type does cover the clip
+  # area, if it simply recorded no in-transect observations inside it.
   obs_pts <- obs %>%
     sf::st_as_sf(coords = c("LongStart", "LatStart"), crs = sf::st_crs(inproj)) %>%
-    sf::st_transform(sf::st_crs(4326)) %>% # for ms_clip below
     dplyr::select(object) # just keep object
-  clip_area_4326 <- clip.area %>% sf::st_transform(sf::st_crs(4326))
 
-  if (nrow(sf::st_filter(obs_pts, clip_area_4326)) == 0) {
+  obs <- obs_pts %>%
+    clip.points.to.area(clip.area) %>%
+    dplyr::left_join(obs, by = "object") %>%  # add other cols back in
+    sf::st_transform(outproj)
+
+  if (nrow(obs) == 0)
     warning(sprintf(
       "create.survey.data: no %s observations overlap clip.area - returning no observations",
       dataset), immediate. = TRUE)
-    obs <- obs_pts %>%
-      dplyr::slice(0) %>%
-      dplyr::left_join(obs, by = "object") %>%
-      sf::st_transform(outproj)
-  } else {
-    obs <- obs_pts %>%
-      rmapshaper::ms_clip(clip_area_4326) %>%   # do the clipping -
-      dplyr::left_join(obs, by = "object") %>%  # add other cols back in
-      sf::st_transform(outproj)
-  }
 
   # Save as shapefile
   if (saveshp) {
@@ -2745,8 +2796,17 @@ align.raster.crs <- function(r,
 #' pre-downloaded raster files, scales all covariates, and saves the result
 #' as both an RData file and a shapefile.
 #'
-#' Expects project globals \code{predLayerStudyAreaDir}, \code{segdatloc},
+#' Expects project globals \code{predLayerGridDir}, \code{segdatloc},
 #' and \code{ShapeDir} in the calling environment.
+#'
+#' \strong{Covariates come from the UNMASKED analysis-grid rasters}
+#' (\code{predLayerGridDir}), not the copies masked to the study area
+#' (issue #97). Masking is a prediction-grid matter: \code{rasterize()} keeps a
+#' cell only if its centre is inside the polygon, so a segment inside the study
+#' area but in a boundary cell whose centre is not got NA and was dropped - 84
+#' on NL_EXPL_DRL_RA, all within 5.4 km of the edge. The unmasked rasters cover
+#' \code{gradrast}, \code{GRADIENT_BUFFER_CELLS} beyond the training area, and
+#' hold the same values cell for cell where both exist.
 #'
 #' \strong{This function does no spatial clipping.} It carried a
 #' \code{study.area} argument until DSMHelper 0.15.0 and never referenced it,
@@ -2754,7 +2814,7 @@ align.raster.crs <- function(r,
 #' does not, and the argument is gone. A segment's presence in the output is
 #' decided entirely upstream, by the \code{clip.area} passed to
 #' \code{\link{create.survey.data}}; its covariates come from the rasters in
-#' \code{predLayerStudyAreaDir}, whose extent is set by \code{genpredrast} in
+#' \code{predLayerGridDir}, whose extent is \code{gradrast}'s, built from \code{genpredrast} in
 #' \code{00.02_Extract_env_rasters.rmd}. Those two must agree: a segment
 #' outside the raster extent gets NA covariates here and is then dropped
 #' outright by the NA filter in \code{Generic_2_dsm.Rmd}. That is the failure
@@ -2819,11 +2879,11 @@ create.segdata <- function(the.data,
   # restamp is measured, not assumed - see ?align.raster.crs, which also
   # records why the reprojection was harmless when this was diagnosed.
   # Depth
-  depth <- terra::rast(file.path(predLayerStudyAreaDir, paste0("depth", raster.ext))) %>%
+  depth <- terra::rast(file.path(predLayerGridDir, paste0("depth", raster.ext))) %>%
     align.raster.crs(outproj, what = "depth", verbose = verbose)
 
   # Depth gradient
-  depth.g <- terra::rast(file.path(predLayerStudyAreaDir, paste0("depth.g", raster.ext))) %>%
+  depth.g <- terra::rast(file.path(predLayerGridDir, paste0("depth.g", raster.ext))) %>%
     align.raster.crs(outproj, what = "depth.g", verbose = verbose)
 
   # SST
@@ -2837,9 +2897,9 @@ create.segdata <- function(the.data,
   # Generic_2_dsm.Rmd then drops them exactly as it drops a segment with no
   # depth. Loud, because the right fix is usually to download the missing month.
   sst.available <- dates.needed[
-    file.exists(file.path(predLayerStudyAreaDir, "sst",
+    file.exists(file.path(predLayerGridDir, "sst",
                           paste0("sst.", dates.needed, raster.ext))) &
-    file.exists(file.path(predLayerStudyAreaDir, "sst",
+    file.exists(file.path(predLayerGridDir, "sst",
                           paste0("sst.g.", dates.needed, raster.ext)))]
 
   sst.missing <- setdiff(dates.needed, sst.available)
@@ -2858,12 +2918,12 @@ create.segdata <- function(the.data,
   if (!length(sst.available))
     stop("create.segdata: no SST raster exists for any month in the segment data.")
 
-  sst <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
+  sst <- terra::rast(file.path(predLayerGridDir, "sst",
                                paste0("sst.", sst.available, raster.ext))) %>%
     align.raster.crs(outproj, what = "sst rasters", verbose = verbose)
 
   # SST gradient
-  sst.g <- terra::rast(file.path(predLayerStudyAreaDir, "sst",
+  sst.g <- terra::rast(file.path(predLayerGridDir, "sst",
                                  paste0("sst.g.", sst.available, raster.ext))) %>%
     align.raster.crs(outproj, what = "sst.g rasters", verbose = verbose)
 
