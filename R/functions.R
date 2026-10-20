@@ -10293,6 +10293,132 @@ candidate.detfcn.summary <- function(df.spec.name, species) {
     dplyr::relocate(species, dataset, Model, Key, Formula, DetProb, AIC, deltaAIC, )
 }
 
+#' Summarise the chosen detection function for every species and ddftype
+#'
+#' One row per species and distance ddftype (\code{_D}) in \code{df.mod.list},
+#' describing the candidate model chosen for it in 01.02. The statistics come
+#' from the candidate summary files that 01.01 writes, so the table can be
+#' built before 01.03 fits the finals, which is when the choices are made
+#' (Atlantic-DSM#103).
+#'
+#' The chosen model is located by name, with \code{\link{create.model.name}},
+#' just as \code{do.det.fcn()} finds it in 01.03. Its rank and \code{delta_aic}
+#' are measured against every candidate in the same folder. \code{best_model}
+#' and \code{best_p} give the AIC-best candidate, so a choice that departs from
+#' it can be seen at a glance.
+#'
+#' No-distance ddftypes (\code{_N}) are left out, because they are strip models
+#' with p = 1 by construction. A distance ddftype marked \code{strip = TRUE}
+#' gets a row with \code{status = "strip"} and no statistics.
+#'
+#' @param df.mod.list Named list of per-species ddf specs, as saved by 01.02.
+#' @param results.dir Directory holding one folder per species, each containing
+#'   the \code{DF Summaries_<ddftype>} folders written by 01.01.
+#' @return A tibble with one row per species and distance ddftype. Columns:
+#'   \code{platform} (\code{"Ship"}/\code{"Aerial"}), \code{behaviour}
+#'   (\code{"Water"}/\code{"Flying"}), \code{species}, \code{ddftype},
+#'   \code{status} (\code{"fitted"}, \code{"strip"}, \code{"no choice"} or
+#'   \code{"not a candidate"}), \code{model}, \code{key}, \code{adj},
+#'   \code{formula}, \code{n_obs}, \code{p}, \code{p_se}, \code{p_cv},
+#'   \code{chisq} (chi-square goodness-of-fit statistic, summed over the
+#'   distance bins), \code{gof_p} (its p-value; \code{NA} when the model has
+#'   as many parameters as there are degrees of freedom, e.g. three with four
+#'   bins), \code{aic}, \code{delta_aic},
+#'   \code{rank}, \code{n_candidates}, \code{best_model}, \code{best_p} and
+#'   \code{notes}.
+#' @examples
+#' \dontrun{
+#' load(dfModlistLoc)
+#' summarise.chosen.ddfs(df.mod.list, ResultsDir)
+#' }
+#' @export
+summarise.chosen.ddfs <- function(df.mod.list, results.dir) {
+  checkmate::expect_list(df.mod.list, names = "unique")
+  checkmate::expect_string(results.dir)
+  checkmate::expect_directory_exists(results.dir)
+
+  num <- function(x) suppressWarnings(as.numeric(x))
+  rows <- list()
+  for (species in names(df.mod.list)) {
+    for (ddftype in names(df.mod.list[[species]])) {
+      parts <- parse.df.name(ddftype)
+      if (parts$dist_type != "D")
+        next
+      spec <- df.mod.list[[species]][[ddftype]]
+      row <- tibble::tibble(
+        platform = parts$platform_class,
+        behaviour = unname(c(W = "Water", F = "Flying")[parts$behav]),
+        species = species,
+        ddftype = ddftype,
+        status = NA_character_,
+        model = NA_character_,
+        key = NA_character_,
+        adj = NA_character_,
+        formula = NA_character_,
+        n_obs = NA_real_, p = NA_real_, p_se = NA_real_, p_cv = NA_real_,
+        chisq = NA_real_, gof_p = NA_real_, aic = NA_real_, delta_aic = NA_real_,
+        rank = NA_integer_, n_candidates = NA_integer_,
+        best_model = NA_character_, best_p = NA_real_,
+        notes = if (is.null(spec$notes) || all(is.na(spec$notes))) NA_character_
+                else paste(spec$notes, collapse = " ")
+      )
+
+      if (isTRUE(spec$strip)) {
+        row$status <- "strip"
+        rows[[length(rows) + 1]] <- row
+        next
+      }
+      if (is.null(spec$final.key) || is.na(spec$final.key)) {
+        row$status <- "no choice"
+        rows[[length(rows) + 1]] <- row
+        next
+      }
+
+      row$key <- spec$final.key
+      row$adj <- if (is.null(spec$final.adj)) NA_character_ else spec$final.adj
+      row$formula <- paste(deparse(spec$final.formula), collapse = "")
+      row$model <- create.model.name(spec$final.key, spec$final.formula, spec$final.adj)
+
+      folder <- file.path(results.dir, species, paste("DF Summaries", ddftype, sep = "_"))
+      # Other candidates' files can lack a statistic (unif has no CV line),
+      # and get.stats.file() warns about each; only the chosen row matters here.
+      cand <- if (dir.exists(folder)) suppressWarnings(suppressMessages(get.ds.res(folder))) else NULL
+      cand <- if (is.null(cand)) NULL else dplyr::filter(cand, !is.na(Model))
+      if (is.null(cand) || nrow(cand) == 0) {
+        row$status <- "not a candidate"
+        rows[[length(rows) + 1]] <- row
+        next
+      }
+      cand <- cand %>%
+        dplyr::mutate(AIC = num(AIC)) %>%
+        dplyr::arrange(AIC) %>%
+        dplyr::mutate(rank = dplyr::row_number())
+      row$n_candidates <- nrow(cand)
+      row$best_model <- cand$Model[1]
+      row$best_p <- num(cand$DetProb[1])
+
+      hit <- cand[cand$Model == row$model, ]
+      if (nrow(hit) != 1) {
+        row$status <- "not a candidate"
+        rows[[length(rows) + 1]] <- row
+        next
+      }
+      row$status <- "fitted"
+      row$n_obs <- num(hit$NObs)
+      row$p <- num(hit$DetProb)
+      row$p_se <- num(hit$DetSE)
+      row$p_cv <- num(hit$DetCV)
+      row$chisq <- sum(num(strsplit(as.character(hit$ChiScores), ",")[[1]]))
+      row$gof_p <- num(hit$ChisquareP)
+      row$aic <- hit$AIC
+      row$delta_aic <- hit$AIC - cand$AIC[1]
+      row$rank <- hit$rank
+      rows[[length(rows) + 1]] <- row
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+
 
 #' Collect detection function results from summary text files
 #'
