@@ -2011,6 +2011,8 @@ create.strip.ddf <- function(distdata, dataset, platform_class) {
 #' @param parallel If \code{TRUE}, use parallel processing.
 #' @param folder Path to the folder where candidate model summaries are saved.
 #' @param nCores Number of cores for parallel processing.
+#' @param max.adj.by.key Optional named numeric vector capping the number of
+#'   adjustment terms per key; see \code{\link{fit.adjustment.series}}.
 #' @param ... Additional arguments passed to \code{\link[Distance]{ds}}.
 #' @return When \code{do.final.only = TRUE}: named list with elements
 #'   \code{df_final} (fitted model) and \code{distdata} (augmented with
@@ -2028,6 +2030,7 @@ do.det.fcn <- function(distdata,
                        parallel = FALSE,
                        folder,
                        nCores = 1,
+                       max.adj.by.key = NULL,
                        ...) {
 
   # set up species and spill specific pathnames
@@ -2099,7 +2102,8 @@ do.det.fcn <- function(distdata,
           nadj = df.model$final.nadj,
           cutpoints = df.model$cutpoints,
           convert_units = df.model$convert.units,
-          truncation = truncation
+          truncation = truncation,
+          max.adj.by.key = max.adj.by.key
         ) %>%
           # Note df_final will be a list with one element and we need to peel it
           # off.
@@ -2144,6 +2148,7 @@ do.det.fcn <- function(distdata,
       folder = folder,
       convert_units = df.model$convert.units,
       max_adjustments = df.model$max.adjustments,
+      max.adj.by.key = max.adj.by.key,
       truncation = truncation,
       parallel = parallel,
       nCores = nCores,
@@ -6118,8 +6123,14 @@ do_oneoff_render <- function(rmdfile, species) {
 #' @param verbose If \code{TRUE}, print extra debugging messages.
 #' @param min_data_size_limit Minimum number of observations required to
 #'   attempt model fitting.
+#' @param max.adj.by.key Optional named numeric vector capping the number of
+#'   adjustment terms per key function (e.g. \code{c(hn = 2, hr = 1)}). A key
+#'   not named is capped only by \code{max_adjustments}. Passed to
+#'   \code{\link{fit.adjustment.series}}.
 #' @param ... Additional arguments passed to \code{\link[Distance]{ds}}.
-#' @return Fitted \code{dsmodel} object, or \code{NA} on failure.
+#' @return Fitted \code{dsmodel} object, or \code{NA} on failure. A key +
+#'   adjustment model carries the per-order search table as attribute
+#'   \code{"adj.search"}.
 #' @export
 run.ddf.model <-
   function(mod,
@@ -6128,6 +6139,7 @@ run.ddf.model <-
            logfileConn = "",
            verbose,
            min_data_size_limit = 20,
+           max.adj.by.key = NULL,
            ...) {
 
     if (nrow(mod) > 1) stop("run.ddf.model: given more than 1 model to run!")
@@ -6167,7 +6179,26 @@ run.ddf.model <-
         env$monotonicity <- monotonicity
         env$dots <- list(...)
 
-        if (logfileConn == "")
+        if (!is.null(adj)) {
+          # Key + adjustment series: our own warm-started search rather than
+          # ds()'s, whose first adjustment term starts cold (Atlantic-DSM#113).
+          dots <- list(...)
+          model <- fit.adjustment.series(
+            data = data,
+            key = mod$key,
+            adjustment = adj,
+            max_adjustments = if (is.null(dots$max_adjustments)) 5 else dots$max_adjustments,
+            nadj = dots$nadj,
+            max.adj.by.key = max.adj.by.key,
+            monotonicity = monotonicity,
+            ds.args = dots[setdiff(names(dots), c("max_adjustments", "nadj"))]
+          )
+          srch <- attr(model, "adj.search")
+          if (!is.null(srch) && any(srch$flag != ""))
+            cat(sprintf("\nrun.ddf.model: %s: %s\n", mod$label,
+                        paste(unique(srch$flag[srch$flag != ""]), collapse = "; ")),
+                file = logfileConn)
+        } else if (logfileConn == "")
           model <- with(env, {
             model <- do.call('ds',
                              c(
@@ -6248,7 +6279,14 @@ run.ddf.model <-
             ), file = modOutFileConn)
           }
           cat("\n", file = modOutFileConn)
-          capture.output(summary(model), file = modOutFileConn)
+          if (!is.null(attr(model, "adj.search"))) {
+            cat("Adjustment search (warm = started from the previous order's fit):\n",
+                file = modOutFileConn)
+            capture.output(print(attr(model, "adj.search"), row.names = FALSE),
+                           file = modOutFileConn, append = TRUE)
+            cat("\n", file = modOutFileConn)
+          }
+          capture.output(summary(model), file = modOutFileConn, append = TRUE)
         })
 
         if (inherits(try.res, "try-error")) {
@@ -6267,6 +6305,141 @@ run.ddf.model <-
     if (verbose) cat("Returning model object\n", file = logfileConn)
     model
   }
+
+
+#' Fit a key function with 0, 1, 2, ... adjustment terms, each warm-started
+#'
+#' Replaces \code{\link[Distance]{ds}}'s own AIC adjustment-term search, which
+#' starts its \emph{first} adjustment term from mrds's generic defaults (scale
+#' from a regression of log distance, adjustment 1e-16) and only warm-starts
+#' later terms. On NL_EXPL_DRL_RA BLKI ship-water that cold cos(2) fit stopped
+#' at a log-likelihood of -1684 against -1509 for plain hn, a model it nests,
+#' so the search returned plain hn under the name hn.cos (Atlantic-DSM#113).
+#'
+#' Every order from 0 to the cap is fitted twice, warm (from the previous
+#' order's estimates, the new coefficient at 0) and cold (mrds defaults), and
+#' the fit with the higher log-likelihood is kept. Without \code{nadj} the
+#' order with the lowest AIC is returned. Every order is fitted, not only until
+#' AIC first rises, so one failed fit cannot end the search.
+#'
+#' A model with one more adjustment term nests the previous one, so at its
+#' optimum its AIC can be at most 2 higher. A larger rise means the optimiser
+#' failed even from the warm start, and is reported in the \code{flag} column.
+#'
+#' @param data Observation data frame passed to \code{\link[Distance]{ds}}.
+#' @param key Key function: \code{"hn"}, \code{"hr"} or \code{"unif"}.
+#' @param adjustment Adjustment series: \code{"cos"}, \code{"herm"} or
+#'   \code{"poly"}.
+#' @param max_adjustments Largest number of adjustment terms to try.
+#' @param nadj If not \code{NULL}, fit up to exactly this many terms and return
+#'   that model instead of the AIC-best.
+#' @param max.adj.by.key Optional named numeric vector capping
+#'   \code{max_adjustments} per key, e.g. \code{c(hn = 2, hr = 1)}.
+#' @param monotonicity Passed to \code{\link[Distance]{ds}}.
+#' @param ds.args Named list of further \code{\link[Distance]{ds}} arguments
+#'   (truncation, cutpoints, ...).
+#' @return The chosen \code{dsmodel}, with attribute \code{"adj.search"}: a
+#'   data frame of \code{nadj}, \code{AIC}, \code{lnl}, \code{start} (which
+#'   start won) and \code{flag}, one row per order. \code{NULL} if even the
+#'   key alone fails to fit.
+#' @examples
+#' \dontrun{
+#' m <- fit.adjustment.series(distdata, "hn", "cos", max_adjustments = 2,
+#'                            ds.args = list(truncation = 0.3))
+#' attr(m, "adj.search")
+#' }
+#' @export
+fit.adjustment.series <- function(data,
+                                  key,
+                                  adjustment,
+                                  max_adjustments,
+                                  nadj = NULL,
+                                  max.adj.by.key = NULL,
+                                  monotonicity = "strict",
+                                  ds.args = list()) {
+  checkmate::assert_data_frame(data)
+  checkmate::assert_choice(key, c("hn", "hr", "unif"))
+  checkmate::assert_choice(adjustment, c("cos", "herm", "poly"))
+  checkmate::assert_count(max_adjustments)
+  checkmate::assert_count(nadj, null.ok = TRUE)
+  checkmate::assert_numeric(max.adj.by.key, null.ok = TRUE, names = "named")
+  checkmate::assert_list(ds.args)
+
+  n.max <- max_adjustments
+  if (!is.null(max.adj.by.key) && key %in% names(max.adj.by.key))
+    n.max <- min(n.max, max.adj.by.key[[key]])
+  if (!is.null(nadj)) n.max <- nadj
+
+  ds.args[c("order", "initial_values", "adjustment", "key", "formula",
+            "monotonicity", "data")] <- NULL
+  # A formula created here would drag this frame (data and every fit) into
+  # each saved model's .RData.
+  form <- stats::as.formula("~1", env = globalenv())
+
+  fit.one <- function(k, init) {
+    args <- c(list(data = data, key = key, formula = form,
+                   monotonicity = monotonicity,
+                   adjustment = if (k == 0) NULL else adjustment),
+              if (k > 0) list(nadj = k),
+              if (!is.null(init)) list(initial_values = init),
+              list(quiet = TRUE),
+              ds.args)
+    m <- try(suppressMessages(suppressWarnings(do.call(Distance::ds, args))),
+             silent = TRUE)
+    if (inherits(m, "try-error") || is.null(m) || m$ddf$ds$converge != 0)
+      return(NULL)
+    m
+  }
+  # Start order k from the order k - 1 fit: same key parameters, the existing
+  # adjustment coefficients, and 0 for the new one. Parameter order in $par is
+  # shape (hr only), scale (not unif), then adjustments, as ds() assumes.
+  warm.start <- function(prev, k) {
+    p <- unname(prev$ddf$par)
+    init <- list()
+    if (key == "hr") { init$shape <- p[1]; p <- p[-1] }
+    if (key != "unif") { init$scale <- p[1]; p <- p[-1] }
+    init$adjustment <- c(p, rep(0, k - length(p)))
+    init
+  }
+
+  fits <- list()
+  srch <- data.frame(nadj = integer(), AIC = numeric(), lnl = numeric(),
+                     start = character(), flag = character())
+  prev <- NULL
+  for (k in 0:n.max) {
+    cold <- fit.one(k, NULL)
+    warm <- if (k > 0 && !is.null(prev)) fit.one(k, warm.start(prev, k)) else NULL
+    cand <- Filter(Negate(is.null), list(warm = warm, cold = cold))
+    if (length(cand) == 0) {
+      srch[nrow(srch) + 1, ] <- list(k, NA, NA, "", "no fit")
+      break
+    }
+    best <- which.max(vapply(cand, function(m) m$ddf$lnl, numeric(1)))
+    m <- cand[[best]]
+    flag <- ""
+    if (!is.null(prev) && m$ddf$criterion > prev$ddf$criterion + 2 + 1e-6)
+      flag <- sprintf("optimiser failure at nadj %d, AIC %+.1f over nadj %d",
+                      k, m$ddf$criterion - prev$ddf$criterion, k - 1)
+    srch[nrow(srch) + 1, ] <- list(k, round(m$ddf$criterion, 3),
+                                   round(m$ddf$lnl, 3), names(cand)[best], flag)
+    fits[[k + 1]] <- m
+    prev <- m
+  }
+
+  if (length(fits) == 0) return(NULL)
+  if (!is.null(nadj)) {
+    if (length(fits) < nadj + 1)
+      stop(sprintf("fit.adjustment.series: %s + %s(%d terms) failed to fit",
+                   key, adjustment, nadj))
+    model <- fits[[nadj + 1]]
+  } else {
+    ok <- which(!vapply(fits, is.null, logical(1)))
+    model <- fits[[ok[which.min(vapply(fits[ok], function(m) m$ddf$criterion,
+                                       numeric(1)))]]]
+  }
+  attr(model, "adj.search") <- srch
+  model
+}
 
 
 #' Generate all n-way covariate combinations for a key function

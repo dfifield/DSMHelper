@@ -11,6 +11,7 @@ run.ddf.model(
   logfileConn = "",
   verbose,
   min_data_size_limit = 20,
+  max.adj.by.key = NULL,
   ...
 )
 }
@@ -31,10 +32,17 @@ write-mode file connection.}
 \item{min_data_size_limit}{Minimum number of observations required to
 attempt model fitting.}
 
+\item{max.adj.by.key}{Optional named numeric vector capping the number of
+adjustment terms per key function (e.g. \code{c(hn = 2, hr = 1)}). A key
+not named is capped only by \code{max_adjustments}. Passed to
+\code{\link{fit.adjustment.series}}.}
+
 \item{...}{Additional arguments passed to \code{\link[Distance]{ds}}.}
 }
 \value{
-Fitted \code{dsmodel} object, or \code{NA} on failure.
+Fitted \code{dsmodel} object, or \code{NA} on failure. A key +
+adjustment model carries the per-order search table as attribute
+\code{"adj.search"}.
 }
 \description{
 Calls \code{\link[Distance]{ds}} with the specification in \code{mod},

@@ -16,6 +16,7 @@ do.det.fcn(
   parallel = FALSE,
   folder,
   nCores = 1,
+  max.adj.by.key = NULL,
   ...
 )
 }
@@ -36,7 +37,7 @@ TRUE}.}
 
 \item{cleanFolder}{If \code{TRUE}, remove existing results from
 \code{folder} before fitting (only used when \code{do.final.only =
-  FALSE}).}
+FALSE}).}
 
 \item{rerun}{If \code{TRUE}, re-fit even when saved results exist.}
 
@@ -45,6 +46,9 @@ TRUE}.}
 \item{folder}{Path to the folder where candidate model summaries are saved.}
 
 \item{nCores}{Number of cores for parallel processing.}
+
+\item{max.adj.by.key}{Optional named numeric vector capping the number of
+adjustment terms per key; see \code{\link{fit.adjustment.series}}.}
 
 \item{...}{Additional arguments passed to \code{\link[Distance]{ds}}.}
 }
