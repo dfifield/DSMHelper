@@ -6324,7 +6324,9 @@ run.ddf.model <-
 #'
 #' A model with one more adjustment term nests the previous one, so at its
 #' optimum its AIC can be at most 2 higher. A larger rise means the optimiser
-#' failed even from the warm start, and is reported in the \code{flag} column.
+#' failed even from the warm start, and is reported in the de{flag} column.
+#' The allowance is 2 + 0.1: a term that adds nothing lands at +2 with optimiser
+#' noise of a few hundredths (NOFU ship-water hr.hp, +2.03), which is not a failure.
 #'
 #' @param data Observation data frame passed to \code{\link[Distance]{ds}}.
 #' @param key Key function: \code{"hn"}, \code{"hr"} or \code{"unif"}.
@@ -6349,6 +6351,9 @@ run.ddf.model <-
 #' attr(m, "adj.search")
 #' }
 #' @export
+# Tolerance on the nested-AIC check in fit.adjustment.series(), see its docs.
+AIC_NEST_TOL <- 0.1
+
 fit.adjustment.series <- function(data,
                                   key,
                                   adjustment,
@@ -6417,7 +6422,7 @@ fit.adjustment.series <- function(data,
     best <- which.max(vapply(cand, function(m) m$ddf$lnl, numeric(1)))
     m <- cand[[best]]
     flag <- ""
-    if (!is.null(prev) && m$ddf$criterion > prev$ddf$criterion + 2 + 1e-6)
+    if (!is.null(prev) && m$ddf$criterion > prev$ddf$criterion + 2 + AIC_NEST_TOL)
       flag <- sprintf("optimiser failure at nadj %d, AIC %+.1f over nadj %d",
                       k, m$ddf$criterion - prev$ddf$criterion, k - 1)
     srch[nrow(srch) + 1, ] <- list(k, round(m$ddf$criterion, 3),

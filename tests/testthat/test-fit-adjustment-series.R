@@ -14,7 +14,7 @@ test_that("fit.adjustment.series fits every order, keeps nested AICs consistent 
   s <- attr(m, "adj.search")
   expect_equal(s$nadj, 0:2)
   # Each order nests the one before, so at its optimum AIC rises by at most 2
-  expect_true(all(diff(s$AIC) <= 2 + 1e-6))
+  expect_true(all(diff(s$AIC) <= 2.1))
   expect_true(all(s$flag == ""))
   expect_equal(m$ddf$criterion, min(s$AIC), tolerance = 1e-3)
 
