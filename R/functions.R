@@ -1435,6 +1435,120 @@ get.dist_type <- function(nm) {
   parse.df.name(nm)$dist_type
 }
 
+#' Apply a table of final ddf choices to df.mod.list
+#'
+#' \code{01.02_Create_final_ddf_model_specs.Rmd} records the analyst's final
+#' detection-function choices as one row per fitted ddftype, the way
+#' \code{final.dsm.models} records DSM choices, instead of a block of
+#' \code{df.mod.list[[species]]$ECSAS_Ship_W_D$final.key <- ...} assignments.
+#' This writes those rows into the specs.
+#'
+#' Nothing is assigned by field name, so a misspelt field cannot append
+#' silently (Atlantic-DSM #78). Every distance ddftype the SubProject surveys
+#' must have a row, so a forgotten one stops rather than fitting a default. A
+#' row for a ddftype this SubProject does not survey is dropped with a warning,
+#' as \code{\link{prune.df.mod.list}} drops one.
+#'
+#' Whether a choice matches a fitted 01.01 candidate is checked afterwards by
+#' \code{\link{summarise.chosen.ddfs}} (\code{NOT A CANDIDATE}).
+#'
+#' @param df.mod.list Named list (by species) of DDF specs, from
+#'   \code{\link{init.df.mod.list}}.
+#' @param choices Data frame with columns \code{species}, \code{ddftype}
+#'   (e.g. \code{"Ship_W_D"}; an \code{"ECSAS_"} prefix is optional),
+#'   \code{key} (\code{"hn"}, \code{"hr"}, \code{"unif"}, or \code{"strip"}
+#'   for no fitted detection function), \code{formula} (e.g. \code{"~1"},
+#'   \code{"~ Season + size"}), \code{adj} (\code{NA}, \code{"cos"},
+#'   \code{"herm"} or \code{"poly"}) and \code{notes}. An optional
+#'   \code{nadj} column fixes the number of adjustment terms.
+#' @return \code{df.mod.list} with \code{final.key}, \code{final.formula},
+#'   \code{final.adj}, \code{final.nadj}, \code{strip} and \code{notes} set.
+#' @examples
+#' \dontrun{
+#' ddf.choices <- tibble::tribble(
+#'   ~species, ~ddftype,   ~key, ~formula,          ~adj,  ~notes,
+#'   "BLKI",   "Ship_W_D", "hn", "~1",              "cos", "",
+#'   "BLKI",   "Ship_F_D", "hr", "~ Season + size", NA,    "")
+#' df.mod.list <- apply.ddf.choices(init.df.mod.list(), ddf.choices)
+#' }
+#' @export
+apply.ddf.choices <- function(df.mod.list, choices) {
+  checkmate::assert_list(df.mod.list, min.len = 1, names = "named")
+  checkmate::assert_data_frame(choices, min.rows = 1)
+  checkmate::assert_names(names(choices),
+                          must.include = c("species", "ddftype", "key",
+                                           "formula", "adj", "notes"))
+  if (!"nadj" %in% names(choices)) choices$nadj <- NA_integer_
+
+  choices <- as.data.frame(choices, stringsAsFactors = FALSE)
+  choices$ddftype <- sub("^ECSAS_", "", choices$ddftype)
+  choices$notes[is.na(choices$notes)] <- ""
+  row.id <- sprintf("%s %s", choices$species, choices$ddftype)
+
+  problems <- character(0)
+  bad <- !grepl("^(Ship|Aerial)_[WF]_D$", choices$ddftype)
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: ddftype must be Ship|Aerial _ W|F _D", row.id[bad]))
+  bad <- !choices$species %in% names(df.mod.list)
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: species is not in spec.grps", row.id[bad]))
+  bad <- !choices$key %in% c("hn", "hr", "unif", "strip")
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: key '%s' is not hn, hr, unif or strip", row.id[bad], choices$key[bad]))
+  bad <- !is.na(choices$adj) & !choices$adj %in% c("cos", "herm", "poly")
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: adj '%s' is not NA, cos, herm or poly", row.id[bad], choices$adj[bad]))
+  form <- lapply(choices$formula, function(f)
+    tryCatch(stats::as.formula(f, env = globalenv()), error = function(e) NULL))
+  bad <- vapply(form, is.null, logical(1))
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: formula '%s' does not parse", row.id[bad], choices$formula[bad]))
+  covar <- !bad & vapply(form, function(f) !is.null(f) && length(all.vars(f)) > 0, logical(1))
+  bad <- covar & !is.na(choices$adj)
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: a model cannot have both covariates and adjustment terms", row.id[bad]))
+  bad <- duplicated(row.id)
+  if (any(bad))
+    problems <- c(problems, sprintf("%s: more than one row", row.id[bad]))
+  if (length(problems))
+    stop("apply.ddf.choices: ", paste(problems, collapse = "\n  "), call. = FALSE)
+
+  # A row for a ddftype this SubProject does not survey (e.g. aerial where
+  # INCLUDE_AERIAL is FALSE) is dropped, as prune.df.mod.list() drops one.
+  have <- mapply(function(sp, dt) paste0("ECSAS_", dt) %in% names(df.mod.list[[sp]]),
+                 choices$species, choices$ddftype)
+  if (any(!have))
+    warning("apply.ddf.choices: no such ddftype in this SubProject, row ignored: ",
+            paste(row.id[!have], collapse = ", "), call. = FALSE)
+
+  # Every surveyed distance ddftype needs a decision.
+  wanted <- unlist(lapply(names(df.mod.list), function(sp)
+    paste(sp, sub("^ECSAS_", "", grep("_D$", names(df.mod.list[[sp]]), value = TRUE)))))
+  missing <- setdiff(wanted, row.id)
+  if (length(missing))
+    stop("apply.ddf.choices: no choice recorded for: ", paste(missing, collapse = ", "),
+         "\n  Add a row (key = \"strip\" for no fitted detection function).", call. = FALSE)
+
+  for (i in which(have)) {
+    sp <- choices$species[i]
+    dt <- paste0("ECSAS_", choices$ddftype[i])
+    spec <- df.mod.list[[sp]][[dt]]
+    if (choices$key[i] == "strip") {
+      spec$strip <- TRUE
+    } else {
+      spec$strip <- FALSE
+      spec$final.key <- choices$key[i]
+      spec$final.formula <- form[[i]]
+      if (!is.na(choices$adj[i])) spec["final.adj"] <- list(choices$adj[i])
+      if (!is.na(choices$nadj[i])) spec["final.nadj"] <- list(as.integer(choices$nadj[i]))
+    }
+    if (nzchar(choices$notes[i])) spec$notes <- choices$notes[i]
+    df.mod.list[[sp]][[dt]] <- spec
+  }
+  df.mod.list
+}
+
+
 #' Drop DDF spec entries that no longer correspond to a live ddftype
 #'
 #' \code{01.02_Create_final_ddf_model_specs.Rmd} records the analyst's final
@@ -6307,6 +6421,9 @@ run.ddf.model <-
   }
 
 
+# Tolerance on the nested-AIC check in fit.adjustment.series(), see its docs.
+AIC_NEST_TOL <- 0.1
+
 #' Fit a key function with 0, 1, 2, ... adjustment terms, each warm-started
 #'
 #' Replaces \code{\link[Distance]{ds}}'s own AIC adjustment-term search, which
@@ -6351,9 +6468,6 @@ run.ddf.model <-
 #' attr(m, "adj.search")
 #' }
 #' @export
-# Tolerance on the nested-AIC check in fit.adjustment.series(), see its docs.
-AIC_NEST_TOL <- 0.1
-
 fit.adjustment.series <- function(data,
                                   key,
                                   adjustment,

@@ -59,7 +59,9 @@ AIC first rises, so one failed fit cannot end the search.
 
 A model with one more adjustment term nests the previous one, so at its
 optimum its AIC can be at most 2 higher. A larger rise means the optimiser
-failed even from the warm start, and is reported in the \code{flag} column.
+failed even from the warm start, and is reported in the �de{flag} column.
+The allowance is 2 + 0.1: a term that adds nothing lands at +2 with optimiser
+noise of a few hundredths (NOFU ship-water hr.hp, +2.03), which is not a failure.
 }
 \examples{
 \dontrun{
