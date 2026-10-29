@@ -102,3 +102,51 @@ test_that("collect.ddf.candidates reads what run.ddf.model saves", {
   expect_match(cands$season_n[cands$model == "hr.size"], "Fall")
   expect_equal(min(cands$delta_aic, na.rm = TRUE), 0)
 })
+
+test_that("size flags come from size.sensitivity's columns", {
+  cands <- tibble::tibble(
+    species = "BLKI", ddftype = "ECSAS_Ship_F_D", model = c("hr.size", "hn.size", "hr.Season.size"),
+    failed = FALSE, AIC = c(100, 101, 102), delta_aic = c(0, 1, 2), p = c(0.40, 0.45, 0.41),
+    size_beta = c(0.02, -0.01, 0.002), size_se = c(0.005, 0.002, 0.004),
+    size_beta_trim = c(0.025, -0.012, -0.001), p_trim = c(0.405, 0.40, 0.41), n = 300)
+  ch <- data.frame(species = "BLKI", ddftype = "ECSAS_Ship_F_D", model = "hr.size", notes = "")
+  f <- setNames(flag.ddf.candidates(cands, ch)$candidates$flags, cands$model)
+  expect_equal(f[["hr.size"]], "")
+  expect_match(f[["hn.size"]], "size-neg")
+  expect_match(f[["hn.size"]], "size-lever")          # p moved 0.05
+  expect_match(f[["hr.Season.size"]], "size-weak")
+  expect_match(f[["hr.Season.size"]], "size-lever")   # sign flipped
+})
+
+test_that("size.sensitivity reports the coefficient, size distribution and trimmed refit", {
+  skip_if_not_installed("Distance")
+  library(Distance)
+  set.seed(115)
+  n <- 600
+  size <- c(sample(1:3, n - 3, TRUE), rep(60, 3))   # 0.5% large: above the 99% cut
+  x <- abs(rnorm(n, sd = 0.06 * exp(0.01 * size)))
+  keep <- x <= 0.3
+  x <- x[keep]; size <- size[keep]
+  cuts <- c(0, 0.05, 0.1, 0.2, 0.3)
+  bin <- cut(x, cuts, include.lowest = TRUE, labels = FALSE)
+  dat <- data.frame(distbegin = cuts[bin], distend = cuts[bin + 1], object = seq_along(x), size = size)
+  res <- withr::local_tempdir()
+  folder <- file.path(res, "BLKI", "DF Summaries_ECSAS_Ship_F_D")
+  dir.create(folder, recursive = TRUE)
+  suppressWarnings(run.ddf.model(data.frame(label = "hn.size", key = "hn", adj = "", form = "~size"),
+                                 data = dat, folder = folder, verbose = FALSE, truncation = 0.3))
+  cands <- collect.ddf.candidates(res, list(BLKI = list(ECSAS_Ship_F_D = list())))
+  cache <- file.path(res, "sz.rds")
+  sz <- size.sensitivity(cands, cache, workers = 1)
+  expect_equal(nrow(sz), 1)
+  expect_equal(sz$size_max, 60)
+  expect_equal(sz$size_q50, stats::quantile(size, 0.5, names = FALSE, type = 1))
+  expect_gt(sz$n_trimmed, 0)
+  expect_false(is.na(sz$size_beta))
+  expect_false(is.na(sz$size_beta_trim))
+  expect_true(file.exists(cache))
+  # a second call is served from the cache
+  t0 <- Sys.time(); sz2 <- size.sensitivity(cands, cache, workers = 1)
+  expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 5)
+  expect_equal(sz2$size_beta_trim, sz$size_beta_trim)
+})

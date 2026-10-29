@@ -12399,6 +12399,13 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' @param max.par Parameter count above which \code{params>3} is raised.
 #' @param min.season.n Season size for \code{sparse-season}.
 #' @param p.spread Relative p spread for \code{p-spread}.
+#' @param size.p.change Change in average p, after dropping the largest flocks
+#'   (\code{\link{size.sensitivity}}), above which \code{size-lever} is
+#'   raised. The size flags need \code{size.sensitivity()}'s columns joined
+#'   onto \code{cands}: \code{size-neg} (negative size coefficient: larger
+#'   flocks detected less far away), \code{size-weak} (coefficient within 2
+#'   SE of 0) and \code{size-lever} (dropping the largest flocks flips the
+#'   coefficient's sign or moves p by more than \code{size.p.change}).
 #' @return A list: \code{candidates} (\code{cands} with \code{flags}) and
 #'   \code{ddftypes} (one row per species and ddftype, with the best model, the
 #'   choice, its delta AIC and p, and \code{choice_flags}).
@@ -12409,7 +12416,7 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' @export
 flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
                                 gof.alpha = 0.05, max.par = 3, min.season.n = 20,
-                                p.spread = 0.05) {
+                                p.spread = 0.05, size.p.change = 0.02) {
   checkmate::assert_data_frame(cands, min.rows = 1)
   checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model",
                                                           "failed", "AIC", "delta_aic", "p"))
@@ -12433,7 +12440,12 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     flag(!get("mono", NA), "not-monotone"),
     flag(get("n_par", NA) > max.par, "params>3"),
     flag(get("n_p_low", NA) > 0, "low-p"),
-    flag(get("min_season_n", NA) < min.season.n, "sparse-season"))
+    flag(get("min_season_n", NA) < min.season.n, "sparse-season"),
+    # size checks: columns from size.sensitivity(), when joined in
+    flag(get("size_beta", NA) < 0, "size-neg"),
+    flag(abs(get("size_beta", NA)) < 2 * get("size_se", NA), "size-weak"),
+    flag(sign(get("size_beta", NA)) != sign(get("size_beta_trim", NA)) |
+           abs(get("p_trim", NA) - cands$p) > size.p.change, "size-lever"))
   cands$flags <- apply(codes, 1, function(r) paste(stats::na.omit(r), collapse = " "))
 
   ch <- as.data.frame(choices, stringsAsFactors = FALSE)[, c("species", "ddftype", "model", "notes")]
@@ -12510,4 +12522,117 @@ ddf.choices.text <- function(choices) {
   c("ddf.choices <- tribble(", line(hdr, TRUE),
     vapply(seq_len(n), function(i) line(vapply(cols, `[`, "", i), i < n), character(1)),
     ")")
+}
+
+
+#' Size-effect checks for candidate detection functions
+#'
+#' For every fitted candidate with a \code{size} covariate, answers the review
+#' checklist's size question: is the coefficient plausible, and do a few
+#' extreme flocks drive it? Reports the size coefficient and its SE (from the
+#' saved fit's Hessian), the flock-size distribution, how much sigma changes
+#' between the median and the 95th-percentile flock, and a refit without the
+#' largest \code{trim} share of flocks.
+#'
+#' The refit is the slow part: about 2.5 min for one hazard-rate
+#' \code{~ Season + size} fit on NL_EXPL_DRL_RA BLKI ship-flying (n = 5,445),
+#' where a warm start saved nothing. So refits run in parallel and are cached in
+#' \code{cache.file}, keyed by each model file's path and modification time, and
+#' only a candidate whose file changed is refitted.
+#'
+#' @param cands Output of \code{\link{collect.ddf.candidates}}.
+#' @param cache.file Path of the cache (an \code{.rds} under \code{RDataDir}).
+#' @param trim Share of the largest flocks dropped in the refit.
+#' @param workers Maximum parallel workers for the refits.
+#' @return A tibble, one row per size candidate: \code{species},
+#'   \code{ddftype}, \code{model}, \code{size_beta}, \code{size_se},
+#'   \code{size_q50}, \code{size_q95}, \code{size_q99}, \code{size_max},
+#'   \code{sigma_ratio} (sigma at the 95th-percentile flock over sigma at the
+#'   median), \code{trim_above}, \code{n_trimmed}, \code{size_beta_trim},
+#'   \code{size_se_trim}, \code{p_trim} (Horvitz-Thompson average p of the
+#'   refit) and \code{trim_note}.
+#' @examples
+#' \dontrun{
+#' sz <- size.sensitivity(cands, file.path(RDataDir, "ddf_review_size_sensitivity.rds"))
+#' }
+#' @export
+size.sensitivity <- function(cands, cache.file, trim = 0.01,
+                             workers = max(1, parallel::detectCores() - 4)) {
+  checkmate::assert_data_frame(cands)
+  checkmate::assert_string(cache.file)
+  checkmate::assert_number(trim, lower = 0, upper = 0.5)
+  checkmate::assert_count(workers, positive = TRUE)
+
+  todo <- cands[!cands$failed & grepl("size", cands$formula) & file.exists(cands$rdata), ]
+  if (!nrow(todo)) return(tibble::tibble())
+  todo$mtime <- as.numeric(file.mtime(todo$rdata))
+  todo$cache_key <- paste(todo$rdata, todo$mtime, trim, sep = "|")
+
+  cache <- if (file.exists(cache.file)) readRDS(cache.file) else list()
+  need <- todo$cache_key[!todo$cache_key %in% names(cache)]
+  if (length(need)) {
+    jobs <- todo[match(need, todo$cache_key), c("rdata", "key", "formula", "cache_key")]
+    message(sprintf("size.sensitivity: refitting %d size model(s) without the largest %g%% of flocks on %d worker(s)",
+                    nrow(jobs), 100 * trim, min(workers, nrow(jobs))))
+    cl <- parallel::makeCluster(min(workers, nrow(jobs)))
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    # workers need this session's library paths (renv), or Distance is missing
+    parallel::clusterCall(cl, function(p) invisible(.libPaths(p)), .libPaths())
+    res <- parallel::parLapplyLB(cl, split(jobs, seq_len(nrow(jobs))), .size.refit.one, trim = trim)
+    names(res) <- jobs$cache_key
+    cache <- c(cache[names(cache) %in% todo$cache_key], res)
+    saveRDS(cache, cache.file)
+  }
+  out <- lapply(seq_len(nrow(todo)), function(i) {
+    r <- cache[[todo$cache_key[i]]]
+    tibble::as_tibble(c(list(species = todo$species[i], ddftype = todo$ddftype[i], model = todo$model[i]), r))
+  })
+  dplyr::bind_rows(out)
+}
+
+# One size candidate: coefficient, size distribution and the trimmed refit.
+# Runs on a cluster worker, so it loads what it needs itself.
+.size.refit.one <- function(job, trim) {
+  na <- list(size_beta = NA_real_, size_se = NA_real_, size_q50 = NA_real_,
+             size_q95 = NA_real_, size_q99 = NA_real_, size_max = NA_real_,
+             sigma_ratio = NA_real_, trim_above = NA_real_, n_trimmed = NA_integer_,
+             size_beta_trim = NA_real_, size_se_trim = NA_real_, p_trim = NA_real_,
+             trim_note = "")
+  coef.se <- function(d) {
+    i <- which(names(d$par) == "size")
+    if (!length(i)) return(c(NA, NA))
+    vc <- tryCatch(solve(d$hessian), error = function(e) NULL)
+    c(d$par[i], if (is.null(vc)) NA else sqrt(diag(vc))[i])
+  }
+  e <- new.env()
+  ok <- tryCatch({ load(job$rdata, envir = e); TRUE }, error = function(err) FALSE)
+  if (!ok || is.null(e$model$ddf)) { na$trim_note <- "could not load model"; return(na) }
+  d <- e$model$ddf
+  sz <- d$data$size
+  q <- stats::quantile(sz, c(0.5, 0.95, 0.99), names = FALSE, type = 1)
+  cs <- coef.se(d)
+  out <- na
+  out$size_beta <- cs[1]; out$size_se <- cs[2]
+  out$size_q50 <- q[1]; out$size_q95 <- q[2]; out$size_q99 <- q[3]; out$size_max <- max(sz)
+  out$sigma_ratio <- exp(cs[1] * (q[2] - q[1]))
+  cut <- stats::quantile(sz, 1 - trim, names = FALSE, type = 1)
+  keep <- sz <= cut
+  out$trim_above <- cut
+  out$n_trimmed <- sum(!keep)
+  if (!any(!keep)) { out$trim_note <- "no flock above the cut"; return(out) }
+  dd <- d$data[keep, ]
+  dd$distance <- NULL
+  m <- tryCatch(suppressWarnings(suppressMessages(
+         Distance::ds(dd, key = job$key, formula = stats::as.formula(job$formula),
+                      truncation = d$meta.data$width, quiet = TRUE))),
+       error = function(err) err)
+  if (inherits(m, "error") || is.null(m$ddf) || m$ddf$ds$converge != 0) {
+    out$trim_note <- paste("trimmed refit failed:", if (inherits(m, "error")) conditionMessage(m) else "no convergence")
+    return(out)
+  }
+  cs2 <- coef.se(m$ddf)
+  fp <- stats::fitted(m$ddf)
+  out$size_beta_trim <- cs2[1]; out$size_se_trim <- cs2[2]
+  out$p_trim <- length(fp) / sum(1 / fp)
+  out
 }

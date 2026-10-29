@@ -12,7 +12,8 @@ flag.ddf.candidates(
   gof.alpha = 0.05,
   max.par = 3,
   min.season.n = 20,
-  p.spread = 0.05
+  p.spread = 0.05,
+  size.p.change = 0.02
 )
 }
 \arguments{
@@ -34,6 +35,14 @@ label, \code{"strip"} or \code{NA}) and \code{notes}.}
 \item{min.season.n}{Season size for \code{sparse-season}.}
 
 \item{p.spread}{Relative p spread for \code{p-spread}.}
+
+\item{size.p.change}{Change in average p, after dropping the largest flocks
+(\code{\link{size.sensitivity}}), above which \code{size-lever} is
+raised. The size flags need \code{size.sensitivity()}'s columns joined
+onto \code{cands}: \code{size-neg} (negative size coefficient: larger
+flocks detected less far away), \code{size-weak} (coefficient within 2
+SE of 0) and \code{size-lever} (dropping the largest flocks flips the
+coefficient's sign or moves p by more than \code{size.p.change}).}
 }
 \value{
 A list: \code{candidates} (\code{cands} with \code{flags}) and
