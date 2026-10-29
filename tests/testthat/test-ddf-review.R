@@ -150,3 +150,21 @@ test_that("size.sensitivity reports the coefficient, size distribution and trimm
   expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 5)
   expect_equal(sz2$size_beta_trim, sz$size_beta_trim)
 })
+
+test_that("bin1, season-p, sparse-ddftype and fishing-excl flags", {
+  cands <- tibble::tibble(
+    species = "NOFU", ddftype = "ECSAS_Ship_F_D", model = c("hr", "hn", "hr.Season"),
+    failed = FALSE, AIC = c(100, 101, 102), delta_aic = c(0, 1, 2), p = 0.4, n = 200,
+    obs = list(c(130, 50, 20), c(100, 60, 40), c(80, 70, 50)),
+    expected = list(c(100, 60, 40), c(100, 60, 40), c(100, 60, 40)),
+    season_p = c("", "", "Fall 0.30; Spring 0.45; Summer 0.40"))
+  ch <- data.frame(species = "NOFU", ddftype = "ECSAS_Ship_F_D", model = "hr", notes = "")
+  fl <- flag.ddf.candidates(cands, ch, fishing.species = c("NOFU", "BLKI"))
+  f <- setNames(fl$candidates$flags, cands$model)
+  expect_match(f[["hr"]], "bin1-over")         # 130 / 100
+  expect_equal(f[["hn"]], "")
+  expect_match(f[["hr.Season"]], "bin1-under")  # 80 / 100
+  expect_match(f[["hr.Season"]], "season-p")    # (0.45 - 0.30) / 0.40 = 0.375
+  expect_match(fl$ddftypes$choice_flags, "sparse-ddftype")
+  expect_match(fl$ddftypes$choice_flags, "fishing-excl")
+})

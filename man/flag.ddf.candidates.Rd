@@ -13,7 +13,11 @@ flag.ddf.candidates(
   max.par = 3,
   min.season.n = 20,
   p.spread = 0.05,
-  size.p.change = 0.02
+  size.p.change = 0.02,
+  bin1.tol = 0.15,
+  season.p.spread = 0.3,
+  min.n = 250,
+  fishing.species = character(0)
 )
 }
 \arguments{
@@ -43,6 +47,20 @@ onto \code{cands}: \code{size-neg} (negative size coefficient: larger
 flocks detected less far away), \code{size-weak} (coefficient within 2
 SE of 0) and \code{size-lever} (dropping the largest flocks flips the
 coefficient's sign or moves p by more than \code{size.p.change}).}
+
+\item{bin1.tol}{Relative misfit in the first distance bin for
+\code{bin1-over} (more birds observed there than the model expects: a
+spike near the ship, or attraction) and \code{bin1-under} (fewer: the
+fitted curve overshoots the data at the ship).}
+
+\item{season.p.spread}{Relative spread of per-season p (max - min over the
+median) above which \code{season-p} is raised.}
+
+\item{min.n}{Observations below which the ddftype is \code{sparse-ddftype}.}
+
+\item{fishing.species}{Species whose fishing-affected observations were
+left out of the fit (\code{fishingAffectedSpecies}); their ddftypes get
+\code{fishing-excl}, a reminder rather than a problem.}
 }
 \value{
 A list: \code{candidates} (\code{cands} with \code{flags}) and

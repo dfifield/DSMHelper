@@ -12406,6 +12406,16 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #'   flocks detected less far away), \code{size-weak} (coefficient within 2
 #'   SE of 0) and \code{size-lever} (dropping the largest flocks flips the
 #'   coefficient's sign or moves p by more than \code{size.p.change}).
+#' @param bin1.tol Relative misfit in the first distance bin for
+#'   \code{bin1-over} (more birds observed there than the model expects: a
+#'   spike near the ship, or attraction) and \code{bin1-under} (fewer: the
+#'   fitted curve overshoots the data at the ship).
+#' @param season.p.spread Relative spread of per-season p (max - min over the
+#'   median) above which \code{season-p} is raised.
+#' @param min.n Observations below which the ddftype is \code{sparse-ddftype}.
+#' @param fishing.species Species whose fishing-affected observations were
+#'   left out of the fit (\code{fishingAffectedSpecies}); their ddftypes get
+#'   \code{fishing-excl}, a reminder rather than a problem.
 #' @return A list: \code{candidates} (\code{cands} with \code{flags}) and
 #'   \code{ddftypes} (one row per species and ddftype, with the best model, the
 #'   choice, its delta AIC and p, and \code{choice_flags}).
@@ -12416,7 +12426,9 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' @export
 flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
                                 gof.alpha = 0.05, max.par = 3, min.season.n = 20,
-                                p.spread = 0.05, size.p.change = 0.02) {
+                                p.spread = 0.05, size.p.change = 0.02, bin1.tol = 0.15,
+                                season.p.spread = 0.3, min.n = 250,
+                                fishing.species = character(0)) {
   checkmate::assert_data_frame(cands, min.rows = 1)
   checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model",
                                                           "failed", "AIC", "delta_aic", "p"))
@@ -12429,6 +12441,16 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     dplyr::group_by(species, ddftype) %>%
     dplyr::mutate(.m = stats::median(p[!failed & delta_aic <= close.aic], na.rm = TRUE)) %>%
     dplyr::pull(.m)
+  # observed / expected count in the first distance bin
+  first <- function(x) if (length(x)) x[1] else NA_real_
+  bin1.ratio <- if (all(c("obs", "expected") %in% names(cands)))
+    vapply(cands$obs, first, 0) / vapply(cands$expected, first, 0) else rep(NA_real_, nrow(cands))
+  # spread of per-season p, from collect.ddf.candidates()' "Fall 0.42; Spring 0.33" text
+  season.spread <- vapply(get("season_p", ""), function(s) {
+    v <- suppressWarnings(as.numeric(sub("^.* ", "", strsplit(s, "; ", fixed = TRUE)[[1]])))
+    v <- v[!is.na(v)]
+    if (length(v) > 1) (max(v) - min(v)) / stats::median(v) else NA_real_
+  }, 0, USE.NAMES = FALSE)
   codes <- cbind(
     flag(cands$failed, "failed"),
     flag(!is.na(get("adj", NA)) & get("nadj", NA) == 0, "nadj0"),
@@ -12445,7 +12467,10 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     flag(get("size_beta", NA) < 0, "size-neg"),
     flag(abs(get("size_beta", NA)) < 2 * get("size_se", NA), "size-weak"),
     flag(sign(get("size_beta", NA)) != sign(get("size_beta_trim", NA)) |
-           abs(get("p_trim", NA) - cands$p) > size.p.change, "size-lever"))
+           abs(get("p_trim", NA) - cands$p) > size.p.change, "size-lever"),
+    flag(bin1.ratio > 1 + bin1.tol, "bin1-over"),
+    flag(bin1.ratio < 1 - bin1.tol, "bin1-under"),
+    flag(season.spread > season.p.spread, "season-p"))
   cands$flags <- apply(codes, 1, function(r) paste(stats::na.omit(r), collapse = " "))
 
   ch <- as.data.frame(choices, stringsAsFactors = FALSE)[, c("species", "ddftype", "model", "notes")]
@@ -12468,14 +12493,17 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
                      "choice_model_flags")
   types <- dplyr::left_join(types, chosen, by = c("species", "ddftype", "choice"))
   types$notes[is.na(types$notes)] <- ""
-  types$choice_flags <- mapply(function(choice, d, notes, spread) {
+  types$choice_flags <- mapply(function(choice, d, notes, spread, n, species) {
     f <- character(0)
     if (is.na(choice)) f <- c(f, "no-choice")
     else if (choice != "strip" && is.na(d)) f <- c(f, "not-a-candidate")
     if (!is.na(d) && d > 2 && !nzchar(notes)) f <- c(f, "no-note")
     if (spread > p.spread) f <- c(f, "p-spread")
+    if (!is.na(n) && n < min.n) f <- c(f, "sparse-ddftype")
+    if (species %in% fishing.species) f <- c(f, "fishing-excl")
     paste(f, collapse = " ")
-  }, types$choice, types$choice_delta_aic, types$notes, types$p_spread, USE.NAMES = FALSE)
+  }, types$choice, types$choice_delta_aic, types$notes, types$p_spread, types$n, types$species,
+  USE.NAMES = FALSE)
   list(candidates = cands, ddftypes = types)
 }
 
