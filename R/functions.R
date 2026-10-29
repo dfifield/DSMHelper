@@ -12216,3 +12216,298 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
   writeLines(c(.finalist.page.head(), body, "</body>", "</html>"), path)
   invisible(path)
 }
+
+
+#' Gather every candidate detection function for review
+#'
+#' One row per candidate model in each species' \code{DF Summaries_<ddftype>}
+#' folder, for every distance (\code{_D}) ddftype in \code{df.mod.list}. Built
+#' from the files 01.01 saves, so nothing is refitted. It feeds the one-page
+#' review in \code{01.01.5_Review_ddf_candidates.Rmd}, which replaces searching
+#' each species' candidate page by AIC.
+#'
+#' Besides the summary-file statistics (\code{\link{get.stats.file}}) each saved
+#' model is loaded once to get what \code{docs/ddf_candidate_review_checklist.md}
+#' asks for: the adjustment-search result (\code{\link{fit.adjustment.series}}),
+#' monotonicity, a hazard-rate spike, the per-observation p (as
+#' \code{\link{check.det.fcn}} reports it), p and n per Season, and observed
+#' against expected counts per distance bin from \code{mrds::ddf.gof()}.
+#' A \code{failed_model_<label>.txt} file gives a row with \code{failed = TRUE}.
+#'
+#' @param results.dir The SubProject's \code{ResultsDir}.
+#' @param df.mod.list Named list (by species) of DDF specs; only the names of
+#'   its distance ddftypes are used.
+#' @param p.low Per-observation p below which an observation counts as low.
+#' @return A tibble, one row per candidate, sorted by species, ddftype and AIC.
+#'   \code{key}, \code{formula} and \code{adj} are in the form
+#'   \code{\link{apply.ddf.choices}} takes. \code{obs}, \code{expected} and
+#'   \code{bins} are list columns of counts and labels per distance bin;
+#'   \code{summary.text} is the candidate's \code{.txt} summary.
+#' @examples
+#' \dontrun{
+#' cands <- collect.ddf.candidates(ResultsDir, init.df.mod.list())
+#' }
+#' @export
+collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
+  checkmate::assert_directory_exists(results.dir)
+  checkmate::assert_list(df.mod.list, names = "named")
+  checkmate::assert_number(p.low, lower = 0, upper = 1)
+
+  rows <- list()
+  for (species in names(df.mod.list)) {
+    for (ddftype in grep("_D$", names(df.mod.list[[species]]), value = TRUE)) {
+      folder <- file.path(results.dir, species, paste("DF Summaries", ddftype, sep = "_"))
+      if (!dir.exists(folder)) next
+      txts <- list.files(folder, pattern = "^AIC_.*[.]txt$", full.names = TRUE)
+      for (txt in txts)
+        rows[[length(rows) + 1]] <- .review.one.candidate(txt, species, ddftype, p.low)
+      for (f in list.files(folder, pattern = "^failed_model_.*[.]txt$")) {
+        label <- sub("^failed_model_(.*)[.]txt$", "\\1", f)
+        parts <- .review.label.parts(label)
+        rows[[length(rows) + 1]] <- tibble::tibble(
+          species = species, ddftype = ddftype, model = label, key = parts$key,
+          formula = parts$formula, adj = parts$adj, failed = TRUE)
+      }
+    }
+  }
+  if (!length(rows))
+    stop("collect.ddf.candidates: no candidate files under ", results.dir)
+  dplyr::bind_rows(rows) %>%
+    dplyr::group_by(species, ddftype) %>%
+    dplyr::mutate(delta_aic = AIC - min(AIC, na.rm = TRUE),
+                  rank = rank(AIC, na.last = "keep", ties.method = "min")) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(species, ddftype, failed, AIC)
+}
+
+# ddf.choices form (key, formula, adj) of a candidate label: the inverse of
+# create.model.name().
+.review.label.parts <- function(label) {
+  p <- strsplit(label, ".", fixed = TRUE)[[1]]
+  adj.map <- c(cos = "cos", hp = "herm", sp = "poly")
+  rest <- p[-1]
+  if (length(rest) == 1 && rest %in% names(adj.map))
+    return(list(key = p[1], formula = "~1", adj = unname(adj.map[rest])))
+  list(key = p[1],
+       formula = if (length(rest)) paste("~", paste(rest, collapse = " + ")) else "~1",
+       adj = NA_character_)
+}
+
+.review.one.candidate <- function(txt, species, ddftype, p.low) {
+  stats <- suppressWarnings(suppressMessages(get.stats.file(txt)))
+  label <- sub("^AIC_[^_]*_(.*)[.]txt$", "\\1", basename(txt))
+  parts <- .review.label.parts(label)
+  row <- tibble::tibble(
+    species = species, ddftype = ddftype, model = label,
+    key = parts$key, formula = parts$formula, adj = parts$adj,
+    failed = FALSE, AIC = stats$AIC, n = stats$NObs, p = stats$DetProb,
+    p_se = stats$DetSE, p_cv = stats$DetCV, gof_p = stats$ChisquareP,
+    chi = stats$ChiScores, chi_first_max = NA, nadj = NA_integer_,
+    opt_flag = "", n_par = NA_integer_, mono = NA, hr_spike = NA,
+    n_p_low = NA_integer_, min_p = NA_real_, max_adj_size = NA_real_,
+    season_n = "", season_p = "", min_season_n = NA_integer_,
+    obs = list(NULL), expected = list(NULL), bins = list(NULL),
+    summary.text = paste(readLines(txt), collapse = "\n"),
+    rdata = sub("[.]txt$", ".RData", txt))
+  chi <- suppressWarnings(as.numeric(strsplit(row$chi, ",")[[1]]))
+  if (length(chi) && all(!is.na(chi)))
+    row$chi_first_max <- which.max(chi) == 1 && max(chi) > 0
+
+  if (!file.exists(row$rdata)) return(row)
+  env <- new.env()
+  ok <- tryCatch({ load(row$rdata, envir = env); TRUE }, error = function(e) FALSE)
+  if (!ok || is.null(env$model$ddf)) return(row)
+  m <- env$model
+  d <- m$ddf
+  row$n_par <- length(d$par)
+  row$hr_spike <- parts$key == "hr" && d$par[1] < sqrt(.Machine$double.eps)
+
+  srch <- attr(m, "adj.search")
+  if (!is.null(srch)) {
+    row$nadj <- as.integer(srch$nadj[which.min(srch$AIC)])
+    rise <- diff(srch$AIC)
+    bad <- which(rise > 2 + AIC_NEST_TOL)
+    if (length(bad))
+      row$opt_flag <- sprintf("AIC %+.1f at nadj %d", rise[bad[1]], srch$nadj[bad[1] + 1])
+  } else if (!is.na(parts$adj)) {
+    row$nadj <- length(d$ds$aux$ddfobj$adjustment$order)
+  }
+  if (!is.na(parts$adj) && isTRUE(row$nadj > 0))
+    row$mono <- tryCatch(isTRUE(suppressMessages(mrds::check.mono(d, strict = FALSE, n.pts = 20))),
+                         error = function(e) NA)
+
+  fp <- tryCatch(stats::fitted(d), error = function(e) NULL)
+  if (!is.null(fp)) {
+    dat <- d$data[match(names(fp), as.character(d$data$object)), ]
+    row$n_p_low <- sum(fp < p.low)
+    row$min_p <- min(fp)
+    if ("size" %in% names(dat)) row$max_adj_size <- max(dat$size / fp)
+    if ("Season" %in% names(dat)) {
+      s <- split(fp, as.character(dat$Season))
+      row$season_n <- paste(sprintf("%s %d", names(s), lengths(s)), collapse = "; ")
+      row$min_season_n <- min(lengths(s))
+      if (grepl("Season", parts$formula))
+        row$season_p <- paste(sprintf("%s %.3f", names(s),
+                                      vapply(s, function(x) length(x) / sum(1 / x), 0)),
+                              collapse = "; ")
+    }
+  }
+  g <- tryCatch(suppressWarnings(suppressMessages(mrds::ddf.gof(d, qq = FALSE)))$chisquare$chi1,
+                error = function(e) NULL)
+  if (!is.null(g)) {
+    row$obs <- list(as.numeric(g$observed))
+    row$expected <- list(as.numeric(g$expected))
+    br <- d$meta.data$breaks
+    if (!is.null(br) && length(br) == length(g$observed) + 1)
+      row$bins <- list(sprintf("%g-%g", br[-length(br)], br[-1]))
+  }
+  row
+}
+
+
+#' Flag candidate detection functions against the review checklist
+#'
+#' Adds a \code{flags} column to \code{\link{collect.ddf.candidates}}' output:
+#' short codes for the items in \code{docs/ddf_candidate_review_checklist.md}
+#' that can be checked mechanically. It also returns one row per species and
+#' ddftype with the flags that concern the choice rather than a candidate.
+#'
+#' Candidate flags: \code{failed}; \code{nadj0} (an adjustment candidate whose
+#' search kept no terms, so it is the plain key function); \code{optimiser}
+#' (an adjustment order whose AIC rose more than \code{2 + AIC_NEST_TOL});
+#' \code{p-outlier} (p more than \code{p.outlier} from the median p of the
+#' candidates within \code{close.aic}); \code{hr-spike}; \code{gof}
+#' (\code{gof_p < gof.alpha}); \code{bin1} (the first bin has the largest
+#' chi-square contribution); \code{not-monotone}; \code{params>3}; \code{low-p}
+#' (any per-observation p below the threshold used in
+#' \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
+#' than \code{min.season.n} observations).
+#'
+#' Choice flags: \code{no-choice}; \code{not-a-candidate}; \code{no-note}
+#' (more than 2 AIC behind the best with an empty note); \code{p-spread} (the
+#' candidates within 2 AIC differ in p by more than \code{p.spread}, relative to
+#' their median).
+#'
+#' @param cands Output of \code{\link{collect.ddf.candidates}}.
+#' @param choices Data frame of current choices: \code{species},
+#'   \code{ddftype} (with the \code{ECSAS_} prefix), \code{model} (a candidate
+#'   label, \code{"strip"} or \code{NA}) and \code{notes}.
+#' @param close.aic Delta AIC within which candidates are compared for
+#'   \code{p-outlier}.
+#' @param p.outlier Absolute p difference for \code{p-outlier}.
+#' @param gof.alpha Threshold for \code{gof}.
+#' @param max.par Parameter count above which \code{params>3} is raised.
+#' @param min.season.n Season size for \code{sparse-season}.
+#' @param p.spread Relative p spread for \code{p-spread}.
+#' @return A list: \code{candidates} (\code{cands} with \code{flags}) and
+#'   \code{ddftypes} (one row per species and ddftype, with the best model, the
+#'   choice, its delta AIC and p, and \code{choice_flags}).
+#' @examples
+#' \dontrun{
+#' fl <- flag.ddf.candidates(cands, choices)
+#' }
+#' @export
+flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
+                                gof.alpha = 0.05, max.par = 3, min.season.n = 20,
+                                p.spread = 0.05) {
+  checkmate::assert_data_frame(cands, min.rows = 1)
+  checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model",
+                                                          "failed", "AIC", "delta_aic", "p"))
+  checkmate::assert_data_frame(choices)
+  checkmate::assert_names(names(choices), must.include = c("species", "ddftype", "model", "notes"))
+
+  flag <- function(cond, code) ifelse(!is.na(cond) & cond, code, NA_character_)
+  get <- function(nm, default) if (nm %in% names(cands)) cands[[nm]] else rep(default, nrow(cands))
+  med.p <- cands %>%
+    dplyr::group_by(species, ddftype) %>%
+    dplyr::mutate(.m = stats::median(p[!failed & delta_aic <= close.aic], na.rm = TRUE)) %>%
+    dplyr::pull(.m)
+  codes <- cbind(
+    flag(cands$failed, "failed"),
+    flag(!is.na(get("adj", NA)) & get("nadj", NA) == 0, "nadj0"),
+    flag(nzchar(get("opt_flag", "")), "optimiser"),
+    flag(abs(cands$p - med.p) > p.outlier, "p-outlier"),
+    flag(get("hr_spike", NA), "hr-spike"),
+    flag(get("gof_p", NA) < gof.alpha, "gof"),
+    flag(get("chi_first_max", NA), "bin1"),
+    flag(!get("mono", NA), "not-monotone"),
+    flag(get("n_par", NA) > max.par, "params>3"),
+    flag(get("n_p_low", NA) > 0, "low-p"),
+    flag(get("min_season_n", NA) < min.season.n, "sparse-season"))
+  cands$flags <- apply(codes, 1, function(r) paste(stats::na.omit(r), collapse = " "))
+
+  ch <- as.data.frame(choices, stringsAsFactors = FALSE)[, c("species", "ddftype", "model", "notes")]
+  names(ch)[3] <- "choice"
+  types <- cands %>%
+    dplyr::filter(!failed) %>%
+    dplyr::group_by(species, ddftype) %>%
+    dplyr::summarise(
+      n = dplyr::first(n),
+      best_model = model[which.min(AIC)],
+      best_p = p[which.min(AIC)],
+      p_spread = {
+        close <- p[delta_aic <= 2]
+        if (length(close) > 1) (max(close) - min(close)) / stats::median(close) else 0
+      },
+      .groups = "drop") %>%
+    dplyr::left_join(ch, by = c("species", "ddftype"))
+  chosen <- cands[!cands$failed, c("species", "ddftype", "model", "delta_aic", "p", "flags")]
+  names(chosen) <- c("species", "ddftype", "choice", "choice_delta_aic", "choice_p",
+                     "choice_model_flags")
+  types <- dplyr::left_join(types, chosen, by = c("species", "ddftype", "choice"))
+  types$notes[is.na(types$notes)] <- ""
+  types$choice_flags <- mapply(function(choice, d, notes, spread) {
+    f <- character(0)
+    if (is.na(choice)) f <- c(f, "no-choice")
+    else if (choice != "strip" && is.na(d)) f <- c(f, "not-a-candidate")
+    if (!is.na(d) && d > 2 && !nzchar(notes)) f <- c(f, "no-note")
+    if (spread > p.spread) f <- c(f, "p-spread")
+    paste(f, collapse = " ")
+  }, types$choice, types$choice_delta_aic, types$notes, types$p_spread, USE.NAMES = FALSE)
+  list(candidates = cands, ddftypes = types)
+}
+
+
+#' Format ddf choices as the ddf.choices tribble used in 01.02
+#'
+#' Writes the column-aligned \code{tribble()} text that
+#' \code{01.02_Create_final_ddf_model_specs.Rmd} holds for each SubProject, so
+#' the review page's generated table can be pasted over it unchanged. The
+#' review page's JavaScript builds the same text in the browser; this is the R
+#' version, used for the page's default and for testing that the two agree.
+#'
+#' @param choices Data frame with \code{species}, \code{ddftype} (without the
+#'   \code{ECSAS_} prefix), \code{key}, \code{formula}, \code{adj} and
+#'   \code{notes}.
+#' @return Character vector of lines, from \code{ddf.choices <- tribble(} to
+#'   \code{)}.
+#' @examples
+#' ddf.choices.text(data.frame(species = "BLKI", ddftype = "Ship_W_D",
+#'   key = "hn", formula = "~1", adj = "cos", notes = ""))
+#' @export
+ddf.choices.text <- function(choices) {
+  checkmate::assert_data_frame(choices, min.rows = 1)
+  checkmate::assert_names(names(choices), must.include = c("species", "ddftype", "key",
+                                                            "formula", "adj", "notes"))
+  q <- function(x) ifelse(is.na(x), "NA", vapply(as.character(x), deparse, character(1)))
+  strip <- choices$key == "strip"
+  cols <- list(
+    species = q(choices$species),
+    ddftype = q(choices$ddftype),
+    key     = q(choices$key),
+    formula = q(ifelse(strip, "~1", choices$formula)),
+    adj     = q(ifelse(strip, NA, choices$adj)),
+    notes   = q(ifelse(is.na(choices$notes), "", choices$notes)))
+  hdr <- paste0("~", names(cols))
+  w <- mapply(function(h, v) max(nchar(c(h, v))) + 1, hdr, cols)
+  line <- function(v, comma) {
+    parts <- vapply(seq_along(v), function(i)
+      if (i < length(v)) formatC(paste0(v[i], ","), width = -(w[i] + 1)) else v[i],
+      character(1))
+    paste0("  ", paste(parts, collapse = " "), if (comma) "," else "")
+  }
+  n <- nrow(choices)
+  c("ddf.choices <- tribble(", line(hdr, TRUE),
+    vapply(seq_len(n), function(i) line(vapply(cols, `[`, "", i), i < n), character(1)),
+    ")")
+}
