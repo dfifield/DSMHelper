@@ -7855,23 +7855,29 @@ run.family.cv <- function(species, segdata, finalists,
 #'
 #' @param obs,pred Observed and predicted values for the same rows.
 #' @param n.bins Number of equal-predicted-mass bins.
-#' @param pad Added to each bin's observed and expected totals before the log
-#'   ratio, so an empty bin scores large rather than infinite. In response units
-#'   (birds); small against a bin's total on any realistic data.
-#' @return List: \code{score} (mean over bins of |log O/E|; 0 is perfect),
-#'   \code{total_OE} (sum(obs) / sum(pred) before rescaling) and \code{bins}
-#'   (bin 1 = highest predicted: rows, share of rows, O, E, O/E).
+#' @param max.ratio The most any one bin can count for: a bin whose prediction
+#'   is more than \code{max.ratio} times too high or too low counts as exactly
+#'   \code{max.ratio}. Without it, one bin with no held-out birds at all is
+#'   infinitely wrong and decides the average by itself, however good the other
+#'   bins are (Shearwaters nb on NL_EXPL_DRL_RA, 2026-10-31). It replaces an
+#'   earlier 0.5-bird pad, which made an empty bin's score depend on how many
+#'   birds it predicted.
+#' @return List: \code{score} (mean over bins of |log O/E|, each capped at
+#'   \code{log(max.ratio)}; 0 is perfect, and \code{exp(score)} is the typical
+#'   factor by which a bin is wrong), \code{total_OE} (sum(obs) / sum(pred)
+#'   before rescaling) and \code{bins} (bin 1 = highest predicted: rows, share
+#'   of rows, O, E, O/E).
 #' @examples
 #' set.seed(1)
 #' mu <- rexp(1000)
 #' score.pattern.calibration(rpois(1000, mu), mu)$score       # near 0
 #' score.pattern.calibration(rpois(1000, mu), mu^2)$bins      # contrast too strong
 #' @export
-score.pattern.calibration <- function(obs, pred, n.bins = 5, pad = 0.5) {
+score.pattern.calibration <- function(obs, pred, n.bins = 5, max.ratio = 10) {
   checkmate::expect_numeric(obs)
   checkmate::expect_numeric(pred, len = length(obs))
   checkmate::expect_count(n.bins, positive = TRUE)
-  checkmate::expect_number(pad, lower = 0)
+  checkmate::expect_number(max.ratio, lower = 1, finite = TRUE)
 
   ok <- is.finite(obs) & is.finite(pred)
   obs <- obs[ok]
@@ -7901,7 +7907,8 @@ score.pattern.calibration <- function(obs, pred, n.bins = 5, pad = 0.5) {
     dplyr::mutate(share_rows = rows / sum(rows), OE = O / E) %>%
     dplyr::select(bin, rows, share_rows, O, E, OE)
 
-  list(score = mean(abs(log((bins$O + pad) / (bins$E + pad)))),
+  # An empty bin gives log(0) = -Inf, which pmin() caps like any other.
+  list(score = mean(pmin(abs(log(bins$O / bins$E)), log(max.ratio))),
        total_OE = total_OE, bins = bins)
 }
 

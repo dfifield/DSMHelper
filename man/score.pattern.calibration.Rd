@@ -4,21 +4,27 @@
 \alias{score.pattern.calibration}
 \title{How well a predicted surface reproduces the contrast between high and low}
 \usage{
-score.pattern.calibration(obs, pred, n.bins = 5, pad = 0.5)
+score.pattern.calibration(obs, pred, n.bins = 5, max.ratio = 10)
 }
 \arguments{
 \item{obs, pred}{Observed and predicted values for the same rows.}
 
 \item{n.bins}{Number of equal-predicted-mass bins.}
 
-\item{pad}{Added to each bin's observed and expected totals before the log
-ratio, so an empty bin scores large rather than infinite. In response units
-(birds); small against a bin's total on any realistic data.}
+\item{max.ratio}{The most any one bin can count for: a bin whose prediction
+is more than \code{max.ratio} times too high or too low counts as exactly
+\code{max.ratio}. Without it, one bin with no held-out birds at all is
+infinitely wrong and decides the average by itself, however good the other
+bins are (Shearwaters nb on NL_EXPL_DRL_RA, 2026-10-31). It replaces an
+earlier 0.5-bird pad, which made an empty bin's score depend on how many
+birds it predicted.}
 }
 \value{
-List: \code{score} (mean over bins of |log O/E|; 0 is perfect),
-\code{total_OE} (sum(obs) / sum(pred) before rescaling) and \code{bins}
-(bin 1 = highest predicted: rows, share of rows, O, E, O/E).
+List: \code{score} (mean over bins of |log O/E|, each capped at
+\code{log(max.ratio)}; 0 is perfect, and \code{exp(score)} is the typical
+factor by which a bin is wrong), \code{total_OE} (sum(obs) / sum(pred)
+before rescaling) and \code{bins} (bin 1 = highest predicted: rows, share
+of rows, O, E, O/E).
 }
 \description{
 The question a density map has to answer is where birds are many and where

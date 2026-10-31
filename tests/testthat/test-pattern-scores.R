@@ -34,6 +34,18 @@ test_that("bins carry equal predicted mass and number from the top", {
   expect_equal(sum(b$rows), 91L)
 })
 
+test_that("an empty bin counts as max.ratio, not infinity", {
+  # 10 rows predicted high with no birds, 90 low rows carrying all of them.
+  pred <- c(rep(9, 10), rep(1, 90))
+  obs  <- c(rep(0, 10), rep(2, 90))
+  r <- score.pattern.calibration(obs, pred, n.bins = 2, max.ratio = 10)
+  expect_equal(r$bins$O[1], 0)
+  expect_true(is.finite(r$score))
+  # Bin 1 is capped at log(10); bin 2 is off by 2x after rescaling.
+  expect_equal(r$score, mean(c(log(10), abs(log(r$bins$OE[2])))))
+  expect_lte(r$score, log(10))
+})
+
 test_that("degenerate input returns NA rather than failing", {
   expect_true(is.na(score.pattern.calibration(c(0, 0), c(1, 2))$score))
   expect_true(is.na(score.pattern.calibration(numeric(), numeric())$score))
