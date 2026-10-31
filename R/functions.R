@@ -7561,13 +7561,26 @@ fresh.family <- function(fam) {
 #'   Defaults to \code{"platform"}, which is present in the segment data whether
 #'   or not the formula uses it -- factor-smooth and no-factor formulations still
 #'   get a calibration score.
+#' @param pattern.bins,pattern.cell.m,pattern.min.segments Passed to
+#'   \code{\link{score.pattern.calibration}} (number of predicted-mass bins) and
+#'   \code{\link{score.cell.rank}} (cell edge in projection units, minimum
+#'   distinct segments per cell x season) for the per-fold \code{pattern} and
+#'   \code{cell_rho} scores.
 #' @param progress If \code{TRUE}, report each fold as it completes.
 #' @return A tibble, one row per finalist per fold: \code{species},
 #'   \code{family_key}, \code{modname}, \code{fold}, \code{n_test},
 #'   \code{n_blocks}, \code{CRPS},
-#'   \code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{calib} (mean
+#'   \code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{pattern},
+#'   \code{total_OE}, \code{cell_rho}, \code{calib} (mean
 #'   |1 - observed/expected| over the levels of \code{calib.covar}), one
-#'   \code{OE_<level>} column per level, and \code{mins}.
+#'   \code{OE_<level>} column per level, and \code{mins}. It carries a
+#'   \code{"heldout"} attribute: one row per finalist per held-out segment row
+#'   (\code{species}, \code{family_key}, \code{modname}, \code{fold},
+#'   \code{row}, \code{obs}, \code{pred}, \code{x}, \code{y}, \code{area},
+#'   \code{season}, \code{seg}), so the pattern scores can be pooled over folds
+#'   with \code{\link{pool.family.cv.pattern}}. Every segment row is held out
+#'   exactly once, so the pooled predictions form a complete out-of-sample
+#'   surface.
 #' @examples
 #' \dontrun{
 #' run.family.cv("ATPU", dsm_data, finalists, n_folds = 5, seed = 20260820)
@@ -7578,11 +7591,19 @@ run.family.cv <- function(species, segdata, finalists,
                           seed = 1, crs = NULL, balance_column = NULL,
                           folds = NULL, nthreads = 1, calib.covar = "platform",
                           allow.slow.refit = FALSE, max.pred.ratio = 1e4,
+                          pattern.bins = 5, pattern.cell.m = 25000,
+                          pattern.min.segments = 5,
                           progress = TRUE) {
   checkmate::expect_character(species, len = 1, any.missing = FALSE)
   checkmate::expect_data_frame(segdata, min.rows = 1)
   checkmate::expect_data_frame(finalists, min.rows = 1)
   checkmate::expect_number(max.pred.ratio, lower = 1)
+  checkmate::expect_count(pattern.bins, positive = TRUE)
+  checkmate::expect_number(pattern.cell.m, lower = 0)
+  checkmate::expect_count(pattern.min.segments, positive = TRUE)
+  checkmate::expect_names(names(segdata),
+                          must.include = c("x", "y", "segment.area", "Season",
+                                           "Sample.Label"))
   if (!all(c("family_key", "modname", "formula", "family") %in% names(finalists)))
     stop("run.family.cv: finalists must come from get.family.finalists()")
 
@@ -7606,7 +7627,14 @@ run.family.cv <- function(species, segdata, finalists,
 
   resp <- as.character(finalists$formula[[1]][[2]])
 
+  # Per-row context for the pattern scores, computed once: they need where each
+  # held-out row is, how much effort it carries and which physical segment it
+  # is (the ddftype copies of one segment share x, y and area).
+  seg_id <- segment.id.from.label(as.character(segdata$Sample.Label))
+  season <- as.character(segdata$Season)
+
   out <- NULL
+  heldout <- list()
   for (i in seq_len(nrow(finalists))) {
     for (k in seq_len(n_folds)) {
       train_idx <- which(fold_id != k)
@@ -7754,6 +7782,30 @@ run.family.cv <- function(species, segdata, finalists,
         cover90    = mean(obs_y >= lower & obs_y <= upper),
         fit_path   = fit_path)
 
+      # The surface's pattern on this fold's blocks (issue #114): whether the
+      # contrast between high- and low-predicted segments is right, and whether
+      # cells rank in the right order. The deciding version is pooled over all
+      # folds by pool.family.cv.pattern(); these per-fold values feed the fold
+      # screens and the fold-win count.
+      pat <- score.pattern.calibration(obs_y, pred_mu, n.bins = pattern.bins)
+      rho <- score.cell.rank(obs_y, pred_mu,
+                             x = segdata$x[test_idx], y = segdata$y[test_idx],
+                             area = segdata$segment.area[test_idx],
+                             seg = seg_id[test_idx], season = season[test_idx],
+                             cell.m = pattern.cell.m,
+                             min.segments = pattern.min.segments)
+      row$pattern  <- pat$score
+      row$total_OE <- pat$total_OE
+      row$cell_rho <- rho$rho
+
+      heldout[[length(heldout) + 1]] <- tibble::tibble(
+        species = species, family_key = finalists$family_key[i],
+        modname = finalists$modname[i], fold = k, row = test_idx,
+        obs = obs_y, pred = as.numeric(pred_mu),
+        x = segdata$x[test_idx], y = segdata$y[test_idx],
+        area = segdata$segment.area[test_idx], season = season[test_idx],
+        seg = seg_id[test_idx])
+
       # Observed/expected by the calibration covariate, if there is one. Kept
       # generic: one column per level, plus the mean distance from 1 so the
       # verdict logic downstream never has to know the levels.
@@ -7775,7 +7827,192 @@ run.family.cv <- function(species, segdata, finalists,
                         row$mins, row$CRPS))
     }
   }
+  if (!is.null(out))
+    attr(out, "heldout") <- dplyr::bind_rows(heldout)
   out
+}
+
+
+#' How well a predicted surface reproduces the contrast between high and low
+#'
+#' The question a density map has to answer is where birds are many and where
+#' they are few. This scores that directly, on held-out data: rows are sorted by
+#' prediction and cut into \code{n.bins} bins carrying equal shares of the
+#' predicted total, so the top bin holds the highest-predicted rows, and the
+#' observed total in each bin is compared with the predicted one.
+#'
+#' Predictions are first rescaled to the observed total, so a surface that is
+#' right in shape but wrong in level scores 0. The level is reported separately
+#' as \code{total_OE}. What remains is the shape: a model that inflates its
+#' hotspots relative to the rest of the map has O/E below 1 in the top bin and
+#' above 1 in the others.
+#'
+#' Why this and not CRPS (issue #114): CRPS scores each segment's predictive
+#' distribution, and 97-99\% of segments are zeros, so it is decided mostly by
+#' how a family treats empty segments. On NL_EXPL_DRL_RA the nb fits put more of
+#' their predictive mass at zero and scored 0.36-0.73x tw's CRPS on the zero
+#' rows, while over-predicting their top decile of segments by 22-64\%.
+#'
+#' @param obs,pred Observed and predicted values for the same rows.
+#' @param n.bins Number of equal-predicted-mass bins.
+#' @param pad Added to each bin's observed and expected totals before the log
+#'   ratio, so an empty bin scores large rather than infinite. In response units
+#'   (birds); small against a bin's total on any realistic data.
+#' @return List: \code{score} (mean over bins of |log O/E|; 0 is perfect),
+#'   \code{total_OE} (sum(obs) / sum(pred) before rescaling) and \code{bins}
+#'   (bin 1 = highest predicted: rows, share of rows, O, E, O/E).
+#' @examples
+#' set.seed(1)
+#' mu <- rexp(1000)
+#' score.pattern.calibration(rpois(1000, mu), mu)$score       # near 0
+#' score.pattern.calibration(rpois(1000, mu), mu^2)$bins      # contrast too strong
+#' @export
+score.pattern.calibration <- function(obs, pred, n.bins = 5, pad = 0.5) {
+  checkmate::expect_numeric(obs)
+  checkmate::expect_numeric(pred, len = length(obs))
+  checkmate::expect_count(n.bins, positive = TRUE)
+  checkmate::expect_number(pad, lower = 0)
+
+  ok <- is.finite(obs) & is.finite(pred)
+  obs <- obs[ok]
+  pred <- pred[ok]
+  empty <- list(score = NA_real_, total_OE = NA_real_,
+                bins = tibble::tibble(bin = integer(), rows = integer(),
+                                      share_rows = numeric(), O = numeric(),
+                                      E = numeric(), OE = numeric()))
+  if (!length(obs) || sum(pred) <= 0 || sum(obs) <= 0)
+    return(empty)
+
+  total_OE <- sum(obs) / sum(pred)
+  pred_n <- pred * total_OE
+
+  ord <- order(pred_n, decreasing = TRUE)
+  # The share of the predicted total reached BEFORE each row decides its bin, so
+  # a single row carrying more than one bin's share opens that bin rather than
+  # skipping it.
+  before <- (cumsum(pred_n[ord]) - pred_n[ord]) / sum(pred_n)
+  bin <- integer(length(obs))
+  bin[ord] <- pmin(n.bins, floor(before * n.bins) + 1L)
+
+  bins <- tibble::tibble(bin = bin, obs = obs, pred = pred_n) %>%
+    dplyr::group_by(bin) %>%
+    dplyr::summarise(rows = dplyr::n(), O = sum(obs), E = sum(pred),
+                     .groups = "drop") %>%
+    dplyr::mutate(share_rows = rows / sum(rows), OE = O / E) %>%
+    dplyr::select(bin, rows, share_rows, O, E, OE)
+
+  list(score = mean(abs(log((bins$O + pad) / (bins$E + pad)))),
+       total_OE = total_OE, bins = bins)
+}
+
+
+#' Do held-out cells rank in the order the surface predicts?
+#'
+#' Rows are aggregated into square cells of \code{cell.m} within each season,
+#' and observed and predicted density (each summed over the cell's rows and
+#' divided by the same effort) are compared by Spearman correlation across
+#' cells with at least \code{min.segments} distinct segments. It answers whether
+#' the high areas are in the right places, which \code{\link{score.pattern.calibration}}
+#' does not: that one asks whether their height is right. Two families that
+#' share a formula usually rank cells almost identically (rho 0.97 between nb
+#' and tw on NL_EXPL_DRL_RA, 02.15), so this is reported rather than used to
+#' decide.
+#'
+#' @param obs,pred Observed and predicted values for the same rows.
+#' @param x,y Row coordinates in projection units.
+#' @param area Each row's effort area. Rows that are ddftype copies of one
+#'   segment repeat it, which affects observed and predicted density equally.
+#' @param seg Physical segment id per row, for the minimum-segments filter.
+#' @param season Optional season per row; cells are formed within season.
+#' @param cell.m Cell edge length in projection units.
+#' @param min.segments Minimum distinct segments for a cell to count.
+#' @return List: \code{rho} and \code{n_cells}.
+#' @examples
+#' set.seed(1)
+#' x <- runif(2000, 0, 1e5); y <- runif(2000, 0, 1e5)
+#' mu <- exp(x / 5e4)
+#' score.cell.rank(rpois(2000, mu), mu, x, y, rep(1, 2000), seq_len(2000))
+#' @export
+score.cell.rank <- function(obs, pred, x, y, area, seg, season = NULL,
+                            cell.m = 25000, min.segments = 5) {
+  checkmate::expect_numeric(obs)
+  n <- length(obs)
+  checkmate::expect_numeric(pred, len = n)
+  checkmate::expect_numeric(x, len = n)
+  checkmate::expect_numeric(y, len = n)
+  checkmate::expect_numeric(area, len = n)
+  checkmate::expect_atomic_vector(seg, len = n)
+  if (!is.null(season)) checkmate::expect_atomic_vector(season, len = n)
+  checkmate::expect_number(cell.m, lower = 0)
+  checkmate::expect_count(min.segments, positive = TRUE)
+
+  if (is.null(season)) season <- rep("all", n)
+  cells <- tibble::tibble(cell = paste(floor(x / cell.m), floor(y / cell.m), season),
+                          obs = obs, pred = pred, area = area, seg = seg) %>%
+    dplyr::filter(is.finite(obs), is.finite(pred)) %>%
+    dplyr::group_by(cell) %>%
+    dplyr::summarise(O = sum(obs) / sum(area), E = sum(pred) / sum(area),
+                     n_seg = dplyr::n_distinct(seg), .groups = "drop") %>%
+    dplyr::filter(n_seg >= min.segments)
+
+  rho <- if (nrow(cells) >= 3 && stats::sd(cells$O) > 0 && stats::sd(cells$E) > 0)
+    stats::cor(cells$O, cells$E, method = "spearman") else NA_real_
+  list(rho = rho, n_cells = nrow(cells))
+}
+
+
+#' Pattern scores pooled over the folds of a family CV
+#'
+#' Each segment row is held out exactly once, so the held-out predictions of
+#' all folds together are one complete out-of-sample surface per finalist. The
+#' pattern scores computed on it are far steadier than per-fold means: at 10
+#' folds a fold holds ~8 of NL_EXPL_DRL_RA's 86 occupied blocks, and the
+#' highest-predicted bin of so few blocks rests on a handful of hotspots.
+#'
+#' @param heldout The \code{"heldout"} attribute of \code{\link{run.family.cv}},
+#'   possibly for several species bound together.
+#' @param keep Optional data frame of \code{species} and \code{fold} to pool
+#'   over (e.g. the folds left after screening, or all but one). \code{NULL}
+#'   uses every fold.
+#' @param n.bins,cell.m,min.segments As in \code{\link{score.pattern.calibration}}
+#'   and \code{\link{score.cell.rank}}.
+#' @return Tibble, one row per species x finalist: \code{pattern},
+#'   \code{total_OE}, \code{cell_rho}, \code{n_cells}, \code{n_folds}, and
+#'   \code{OE_bin<k>} for each bin (bin 1 = highest predicted).
+#' @examples
+#' \dontrun{
+#' pool.family.cv.pattern(attr(cv, "heldout"))
+#' }
+#' @export
+pool.family.cv.pattern <- function(heldout, keep = NULL, n.bins = 5,
+                                   cell.m = 25000, min.segments = 5) {
+  checkmate::expect_data_frame(heldout)
+  checkmate::expect_names(names(heldout),
+                          must.include = c("species", "family_key", "modname",
+                                           "fold", "obs", "pred", "x", "y",
+                                           "area", "seg", "season"))
+  checkmate::expect_data_frame(keep, null.ok = TRUE)
+
+  if (!is.null(keep))
+    heldout <- dplyr::semi_join(heldout, keep, by = c("species", "fold"))
+  if (!nrow(heldout))
+    return(tibble::tibble(species = character(), family_key = character(),
+                          modname = character(), pattern = numeric(),
+                          total_OE = numeric(), cell_rho = numeric(),
+                          n_cells = integer(), n_folds = integer()))
+
+  heldout %>%
+    dplyr::group_by(species, family_key, modname) %>%
+    dplyr::group_modify(function(d, key) {
+      pat <- score.pattern.calibration(d$obs, d$pred, n.bins = n.bins)
+      rho <- score.cell.rank(d$obs, d$pred, d$x, d$y, d$area, d$seg, d$season,
+                             cell.m = cell.m, min.segments = min.segments)
+      oe <- stats::setNames(as.list(pat$bins$OE), paste0("OE_bin", pat$bins$bin))
+      tibble::as_tibble(c(list(pattern = pat$score, total_OE = pat$total_OE,
+                               cell_rho = rho$rho, n_cells = rho$n_cells,
+                               n_folds = dplyr::n_distinct(d$fold)), oe))
+    }) %>%
+    dplyr::ungroup()
 }
 
 
@@ -11475,9 +11712,12 @@ cache.is.stale <- function(cache.file, inputs, label = basename(cache.file),
 #' @param seed Integer, fold and simulation seed.
 #' @param balance.column Character or \code{NULL}, the column whose classes are
 #'   balanced across folds.
+#' @param pattern.bins,pattern.cell.m,pattern.min.segments The per-fold pattern
+#'   score settings passed to \code{\link{run.family.cv}}.
 #' @return Named list: the arguments, plus the installed \code{mgcv} version
 #'   (1.9-4 sent every \code{tw()} fit degenerate) and \code{blockCV} version
-#'   (4.0-0 changed the balancing, so the seed alone does not pin the folds).
+#'   (4.0-0 changed the balancing, so the seed alone does not pin the folds),
+#'   and \code{scores}, naming what the run scores and keeps.
 #' @examples
 #' \dontrun{
 #' get.family.cv.provenance(folds = 5, block.size.m = 1e5, nsim = 200,
@@ -11485,12 +11725,17 @@ cache.is.stale <- function(cache.file, inputs, label = basename(cache.file),
 #' }
 #' @export
 get.family.cv.provenance <- function(folds, block.size.m, nsim, seed,
-                                     balance.column = NULL) {
+                                     balance.column = NULL, pattern.bins = 5,
+                                     pattern.cell.m = 25000,
+                                     pattern.min.segments = 5) {
   checkmate::expect_count(folds, positive = TRUE)
   checkmate::expect_number(block.size.m, lower = 0)
   checkmate::expect_count(nsim, positive = TRUE)
   checkmate::expect_count(seed)
   checkmate::expect_string(balance.column, null.ok = TRUE)
+  checkmate::expect_count(pattern.bins, positive = TRUE)
+  checkmate::expect_number(pattern.cell.m, lower = 0)
+  checkmate::expect_count(pattern.min.segments, positive = TRUE)
 
   list(mgcv           = as.character(utils::packageVersion("mgcv")),
        blockCV        = as.character(utils::packageVersion("blockCV")),
@@ -11498,7 +11743,14 @@ get.family.cv.provenance <- function(folds, block.size.m, nsim, seed,
        block_size_m   = block.size.m,
        nsim           = nsim,
        seed           = seed,
-       balance_column = balance.column)
+       balance_column = balance.column,
+       # What run.family.cv() scores and keeps. A part saved before the pattern
+       # scores and held-out predictions existed (issue #114) has neither, so
+       # it must not be reused.
+       scores         = "crps+pattern+heldout",
+       pattern_bins   = pattern.bins,
+       pattern_cell_m = pattern.cell.m,
+       pattern_min_segments = pattern.min.segments)
 }
 
 #' Everything that decides a species' saved DSM checks, other than its models

@@ -9,7 +9,10 @@ get.family.cv.provenance(
   block.size.m,
   nsim,
   seed,
-  balance.column = NULL
+  balance.column = NULL,
+  pattern.bins = 5,
+  pattern.cell.m = 25000,
+  pattern.min.segments = 5
 )
 }
 \arguments{
@@ -23,11 +26,15 @@ get.family.cv.provenance(
 
 \item{balance.column}{Character or \code{NULL}, the column whose classes are
 balanced across folds.}
+
+\item{pattern.bins, pattern.cell.m, pattern.min.segments}{The per-fold pattern
+score settings passed to \code{\link{run.family.cv}}.}
 }
 \value{
 Named list: the arguments, plus the installed \code{mgcv} version
 (1.9-4 sent every \code{tw()} fit degenerate) and \code{blockCV} version
-(4.0-0 changed the balancing, so the seed alone does not pin the folds).
+(4.0-0 changed the balancing, so the seed alone does not pin the folds),
+and \code{scores}, naming what the run scores and keeps.
 }
 \description{
 Stored in each \code{family_cv_parts/[species].rds} by the DSM model

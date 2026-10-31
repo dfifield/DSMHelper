@@ -19,6 +19,9 @@ run.family.cv(
   calib.covar = "platform",
   allow.slow.refit = FALSE,
   max.pred.ratio = 10000,
+  pattern.bins = 5,
+  pattern.cell.m = 25000,
+  pattern.min.segments = 5,
   progress = TRUE
 )
 }
@@ -73,15 +76,29 @@ failure rather than anything catchable-looking. Complements
 \code{dsm.options$family.cv.diverged.ratio}, which screens scores after the
 fact; this screens predictions before a score exists at all.}
 
+\item{pattern.bins, pattern.cell.m, pattern.min.segments}{Passed to
+\code{\link{score.pattern.calibration}} (number of predicted-mass bins) and
+\code{\link{score.cell.rank}} (cell edge in projection units, minimum
+distinct segments per cell x season) for the per-fold \code{pattern} and
+\code{cell_rho} scores.}
+
 \item{progress}{If \code{TRUE}, report each fold as it completes.}
 }
 \value{
 A tibble, one row per finalist per fold: \code{species},
 \code{family_key}, \code{modname}, \code{fold}, \code{n_test},
 \code{n_blocks}, \code{CRPS},
-\code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{calib} (mean
+\code{MAE}, \code{RMSE}, \code{PIT_KS}, \code{cover90}, \code{pattern},
+\code{total_OE}, \code{cell_rho}, \code{calib} (mean
 |1 - observed/expected| over the levels of \code{calib.covar}), one
-\code{OE_<level>} column per level, and \code{mins}.
+\code{OE_<level>} column per level, and \code{mins}. It carries a
+\code{"heldout"} attribute: one row per finalist per held-out segment row
+(\code{species}, \code{family_key}, \code{modname}, \code{fold},
+\code{row}, \code{obs}, \code{pred}, \code{x}, \code{y}, \code{area},
+\code{season}, \code{seg}), so the pattern scores can be pooled over folds
+with \code{\link{pool.family.cv.pattern}}. Every segment row is held out
+exactly once, so the pooled predictions form a complete out-of-sample
+surface.
 }
 \description{
 Step two of the two-step model selection. Refits each finalist from
