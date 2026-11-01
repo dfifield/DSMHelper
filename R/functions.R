@@ -12491,7 +12491,9 @@ write.finalist.summary.page <- function(seasons, cells, path, subproject,
 #' monotonicity, a hazard-rate spike, the per-observation p (as
 #' \code{\link{check.det.fcn}} reports it), p and n per Season, and observed
 #' against expected counts per distance bin from \code{mrds::ddf.gof()}.
-#' A \code{failed_model_<label>.txt} file gives a row with \code{failed = TRUE}.
+#' A \code{failed_model_<label>.txt} file gives a row with \code{failed = TRUE},
+#' and so does an \code{AIC_} summary file holding no AIC (the fit converged but
+#' its summary errored, usually on a singular Hessian).
 #'
 #' @param results.dir The SubProject's \code{ResultsDir}.
 #' @param df.mod.list Named list (by species) of DDF specs; only the names of
@@ -12568,6 +12570,16 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
     obs = list(NULL), expected = list(NULL), bins = list(NULL),
     summary.text = paste(readLines(txt), collapse = "\n"),
     rdata = sub("[.]txt$", ".RData", txt))
+  # An AIC_ file with no AIC in it: the fit converged, but ddf.gof() or
+  # summary() errored when the summary was written (do.det.fcn.spec() catches
+  # that and leaves the file empty), usually because the Hessian is singular.
+  # Such a fit has no SE and cannot be reviewed, so it counts as failed.
+  if (is.null(row$AIC) || is.na(row$AIC)) {
+    row$failed <- TRUE
+    row$summary.text <- paste("Summary file is empty: ddf.gof() or summary() errored",
+                              "when it was written, usually a singular Hessian.")
+    return(row)
+  }
   chi <- suppressWarnings(as.numeric(strsplit(row$chi, ",")[[1]]))
   if (length(chi) && all(!is.na(chi)))
     row$chi_first_max <- which.max(chi) == 1 && max(chi) > 0
@@ -12742,7 +12754,7 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
       best_model = model[which.min(AIC)],
       best_p = p[which.min(AIC)],
       p_spread = {
-        close <- p[delta_aic <= 2]
+        close <- p[!is.na(p) & !is.na(delta_aic) & delta_aic <= 2]
         if (length(close) > 1) (max(close) - min(close)) / stats::median(close) else 0
       },
       .groups = "drop") %>%
@@ -12757,7 +12769,7 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     if (is.na(choice)) f <- c(f, "no-choice")
     else if (choice != "strip" && is.na(d)) f <- c(f, "not-a-candidate")
     if (!is.na(d) && d > 2 && !nzchar(notes)) f <- c(f, "no-note")
-    if (spread > p.spread) f <- c(f, "p-spread")
+    if (isTRUE(spread > p.spread)) f <- c(f, "p-spread")
     if (!is.na(n) && n < min.n) f <- c(f, "sparse-ddftype")
     if (species %in% fishing.species) f <- c(f, "fishing-excl")
     paste(f, collapse = " ")

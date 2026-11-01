@@ -35,7 +35,9 @@ asks for: the adjustment-search result (\code{\link{fit.adjustment.series}}),
 monotonicity, a hazard-rate spike, the per-observation p (as
 \code{\link{check.det.fcn}} reports it), p and n per Season, and observed
 against expected counts per distance bin from \code{mrds::ddf.gof()}.
-A \code{failed_model_<label>.txt} file gives a row with \code{failed = TRUE}.
+A \code{failed_model_<label>.txt} file gives a row with \code{failed = TRUE},
+and so does an \code{AIC_} summary file holding no AIC (the fit converged but
+its summary errored, usually on a singular Hessian).
 }
 \examples{
 \dontrun{

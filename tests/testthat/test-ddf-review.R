@@ -89,10 +89,17 @@ test_that("collect.ddf.candidates reads what run.ddf.model saves", {
     suppressWarnings(run.ddf.model(mods[i, ], data = dat, folder = folder, verbose = FALSE,
                                    truncation = 0.3, max_adjustments = 2))
   file.create(file.path(folder, "failed_model_hn.Season.txt"))
+  # converged, but its summary errored and left the file empty (Atl IMRP GBBG
+  # aerial hr.sp, singular Hessian)
+  file.create(file.path(folder, "AIC_465.909_hr.sp.txt"))
   dml <- list(BLKI = list(ECSAS_Ship_W_D = list(), ECSAS_Ship_W_N = list()))
   cands <- collect.ddf.candidates(res, dml)
-  expect_setequal(cands$model, c("hn.cos", "hr.size", "hn.Season"))
+  expect_setequal(cands$model, c("hn.cos", "hr.size", "hn.Season", "hr.sp"))
   expect_true(cands$failed[cands$model == "hn.Season"])
+  expect_true(cands$failed[cands$model == "hr.sp"])
+  expect_no_error(flag.ddf.candidates(
+    cands, data.frame(species = "BLKI", ddftype = "ECSAS_Ship_W_D", model = "hn.cos",
+                      notes = "")))
   hn <- cands[cands$model == "hn.cos", ]
   expect_equal(hn$adj, "cos")
   expect_false(is.na(hn$nadj))
