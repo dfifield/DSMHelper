@@ -7506,6 +7506,114 @@ fresh.family <- function(fam) {
   spec$constructor()
 }
 
+#' Refit a discretised DSM exactly
+#'
+#' Refits a \code{bam(discrete = TRUE)} DSM with \code{discrete = FALSE}: same
+#' formula, data, offset and weights, same \code{fREML} method, a freshly built
+#' family of the same kind (\code{\link{fresh.family}}), and the detection
+#' functions carried over, so the result is a \code{dsm} object that
+#' \code{\link{dsm.pred}} and \code{\link{get.per.cell.var}} use exactly as
+#' they use the discretised fit.
+#'
+#' Why: discretisation changes the fitted smoothing parameters, not only the
+#' predictions. Measured on Atl IMRP (LHSP and DOVE, 499,570 segment rows) the
+#' exact \code{tw} fit moves a typical cell 1.3-2.1x and a season total by up
+#' to 23\%, because smooths the discrete fit shrank to nothing come back. See
+#' issue #117. The exact \code{nb} fits there did not converge in mgcv's 200
+#' PIRLS iterations, which is why the pipeline refits only the families named
+#' in \code{dsm.options$refit.without.discrete}.
+#'
+#' \code{update()} is not used: the refit is built explicitly so the thread
+#' count, family and convergence check are under this function's control.
+#'
+#' @param model A fitted \code{dsm} object, normally \code{bam(discrete = TRUE)}.
+#' @param nthreads Threads for \code{bam()}.
+#' @return The exact refit, a \code{dsm} object. Attribute \code{exact.refit}
+#'   holds the fit time in minutes, the PIRLS iterations, whether they hit
+#'   \code{control$maxit}, and any warnings.
+#' @examples
+#' \dontrun{
+#' exact <- refit.dsm.exact(model, nthreads = 6)
+#' attr(exact, "exact.refit")
+#' }
+#' @export
+refit.dsm.exact <- function(model, nthreads = 1) {
+  checkmate::expect_class(model, c("dsm", "bam"))
+  checkmate::expect_count(nthreads, positive = TRUE)
+  if (is.null(model$data))
+    stop("refit.dsm.exact: model$data is NULL - the model must be fitted with keepData = TRUE")
+
+  # bam() evaluates weights in the formula's environment, so point the formula
+  # at this frame and pass data and weights as local variables.
+  refit.formula <- stats::formula(model)
+  environment(refit.formula) <- environment()
+  refit.data <- model$data
+  refit.weights <- if (all(model$prior.weights == 1)) NULL else model$prior.weights
+  warn <- character(0)
+  t0 <- Sys.time()
+  exact <- withCallingHandlers(
+    mgcv::bam(refit.formula, data = refit.data, weights = refit.weights,
+              family = fresh.family(model$family), method = "fREML",
+              discrete = FALSE, nthreads = nthreads,
+              control = mgcv::gam.control(keepData = TRUE, nthreads = nthreads)),
+    warning = function(w) {
+      warn <<- c(warn, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+  minutes <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  exact$ddf <- model$ddf
+  class(exact) <- c("dsm", setdiff(class(exact), "dsm"))
+  attr(exact, "exact.refit") <- list(
+    minutes = minutes, iter = exact$iter,
+    at_iter_limit = exact$iter >= exact$control$maxit,
+    warnings = warn)
+  if (length(warn))
+    warning("refit.dsm.exact: bam() warned: ", paste(unique(warn), collapse = "; "),
+            call. = FALSE)
+  exact
+}
+
+
+#' Load a species' final DSM, refusing a stale or mismatched one
+#'
+#' 02.50 writes the final model (the chosen candidate, refitted exactly when
+#' its family is in \code{dsm.options$refit.without.discrete}) to one file,
+#' and 03.00 and 04.00 read it from there. A file that names a different
+#' model than \code{final.dsm.models} now does, or that is older than the
+#' candidate it was made from, would silently predict from the wrong model, so
+#' both stop instead.
+#'
+#' @param file Path of the final-model file written by 02.50.
+#' @param modname The \code{dsm_final_name} \code{final.dsm.models} gives now.
+#' @param source.file The candidate's saved \code{.Rdata} from 02.00.
+#' @return The final \code{dsm} model.
+#' @examples
+#' \dontrun{
+#' dsm_final <- load.final.dsm(final.dsm.file(species), modname,
+#'                             file.path(DSMSummDir, paste0(modname, ".Rdata")))
+#' }
+#' @export
+load.final.dsm <- function(file, modname, source.file) {
+  checkmate::expect_string(file)
+  checkmate::expect_string(modname)
+  checkmate::expect_string(source.file)
+  if (!file.exists(file))
+    stop("load.final.dsm: no final model at ", file, " - render 02.50 first")
+  if (file.exists(source.file) && file.mtime(source.file) > file.mtime(file))
+    stop("load.final.dsm: ", basename(file), " is older than its candidate ",
+         basename(source.file), " - re-render 02.50")
+  env <- new.env()
+  load(file, envir = env)
+  if (!exists("dsm_final", envir = env, inherits = FALSE))
+    stop("load.final.dsm: ", file, " holds no dsm_final object")
+  saved <- attr(env$dsm_final, "modname")
+  if (!identical(saved, modname))
+    stop("load.final.dsm: ", basename(file), " holds ", if (is.null(saved)) "an unnamed model" else saved,
+         " but final.dsm.models now names ", modname, " - re-render 02.50")
+  env$dsm_final
+}
+
+
 
 #' Spatial-block cross-validation of one species' family finalists
 #'
