@@ -31,7 +31,7 @@ exact \code{tw} fit moves a typical cell 1.3-2.1x and a season total by up
 to 23\%, because smooths the discrete fit shrank to nothing come back. See
 issue #117. The exact \code{nb} fits there did not converge in mgcv's 200
 PIRLS iterations, which is why the pipeline refits only the families named
-in \code{dsm.options$refit.without.discrete}.
+in \code{dsm.options$exact.refit}.
 
 \code{update()} is not used: the refit is built explicitly so the thread
 count, family and convergence check are under this function's control.

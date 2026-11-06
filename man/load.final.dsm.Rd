@@ -18,7 +18,7 @@ The final \code{dsm} model.
 }
 \description{
 02.50 writes the final model (the chosen candidate, refitted exactly when
-its family is in \code{dsm.options$refit.without.discrete}) to one file,
+its family is in \code{dsm.options$exact.refit}) to one file,
 and 03.00 and 04.00 read it from there. A file that names a different
 model than \code{final.dsm.models} now does, or that is older than the
 candidate it was made from, would silently predict from the wrong model, so

@@ -7521,7 +7521,7 @@ fresh.family <- function(fam) {
 #' to 23\%, because smooths the discrete fit shrank to nothing come back. See
 #' issue #117. The exact \code{nb} fits there did not converge in mgcv's 200
 #' PIRLS iterations, which is why the pipeline refits only the families named
-#' in \code{dsm.options$refit.without.discrete}.
+#' in \code{dsm.options$exact.refit}.
 #'
 #' \code{update()} is not used: the refit is built explicitly so the thread
 #' count, family and convergence check are under this function's control.
@@ -7577,7 +7577,7 @@ refit.dsm.exact <- function(model, nthreads = 1) {
 #' Load a species' final DSM, refusing a stale or mismatched one
 #'
 #' 02.50 writes the final model (the chosen candidate, refitted exactly when
-#' its family is in \code{dsm.options$refit.without.discrete}) to one file,
+#' its family is in \code{dsm.options$exact.refit}) to one file,
 #' and 03.00 and 04.00 read it from there. A file that names a different
 #' model than \code{final.dsm.models} now does, or that is older than the
 #' candidate it was made from, would silently predict from the wrong model, so
@@ -7754,7 +7754,7 @@ run.family.cv <- function(species, segdata, finalists,
       # under parallel load, with "Error in if (sum(uconv))". Fall back to the
       # stable path rather than dropping the fold, which would silently turn a
       # two-family comparison into a one-family one. Mirrors
-      # dsm.options$refit.without.discrete in the final-fit step.
+      # dsm.options$exact.refit in the final-fit step.
       # A fresh family per fit. The object in dsm.mod.specs is shared by every
       # species and every fold, and mgcv mutates it, so without this a single
       # failed fit poisons all the ones after it. See fresh.family().
@@ -10746,7 +10746,7 @@ dsm.pred <-
     # change the grid extent, or predict in batches, and unchanged cells move.
     # predict.dsm() strips the "dsm" class and forwards ... to predict.bam(), so
     # this reaches the right place. It is a no-op for a model that was fitted
-    # without discrete (e.g. via dsm.options$refit.without.discrete), which is
+    # without discrete (e.g. via dsm.options$exact.refit), which is
     # the other, broader way to get the same guarantee.
     ret <- ret %>%
       dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area,
