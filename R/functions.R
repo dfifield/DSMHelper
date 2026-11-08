@@ -7511,7 +7511,7 @@ fresh.family <- function(fam) {
 #' Refits a \code{bam(discrete = TRUE)} DSM with \code{discrete = FALSE}: same
 #' formula, data, offset and weights, same \code{fREML} method, a freshly built
 #' family of the same kind (\code{\link{fresh.family}}), and the detection
-#' functions carried over, so the result is a \code{dsm} object that
+#' functions and segment data (\code{$ddf}, \code{$data}) carried over, so the result is a \code{dsm} object that
 #' \code{\link{dsm.pred}} and \code{\link{get.per.cell.var}} use exactly as
 #' they use the discretised fit.
 #'
@@ -7561,7 +7561,12 @@ refit.dsm.exact <- function(model, nthreads = 1) {
       invokeRestart("muffleWarning")
     })
   minutes <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  # dsm() attaches the detection functions and the segment data itself, and a
+  # non-discrete bam() does not keep the data whatever keepData says - its
+  # $data comes back as a single logical. Downstream (check.platform.combination(),
+  # 03.00) reads model$data, so both are carried over.
   exact$ddf <- model$ddf
+  exact$data <- model$data
   class(exact) <- c("dsm", setdiff(class(exact), "dsm"))
   attr(exact, "exact.refit") <- list(
     minutes = minutes, iter = exact$iter,

@@ -27,6 +27,9 @@ test_that("refit.dsm.exact returns an undiscretised dsm with the ddf carried ove
   expect_true(is_discrete_gam(disc))
   expect_false(is_discrete_gam(exact))
   expect_identical(exact$ddf, disc$ddf)
+  # a non-discrete bam() drops $data; 03.00's check.platform.combination() needs it
+  expect_identical(exact$data, disc$data)
+  expect_s3_class(exact$data, "data.frame")
   expect_identical(length(coef(exact)), length(coef(disc)))
   info <- attr(exact, "exact.refit")
   expect_false(info$at_iter_limit)

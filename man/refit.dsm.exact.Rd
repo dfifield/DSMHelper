@@ -20,7 +20,7 @@ holds the fit time in minutes, the PIRLS iterations, whether they hit
 Refits a \code{bam(discrete = TRUE)} DSM with \code{discrete = FALSE}: same
 formula, data, offset and weights, same \code{fREML} method, a freshly built
 family of the same kind (\code{\link{fresh.family}}), and the detection
-functions carried over, so the result is a \code{dsm} object that
+functions and segment data (\code{$ddf}, \code{$data}) carried over, so the result is a \code{dsm} object that
 \code{\link{dsm.pred}} and \code{\link{get.per.cell.var}} use exactly as
 they use the discretised fit.
 }
