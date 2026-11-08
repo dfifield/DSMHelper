@@ -21,10 +21,13 @@ overwritten, \code{invisible(FALSE)} if there is nothing there.  Called
 for its side effect of stopping.
 }
 \description{
-\code{03.70_Save_chosen_model_predictions.Rmd} and
-\code{04.70_Save_chosen_model_prediction_variance.Rmd} both begin by
-\code{unlink()}ing \code{predVersionDir} so that copied files get fresh
-dates.  That is correct when you are correcting a version in place, and
+\code{03.70_Save_chosen_model_predictions.Rmd} begins by \code{unlink()}ing
+\code{predVersionDir} so that copied files get fresh dates.
+\code{04.70_Save_chosen_model_prediction_variance.Rmd} then adds the
+variance rasters to that folder without deleting it, so it does not call
+this.  It did until issue #121, and so always stopped on the folder 03.70
+had just filled.  The delete is correct when you are correcting a version
+in place, and
 destructive when you are not: those folders are shared outside the project
 and are not in git, so a version deleted here is gone.
 }
