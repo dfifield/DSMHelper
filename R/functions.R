@@ -11458,7 +11458,10 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
       platform,
       ddftype_orig,
       Season,
-      dplyr::ends_with(".sc")
+      dplyr::ends_with(".sc"),
+      # Over-water coordinates for the barrier-respecting spatial smooth
+      # (add.geodesic.coords(), Atlantic-DSM #127), when 00.04 added them.
+      dplyr::matches("^geo[0-9]+$")
     ) %>%
     # Now that platform has been created, turn it into a factor, and assign
     # ddfobj based on conversion vector created above
