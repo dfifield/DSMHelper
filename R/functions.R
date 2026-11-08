@@ -4245,11 +4245,7 @@ do.pred.map <-
         data = dat,
         options = leaflet::leafletOptions(preferCanvas = TRUE)
       ) %>%
-      # Options help to speed up rendering. NOTE - dont't use addProviderTiles
-      # if you want to save the map and reload in a subsequent R session - it won't
-      # work.
-      leaflet::addTiles(options = leaflet::tileOptions(updateWhenZooming = FALSE,
-                                                       updateWhenIdle = FALSE)) %>%
+      add.base.tiles() %>%
       leaflet::addMapPane("density", zIndex = 410) %>%
       leaflet::addMapPane("abund", zIndex = 420) %>%
       # Predicted density
@@ -4283,7 +4279,7 @@ do.pred.map <-
         radius = ~ estAbund * (max.circ.radius/max(estAbund)),#  scale so largest is 100km
         color = "black",
         weight = 1,
-        popup = ~ htmlEscape(paste0("Abund ", round(estAbund, 3), ", raw ", round(rawCount, 3))),
+        popup = ~ htmltools::htmlEscape(paste0("Abund ", round(estAbund, 3), ", raw ", round(rawCount, 3))),
         group = "est abund",
         data = dplyr::filter(segdata, estAbund != 0),
         options = leaflet::pathOptions(pane = "abund")
@@ -4554,10 +4550,7 @@ get.final.variance.name <- function(spec, season){
   )
 
   leaflet::leaflet() %>%
-    leaflet::addTiles(
-      options = leaflet::tileOptions(updateWhenZooming = FALSE,
-                                     updateWhenIdle    = FALSE)
-    ) %>%
+    add.base.tiles() %>%
     leaflet::addRasterImage(r_rast, colors = pal, opacity = 0.8) %>%
     leaflet::addLegend(
       pal     = pal,
@@ -5590,6 +5583,51 @@ do.pred.map.ggplot <-
   }
 
 
+#' Add the project's basemap tiles to a leaflet map
+#'
+#' Every leaflet map in the pipeline gets its background through this one
+#' function, so the tile source is chosen in one place: the Esri World Ocean
+#' Base.
+#'
+#' It replaced \code{leaflet::addTiles()}'s default OpenStreetMap tiles for two
+#' reasons (Atlantic-DSM issue #123):
+#'
+#' * OpenStreetMap's volunteer-run tile servers require a valid HTTP
+#'   \code{Referer}, and a rendered report opened from disk (\code{file://})
+#'   sends none, so the tiles come back as "Access blocked"
+#'   (\url{https://osm.wiki/Blocked}).
+#' * CARTO basemaps now need an API key.
+#'
+#' The Esri tiles need neither. The URL is given to \code{leaflet::addTiles()}
+#' directly rather than through \code{addProviderTiles()}, because the latter
+#' attaches a leaflet-providers dependency that does not survive saving a map
+#' and reloading it in a later R session.
+#'
+#' The ocean base has no tiles past zoom 13, so \code{maxNativeZoom = 13}
+#' enlarges zoom-13 tiles beyond that rather than showing "Map data not yet
+#' available".
+#'
+#' @param map A \code{leaflet} map object.
+#' @return \code{map} with the basemap tile layer added.
+#' @examples
+#' \dontrun{
+#' leaflet::leaflet() %>% add.base.tiles()
+#' }
+#' @export
+add.base.tiles <- function(map) {
+  checkmate::expect_class(map, "leaflet")
+
+  leaflet::addTiles(
+    map,
+    urlTemplate = "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}",
+    attribution = "Tiles &copy; Esri &mdash; Sources: GEBCO, NOAA, CHS, OSU, UNH, CSUMB, National Geographic, DeLorme, NAVTEQ, and Esri",
+    # updateWhen* options help to speed up rendering
+    options = leaflet::tileOptions(maxNativeZoom = 13,
+                                   updateWhenZooming = FALSE,
+                                   updateWhenIdle = FALSE)
+  )
+}
+
 #' Quick leaflet map of watch start positions for debugging
 #'
 #' @param dat Data frame with \code{LongStart}, \code{LatStart}, and
@@ -5598,12 +5636,12 @@ do.pred.map.ggplot <-
 #' @export
 watch.map <- function(dat) {
   leaflet::leaflet(dat) %>%
-    leaflet::addTiles() %>%
+    add.base.tiles() %>%
     leaflet::addCircles(
       lng = ~ LongStart,
       lat = ~ LatStart,
       radius = 1,
-      popup = ~ htmlEscape(paste0("WatchID ", WatchID))
+      popup = ~ htmltools::htmlEscape(paste0("WatchID ", WatchID))
     )
 }
 
