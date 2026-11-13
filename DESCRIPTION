@@ -1,6 +1,6 @@
 Package: DSMHelper
 Title: Distance Sampling and Density Surface Modelling Utilities
-Version: 0.40.1
+Version: 0.41.0
 Authors@R:
     person("Dave", "Fifield", email = "dave.fifield@ec.gc.ca",
            role = c("aut", "cre"))
@@ -11,7 +11,6 @@ Description: Utility functions for preparing data, fitting detection functions,
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 Imports:
     blockCV,
     checkmate,
@@ -74,3 +73,4 @@ Suggests:
     testthat (>= 3.0.0),
     withr
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.1

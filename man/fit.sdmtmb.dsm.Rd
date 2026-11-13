@@ -15,6 +15,8 @@ fit.sdmtmb.dsm(
   refit.collapsed = TRUE,
   collapsed.sd = 0.001,
   previous.fit = NULL,
+  warm.start = NULL,
+  spatial.varying = ~0 + Season,
   nthreads = 1L
 )
 }
@@ -39,7 +41,19 @@ Hessian is not positive definite.}
 \item{collapsed.sd}{Smooth SD below which a smooth counts as collapsed.}
 
 \item{previous.fit}{A fit of the same model to the same rows, to warm-start
-from (\code{sdmTMB(previous_fit = )}); only the response may differ.}
+from (\code{sdmTMB(previous_fit = )}); only the response may differ. It also
+carries over that fit's map, so any smooth it fixed off stays off.}
+
+\item{warm.start}{A fit of the same formula and family to the same rows at
+a DIFFERENT range, to start from: every parameter starts at its estimate
+there except the range, which is reset to \code{range.km}. Unlike
+\code{previous.fit} the map is not carried over, so a smooth that collapsed
+at the other range is free again here. Used to step along a range ladder
+within one cross-validation fold.}
+
+\item{spatial.varying}{The \code{spatial_varying} formula: one Matern field per
+column of its model matrix. \code{~ 0 + Season} (the default) is one field per
+season; set per model in \code{sdmtmb.mod.specs}.}
 
 \item{nthreads}{TMB threads (\code{sdmTMBcontrol(parallel = )}).}
 }

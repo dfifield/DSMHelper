@@ -432,7 +432,17 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 #'   Hessian is not positive definite.
 #' @param collapsed.sd Smooth SD below which a smooth counts as collapsed.
 #' @param previous.fit A fit of the same model to the same rows, to warm-start
-#'   from (`sdmTMB(previous_fit = )`); only the response may differ.
+#'   from (`sdmTMB(previous_fit = )`); only the response may differ. It also
+#'   carries over that fit's map, so any smooth it fixed off stays off.
+#' @param warm.start A fit of the same formula and family to the same rows at
+#'   a DIFFERENT range, to start from: every parameter starts at its estimate
+#'   there except the range, which is reset to `range.km`. Unlike
+#'   `previous.fit` the map is not carried over, so a smooth that collapsed
+#'   at the other range is free again here. Used to step along a range ladder
+#'   within one cross-validation fold.
+#' @param spatial.varying The `spatial_varying` formula: one Matern field per
+#'   column of its model matrix. `~ 0 + Season` (the default) is one field per
+#'   season; set per model in `sdmtmb.mod.specs`.
 #' @param nthreads TMB threads (`sdmTMBcontrol(parallel = )`).
 #' @return The fitted `sdmTMB`, with attributes `fit_min` (minutes, all fits
 #'   included), `refit_note` (`NULL` if no refit) and `sanity_failed`.
@@ -444,7 +454,8 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
                            offset = "log_area", positive.smooths = FALSE,
                            refit.collapsed = TRUE, collapsed.sd = 1e-3,
-                           previous.fit = NULL, nthreads = 1L) {
+                           previous.fit = NULL, warm.start = NULL,
+                           spatial.varying = ~ 0 + Season, nthreads = 1L) {
   check.sdmtmb.installed("sdmTMB")
   checkmate::expect_formula(formula)
   checkmate::expect_data_frame(dat)
@@ -456,6 +467,12 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   checkmate::expect_flag(refit.collapsed)
   checkmate::expect_number(collapsed.sd, lower = 0)
   if (!is.null(previous.fit)) checkmate::expect_class(previous.fit, "sdmTMB")
+  if (!is.null(warm.start)) checkmate::expect_class(warm.start, "sdmTMB")
+  # The two warm starts do different things (see @param) and combining them
+  # would be ambiguous about whose map applies, so refuse both at once.
+  if (!is.null(previous.fit) && !is.null(warm.start))
+    stop("give previous.fit or warm.start, not both")
+  checkmate::expect_formula(spatial.varying)
   checkmate::expect_count(nthreads, positive = TRUE)
   # Timed from here, so fit_min includes the build and any refit.
   t0 <- Sys.time()
@@ -479,6 +496,21 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   start <- list(ln_kappa = matrix(log(sqrt(8) / range.km), nrow = 2, ncol = n_comp))
   map <- list(ln_kappa = factor(rep(NA, 2 * n_comp)))
 
+  # ---- Warm start from a fit at another range ----
+  # warm.start$parlist is the named list of every parameter at that fit's
+  # optimum (fixed effects, smooth SDs and coefficients, and the field values
+  # at their conditional modes), in the shapes sdmTMB expects. sdmTMB applies
+  # control$start name by name AFTER building its own defaults (and after
+  # previous_fit, sdmTMB 1.2.0 sdmTMB() source), so passing the whole list
+  # as start starts every parameter there. ln_kappa is then put back to THIS
+  # range: without that the fit would start, and because ln_kappa is mapped
+  # (fixed), stay, at the other range, and the range check below would stop.
+  # The parameter shapes must match, which they do when the formula, family,
+  # spatial.varying and rows are the same; sdmTMB stops on a mismatch.
+  if (!is.null(warm.start)) {
+    start <- utils::modifyList(warm.start$parlist, start)
+  }
+
   # ---- One sdmTMB call, used for the build, the fit and any refit ----
   # Defined once so the three calls cannot drift apart. The model:
   #  - offset: the log segment area column, so the model is for density;
@@ -495,7 +527,7 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   fit.it <- function(start, map, do.fit = TRUE) {
     args <- list(formula = formula, data = dat, mesh = mesh, family = sdmtmb.family(family),
                  offset = offset, time = "season_num", spatial = "off", spatiotemporal = "off",
-                 spatial_varying = ~ 0 + Season, do_fit = do.fit,
+                 spatial_varying = spatial.varying, do_fit = do.fit,
                  control = sdmTMB::sdmTMBcontrol(start = start, map = map, parallel = nthreads))
     # Warm start: previous_fit makes sdmTMB start every parameter, fixed and
     # random, at that fit's estimates. Used by the detection-function

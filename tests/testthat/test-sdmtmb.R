@@ -74,6 +74,27 @@ test_that("tweedie: the range stays fixed and the fit carries its attributes", {
   expect_type(attr(fit_tw, "sanity_failed"), "character")
 })
 
+test_that("a warm start from another range lands on the new range and the cold fit's optimum", {
+  form <- sdmtmb.dsm.formula("depth")
+  cold <- fit.sdmtmb.dsm(form, dat, mesh, "tw", range.km = 90)
+  warm <- fit.sdmtmb.dsm(form, dat, mesh, "tw", range.km = 90, warm.start = fit_tw)
+  rp <- sdmTMB::tidy(warm, "ran_pars")
+  expect_equal(unique(rp$estimate[rp$term == "range"]), 90, tolerance = 1e-6)
+  # Same model, same data: the optimum must not depend on where it started.
+  expect_equal(as.numeric(stats::logLik(warm)), as.numeric(stats::logLik(cold)), tolerance = 1e-4)
+  expect_error(fit.sdmtmb.dsm(form, dat, mesh, "tw", range.km = 90, warm.start = fit_tw,
+                              previous.fit = fit_tw), "not both")
+})
+
+test_that("spatial.varying is passed through", {
+  # One field shared by all seasons instead of one per season: a single
+  # spatial_varying column, so a single field SD in the random-effect pars.
+  f1 <- fit.sdmtmb.dsm(sdmtmb.dsm.formula("depth"), dat, mesh, "tw", range.km = 60,
+                       spatial.varying = ~ 1)
+  expect_identical(ncol(f1$tmb_data$z_i), 1L)
+  expect_identical(ncol(fit_tw$tmb_data$z_i), 4L)
+})
+
 test_that("the surface sums platform levels the way get_index does", {
   grid <- expand.grid(cell = 1:50, Season = seasons, stringsAsFactors = FALSE)
   set.seed(2)
