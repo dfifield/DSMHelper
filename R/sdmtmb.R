@@ -425,7 +425,10 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 #' @param dat Data from [prepare.sdmtmb.data()].
 #' @param mesh From [bind.sdmtmb.mesh()], bound to `dat`.
 #' @param family Family key for [sdmtmb.family()].
-#' @param range.km The fixed range, km (150 for NL_EXPL_DRL_RA, #130 trial 1b).
+#' @param range.km The fixed range, km (150 for NL_EXPL_DRL_RA, #130 trial 1b),
+#'   or `NULL` to estimate it (sdmTMB's own starting value). An estimated
+#'   range followed the mesh down on real data (#130 trial 5); `NULL` exists
+#'   for the #142 simulation, which tests why.
 #' @param offset Offset column (log segment area).
 #' @param positive.smooths Keep a delta model's positive-part smooths.
 #' @param refit.collapsed Refit once with collapsed smooths fixed off when the
@@ -445,7 +448,9 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 #'   season; set per model in `sdmtmb.mod.specs`.
 #' @param nthreads TMB threads (`sdmTMBcontrol(parallel = )`).
 #' @return The fitted `sdmTMB`, with attributes `fit_min` (minutes, all fits
-#'   included), `refit_note` (`NULL` if no refit) and `sanity_failed`.
+#'   included), `refit_note` (`NULL` if no refit), `sanity_failed` and
+#'   `range_km` (the range of each component, km: `range.km` when fixed, the
+#'   estimate when `range.km = NULL`).
 #' @examples
 #' \dontrun{
 #' fit <- fit.sdmtmb.dsm(sdmtmb.dsm.formula(), dat, mesh, "tw", range.km = 150)
@@ -462,7 +467,7 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   checkmate::expect_names(names(dat), must.include = c("Season", "season_num", offset))
   checkmate::expect_class(mesh, "sdmTMBmesh")
   checkmate::expect_choice(family, c("tw", "nb", "dg", "dl"))
-  checkmate::expect_number(range.km, lower = 0, finite = TRUE)
+  checkmate::expect_number(range.km, lower = 0, finite = TRUE, null.ok = TRUE)
   checkmate::expect_flag(positive.smooths)
   checkmate::expect_flag(refit.collapsed)
   checkmate::expect_number(collapsed.sd, lower = 0)
@@ -493,8 +498,16 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   # is also what the spatial_varying fields use), row 2 for the spatiotemporal
   # field (switched off here, but the parameter still exists). Both rows are
   # given the fixed value and mapped to NA, so neither is estimated.
-  start <- list(ln_kappa = matrix(log(sqrt(8) / range.km), nrow = 2, ncol = n_comp))
-  map <- list(ln_kappa = factor(rep(NA, 2 * n_comp)))
+  # range.km = NULL leaves start and map empty: ln_kappa is then estimated
+  # from sdmTMB's default start (the #142 free-range candidates). The smooth
+  # fixes below add to these lists, and work the same on empty ones.
+  if (is.null(range.km)) {
+    start <- list()
+    map <- list()
+  } else {
+    start <- list(ln_kappa = matrix(log(sqrt(8) / range.km), nrow = 2, ncol = n_comp))
+    map <- list(ln_kappa = factor(rep(NA, 2 * n_comp)))
+  }
 
   # ---- Warm start from a fit at another range ----
   # warm.start$parlist is the named list of every parameter at that fit's
@@ -600,13 +613,20 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   # A mistake in the start/map above would let the range be estimated with no
   # error from sdmTMB, and every later result would quietly depend on it. So
   # read the range back from each component's random-effect parameters and
-  # require it to equal range.km to 1 part in a million.
+  # require it to equal range.km to 1 part in a million. With range.km =
+  # NULL there is nothing to check, and the estimate is what is recorded.
+  # tidy(model = k) reports the range in the mesh's units (km here) as the
+  # term "range"; one value per component, since the per-season fields of a
+  # component share ln_kappa row 1.
+  range.fit <- numeric(n_comp)
   for (k in seq_len(n_comp)) {
     rp <- sdmTMB::tidy(fit, "ran_pars", model = k)
     r <- rp$estimate[rp$term == "range"]
-    if (!length(r) || any(abs(r / range.km - 1) > 1e-6))
+    if (!length(r)) stop(sprintf("component %d reports no range", k))
+    if (!is.null(range.km) && any(abs(r / range.km - 1) > 1e-6))
       stop(sprintf("range meant to be fixed at %g km, but component %d reports %s", range.km, k,
                    paste(signif(r, 4), collapse = ", ")))
+    range.fit[k] <- r[1]
   }
 
   # ---- Record diagnostics on the fit ----
@@ -617,6 +637,7 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   san <- sdmTMB::sanity(fit, silent = TRUE)
   attr(fit, "sanity_failed") <- setdiff(names(san)[!unlist(san)], "all_ok")
   attr(fit, "refit_note") <- refit_note
+  attr(fit, "range_km") <- range.fit
   attr(fit, "fit_min") <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
   fit
 }
@@ -641,6 +662,18 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' right is open, so both are returned. Each uncertainty step can fail where
 #' the surface does not (it needs the joint precision), so each runs on its
 #' own: a failure leaves its columns `NA` and is recorded in `notes`.
+#'
+#' @details
+#' **Random intercepts** (iid, such as `(1 | cruise_day)`; added in 0.42.0 for
+#' the #142 simulation) have levels a prediction grid cannot have. Every
+#' prediction here is then made with them at 0 (`re_form_iid = NA`, the median
+#' level), and multiplied by `exp(sum(sigma^2) / 2)`, the mean over levels of
+#' a log-link Gaussian random intercept. The surface, `get_index()`'s totals and
+#' each draw are multiplied by the same factor; the draws get no level noise.
+#' The factor uses the point estimate of each sigma, so the standard errors and
+#' the draws leave out the uncertainty in sigma, and understate the
+#' uncertainty of the mean-level surface by that much. Only a single log-link
+#' component is handled; a delta model with random intercepts stops.
 #'
 #' @param fit Fitted `sdmTMB` ([fit.sdmtmb.dsm()]).
 #' @param grid One row per cell x season, with no `platform` column: `x`, `y`
@@ -725,6 +758,42 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     NULL
   })
 
+  # ---- iid random intercepts: predict at the mean level ----
+  # A model with a random intercept, such as (1 | cruise_day) in the #142
+  # simulation, has levels (cruise-days) the grid cannot have: the surface is
+  # wanted for no day in particular. re_form_iid = NA predicts with every
+  # random intercept at 0, the median level, and needs no grouping column in
+  # newdata (checked on sdmTMB 1.2.0). The mean over levels of exp(eta + u),
+  # u ~ N(0, sigma^2), is exp(eta) * exp(sigma^2 / 2), so each prediction is
+  # multiplied by re_mult = exp(sum of sigma^2 / 2) over the intercepts: the
+  # surface, get_index()'s totals (and their CI limits; the SE of the log
+  # total is unchanged, treating sigma as known) and the draws. That is exact
+  # only for a single log-link component, so a delta model with random
+  # intercepts stops here rather than being silently mis-scaled.
+  # tidy(fit, "ran_pars") lists each random intercept's SD as the term
+  # "sd__(Intercept)" with its grouping variable in group_name; every other
+  # row (range, phi, sigma_Z, the smooths' "sd__s(...)") has group_name NA.
+  # A model with no random intercepts has no group_name column at all
+  # (sdmTMB 1.2.0), so read it as all-NA then.
+  rp_all <- as.data.frame(sdmTMB::tidy(fit, "ran_pars"))
+  grp <- if ("group_name" %in% names(rp_all)) rp_all$group_name else rep(NA_character_, nrow(rp_all))
+  re <- rp_all[!is.na(grp), , drop = FALSE]
+  re$group_name <- grp[!is.na(grp)]
+  re_mult <- 1
+  re_args <- list()
+  if (nrow(re)) {
+    if (!all(re$term == "sd__(Intercept)"))
+      stop("get.sdmtmb.surface: only iid random intercepts are handled; the model has ",
+           paste(unique(re$term), collapse = ", "))
+    if (isTRUE(fit$family$delta) || !identical(fit$family$link, "log"))
+      stop("get.sdmtmb.surface: random intercepts are handled for a single log-link component only")
+    re_mult <- exp(sum(re$estimate^2) / 2)
+    re_args <- list(re_form_iid = NA)
+    notes <- c(notes, sprintf("random intercept(s) %s at the mean level: x%.4g",
+                              paste(sprintf("%s (sd %.3g)", re$group_name, re$estimate), collapse = ", "),
+                              re_mult))
+  }
+
   # ---- Plug-in surface ----
   # type = "response" gives exp(linear predictor) in p$est: the density at the
   # parameter estimates. For a log-normal quantity this is the median, not the
@@ -734,8 +803,10 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # cell: it groups by row_of and returns a 1-column matrix in row_of order
   # (reorder = TRUE sorts the groups, which here is 1..n, the grid order), so
   # [, 1] gives a vector aligned with grid.
-  p <- stats::predict(fit, newdata = g, offset = off0, type = "response")
-  n_cell <- rowsum(p$est * g$area, row_of, reorder = TRUE)[, 1]
+  # re_args adds re_form_iid = NA for a model with random intercepts, and
+  # re_mult (1 otherwise) moves the median level to the mean (see above).
+  p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
+  n_cell <- rowsum(p$est * re_mult * g$area, row_of, reorder = TRUE)[, 1]
   # Free the prediction (one row per stacked grid row, several columns):
   # hundreds of thousands of rows on Atl IMRP.
   rm(p)
@@ -750,7 +821,13 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # newdata/offset/area are passed directly; predict(return_tmb_object = TRUE)
   # is deprecated in sdmTMB 1.2.0.
   index <- function(bc) {
-    ix <- sdmTMB::get_index(fit, newdata = g, area = g$area, offset = off0, bias_correct = bc)
+    # predict_args passes re_form_iid = NA through to get_index()'s own
+    # predict() call for a model with random intercepts.
+    ix <- sdmTMB::get_index(fit, newdata = g, area = g$area, offset = off0, bias_correct = bc,
+                            predict_args = re_args)
+    # Median level to mean level (re_mult = 1 without random intercepts). The
+    # interval limits scale with the estimate; se (of the log total) does not.
+    for (cl in intersect(c("est", "lwr", "upr"), names(ix))) ix[[cl]] <- ix[[cl]] * re_mult
     # get_index() labels its rows by season_num (1, 2, ...); translate back.
     ix$Season <- season.levels[ix$season_num]
     ix
@@ -768,13 +845,15 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     # predict(nsim = ) draws parameters from their joint (Gaussian)
     # approximation and returns a matrix of linear predictors: one row per
     # stacked grid row, one column per draw (log density, since offset is 0).
-    draws <- step("draws", stats::predict(fit, newdata = g, offset = off0, nsim = nsim))
+    draws <- step("draws", do.call(stats::predict, c(list(fit, newdata = g, offset = off0, nsim = nsim),
+                                                     re_args)))
     if (!is.null(draws)) {
-      # exp() to density, x area to abundance, then sum the platform copies of
-      # each cell (rowsum works on every column at once): Nd is cells x draws.
-      # Platform levels must be summed within each draw, before any quantile,
-      # because a quantile of a sum is not the sum of quantiles.
-      Nd <- rowsum(exp(draws) * g$area, row_of, reorder = TRUE)
+      # exp() to density (times re_mult, the mean random-intercept level), x
+      # area to abundance, then sum the platform copies of each cell (rowsum
+      # works on every column at once): Nd is cells x draws. Platform levels
+      # must be summed within each draw, before any quantile, because a
+      # quantile of a sum is not the sum of quantiles.
+      Nd <- rowsum(exp(draws) * re_mult * g$area, row_of, reorder = TRUE)
       rm(draws)
       # Per cell, the 2.5% and 97.5% quantiles across draws. apply() over rows
       # returns a 2 x cells matrix, so t() makes it cells x 2.

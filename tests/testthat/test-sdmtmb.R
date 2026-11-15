@@ -74,6 +74,72 @@ test_that("tweedie: the range stays fixed and the fit carries its attributes", {
   expect_type(attr(fit_tw, "sanity_failed"), "character")
 })
 
+test_that("a fixed range gives the same fit and surface as 0.41.0", {
+  # 0.42.0 added range.km = NULL and random-intercept prediction; with a fixed
+  # range and no random intercept nothing may change. Reference values from
+  # DSMHelper 0.41.0 on this same data, mesh and call (sdmTMB 1.2.0, TMB
+  # 1.9.x, R 4.6.1, 2026-11-15): log-likelihood, the first six fixed
+  # parameters, and the seasonal totals with and without bias correction.
+  expect_equal(as.numeric(stats::logLik(fit_tw)), -1056.8840778245, tolerance = 1e-8)
+  expect_equal(unname(fit_tw$model$par[1:6]),
+               c(-1.6669772525, -1.7378645435, -1.5665760242, -1.6320518621, 0.5064366246, 12.7924570265),
+               tolerance = 1e-6)
+  expect_equal(attr(fit_tw, "range_km"), 60, tolerance = 1e-6)
+  grid <- expand.grid(cell = 1:50, Season = seasons, stringsAsFactors = FALSE)
+  set.seed(2)
+  grid$x <- rep(stats::runif(50, 0, 2e5), 4)
+  grid$y <- rep(stats::runif(50, 0, 2e5), 4)
+  grid$depth <- grid$x / 1000
+  grid$area <- 4
+  s <- get.sdmtmb.surface(fit_tw, grid, seasons, cell.col = "cell")
+  expect_equal(s$totals$N, c(132.26928727, 112.47607336, 129.69491764, 137.21921789), tolerance = 1e-6)
+  expect_equal(s$totals$N_plain, c(131.21015367, 111.50019030, 128.34065368, 136.06093161), tolerance = 1e-6)
+})
+
+test_that("range.km = NULL estimates the range and records it", {
+  free <- fit.sdmtmb.dsm(sdmtmb.dsm.formula("depth"), dat, mesh, "tw", range.km = NULL)
+  rp <- sdmTMB::tidy(free, "ran_pars")
+  r <- unique(rp$estimate[rp$term == "range"])
+  expect_length(r, 1)
+  expect_equal(attr(free, "range_km"), r)
+  # Estimated, so not left at the fixed value of the other fits.
+  expect_false(isTRUE(all.equal(r, 60, tolerance = 1e-3)))
+  # Estimating a parameter can only raise the maximised likelihood.
+  expect_gte(as.numeric(stats::logLik(free)), as.numeric(stats::logLik(fit_tw)) - 1e-6)
+})
+
+test_that("a random intercept is predicted at its mean level", {
+  # Eight groups (as cruise-days in #142) with a real group effect.
+  d2 <- dat
+  d2$grp <- factor(rep_len(1:8, nrow(d2)))
+  set.seed(3)
+  d2$abundance.est <- d2$abundance.est * exp(stats::rnorm(8, 0, 0.8))[d2$grp]
+  f.re <- stats::as.formula(paste(deparse(sdmtmb.dsm.formula("depth"), width.cutoff = 500L), "+ (1 | grp)"))
+  fit_re <- fit.sdmtmb.dsm(f.re, d2, mesh, "tw", range.km = 60)
+  rp <- sdmTMB::tidy(fit_re, "ran_pars")
+  sig <- rp$estimate[rp$term == "sd__(Intercept)" & rp$group_name == "grp"]
+  expect_length(sig, 1)
+  grid <- expand.grid(cell = 1:20, Season = seasons, stringsAsFactors = FALSE)
+  grid$x <- rep(seq(1e4, 1.9e5, length.out = 20), 4)
+  grid$y <- 5e4
+  grid$depth <- grid$x / 1000
+  grid$area <- 4
+  # The grid has no grp column: the surface must not need one.
+  s <- get.sdmtmb.surface(fit_re, grid, seasons, cell.col = "cell", nsim = 10, bias.correct = FALSE)
+  # By hand: each platform level predicted at the median level (re_form_iid =
+  # NA), times exp(sigma^2 / 2), summed over the levels, times area.
+  g <- prepare.sdmtmb.data(grid[rep(seq_len(nrow(grid)), 2), ], seasons)
+  g$platform <- factor(rep(levels(fit_re$data$platform), each = nrow(grid)), levels = levels(fit_re$data$platform))
+  p <- stats::predict(fit_re, newdata = g, offset = rep(0, nrow(g)), type = "response", re_form_iid = NA)
+  by.hand <- rowsum(p$est * exp(sig^2 / 2) * g$area, rep(seq_len(nrow(grid)), 2))[, 1]
+  expect_equal(unname(s$cells$N), unname(by.hand), tolerance = 1e-8)
+  # get_index()'s plain total is scaled by the same factor, so it still equals
+  # the cells' sum; the draws were taken (scaled per draw, no level noise).
+  expect_equal(s$totals$N_plain, s$totals$N_median_sum, tolerance = 1e-8)
+  expect_false(anyNA(s$cells$lo))
+  expect_match(paste(s$notes, collapse = " "), "random intercept")
+})
+
 test_that("a warm start from another range lands on the new range and the cold fit's optimum", {
   form <- sdmtmb.dsm.formula("depth")
   cold <- fit.sdmtmb.dsm(form, dat, mesh, "tw", range.km = 90)

@@ -58,6 +58,17 @@ the log total 1.4-4.2x \code{get_index()}'s standard error on NL ATPU; which is
 right is open, so both are returned. Each uncertainty step can fail where
 the surface does not (it needs the joint precision), so each runs on its
 own: a failure leaves its columns \code{NA} and is recorded in \code{notes}.
+
+\strong{Random intercepts} (iid, such as \code{(1 | cruise_day)}; added in 0.42.0 for
+the #142 simulation) have levels a prediction grid cannot have. Every
+prediction here is then made with them at 0 (\code{re_form_iid = NA}, the median
+level), and multiplied by \code{exp(sum(sigma^2) / 2)}, the mean over levels of
+a log-link Gaussian random intercept. The surface, \code{get_index()}'s totals and
+each draw are multiplied by the same factor; the draws get no level noise.
+The factor uses the point estimate of each sigma, so the standard errors and
+the draws leave out the uncertainty in sigma, and understate the
+uncertainty of the mean-level surface by that much. Only a single log-link
+component is handled; a delta model with random intercepts stops.
 }
 \examples{
 \dontrun{

@@ -29,7 +29,10 @@ fit.sdmtmb.dsm(
 
 \item{family}{Family key for \code{\link[=sdmtmb.family]{sdmtmb.family()}}.}
 
-\item{range.km}{The fixed range, km (150 for NL_EXPL_DRL_RA, #130 trial 1b).}
+\item{range.km}{The fixed range, km (150 for NL_EXPL_DRL_RA, #130 trial 1b),
+or \code{NULL} to estimate it (sdmTMB's own starting value). An estimated
+range followed the mesh down on real data (#130 trial 5); \code{NULL} exists
+for the #142 simulation, which tests why.}
 
 \item{offset}{Offset column (log segment area).}
 
@@ -59,7 +62,9 @@ season; set per model in \code{sdmtmb.mod.specs}.}
 }
 \value{
 The fitted \code{sdmTMB}, with attributes \code{fit_min} (minutes, all fits
-included), \code{refit_note} (\code{NULL} if no refit) and \code{sanity_failed}.
+included), \code{refit_note} (\code{NULL} if no refit), \code{sanity_failed} and
+\code{range_km} (the range of each component, km: \code{range.km} when fixed, the
+estimate when \code{range.km = NULL}).
 }
 \description{
 One Matern field per season (\code{spatial_varying = ~ 0 + Season}, \code{time = "season_num"}, no shared spatial or spatiotemporal field), the range fixed
