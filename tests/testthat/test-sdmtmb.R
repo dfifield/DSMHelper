@@ -178,7 +178,15 @@ test_that("the surface sums platform levels the way get_index does", {
   expect_equal(as.vector(resc[s$totals$Season]), s$totals$N, tolerance = 1e-8)
   expect_true(all(s$cells$lo <= s$cells$hi))
   expect_true(all(s$totals$lo_draws < s$totals$hi_draws))
+  # Second-order cells: (1 + v/2) >= 1, so never below the plug-in, and they
+  # sum to N_so_sum.
+  expect_true(all(s$cells$N_so >= s$cells$N))
+  so <- tapply(s$cells$N_so, s$cells$Season, sum)
+  expect_equal(as.vector(so[s$totals$Season]), s$totals$N_so_sum, tolerance = 1e-8)
   expect_length(s$notes, 0)
+  # Without draws there is no second-order surface.
+  s0 <- get.sdmtmb.surface(fit_tw, grid, seasons, cell.col = "cell", bias.correct = FALSE)
+  expect_true(all(is.na(s0$cells$N_so)))
   expect_error(get.sdmtmb.surface(fit_tw, transform(grid, platform = "WD"), seasons), "platform")
   expect_error(get.sdmtmb.surface(fit_tw, rbind(grid, grid[1, ]), seasons, cell.col = "cell"), "more than one row")
 })

@@ -32,8 +32,9 @@ and \code{FALSE}.}
 }
 \value{
 List: \code{cells} (the grid's cell id, \code{Season}, \code{N}, \code{N_rescaled},
-\code{lo}, \code{hi}), \code{totals} (per season: \code{N} and \code{se_log} bias-corrected,
-\code{N_plain} and \code{se_log_plain}, \code{N_median_sum}, \code{lo_draws}, \code{hi_draws}),
+\code{N_so}, \code{lo}, \code{hi}), \code{totals} (per season: \code{N} and \code{se_log}
+bias-corrected, \code{N_plain} and \code{se_log_plain}, \code{N_median_sum}, \code{N_so_sum},
+\code{lo_draws}, \code{hi_draws}),
 \code{notes}, \code{pred_min}.
 }
 \description{
@@ -48,6 +49,14 @@ a log-normal, not the mean.
 \item \code{N_rescaled}, \code{N} scaled per season so it sums to the bias-corrected
 total: the median's shape at the mean's level. #130 trial 6 found per-cell
 means from draws unusable, so this is the proposed map product.
+\item with \code{nsim > 0}, \code{N_so}, the second-order mean surface: each row's
+density times (1 + v/2), v its variance of log density over the draws,
+summed over platform levels (0.43.0). \code{N} and \code{N_rescaled} are too low
+away from survey effort, where the field reverts to its prior and its
+median falls ever further below its mean; \code{N_rescaled} fixes the level
+but not that shape. #130 found held-out plug-in predictions 2-3x too low
+beyond 25 km from training effort on Atl IMRP. \code{v} from \code{nsim} draws has a
+relative standard error of about sqrt(2 / (nsim - 1)) per row.
 \item with \code{nsim > 0}, \code{lo}/\code{hi}, the 2.5\% and 97.5\% quantiles of the per-cell
 abundance over draws, each draw summed over platform levels first.
 }

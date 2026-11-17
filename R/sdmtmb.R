@@ -653,6 +653,14 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' * `N_rescaled`, `N` scaled per season so it sums to the bias-corrected
 #'   total: the median's shape at the mean's level. #130 trial 6 found per-cell
 #'   means from draws unusable, so this is the proposed map product.
+#' * with `nsim > 0`, `N_so`, the second-order mean surface: each row's
+#'   density times (1 + v/2), v its variance of log density over the draws,
+#'   summed over platform levels (0.43.0). `N` and `N_rescaled` are too low
+#'   away from survey effort, where the field reverts to its prior and its
+#'   median falls ever further below its mean; `N_rescaled` fixes the level
+#'   but not that shape. #130 found held-out plug-in predictions 2-3x too low
+#'   beyond 25 km from training effort on Atl IMRP. `v` from `nsim` draws has a
+#'   relative standard error of about sqrt(2 / (nsim - 1)) per row.
 #' * with `nsim > 0`, `lo`/`hi`, the 2.5% and 97.5% quantiles of the per-cell
 #'   abundance over draws, each draw summed over platform levels first.
 #'
@@ -686,8 +694,9 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' @param bias.correct Which `get_index()` totals to compute: any of `TRUE`
 #'   and `FALSE`.
 #' @return List: `cells` (the grid's cell id, `Season`, `N`, `N_rescaled`,
-#'   `lo`, `hi`), `totals` (per season: `N` and `se_log` bias-corrected,
-#'   `N_plain` and `se_log_plain`, `N_median_sum`, `lo_draws`, `hi_draws`),
+#'   `N_so`, `lo`, `hi`), `totals` (per season: `N` and `se_log`
+#'   bias-corrected, `N_plain` and `se_log_plain`, `N_median_sum`, `N_so_sum`,
+#'   `lo_draws`, `hi_draws`),
 #'   `notes`, `pred_min`.
 #' @examples
 #' \dontrun{
@@ -806,7 +815,10 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # re_args adds re_form_iid = NA for a model with random intercepts, and
   # re_mult (1 otherwise) moves the median level to the mean (see above).
   p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
-  n_cell <- rowsum(p$est * re_mult * g$area, row_of, reorder = TRUE)[, 1]
+  # dens: plug-in density per stacked row, kept for the second-order surface
+  # in the draws block below (one numeric vector, not the whole prediction).
+  dens <- p$est * re_mult
+  n_cell <- rowsum(dens * g$area, row_of, reorder = TRUE)[, 1]
   # Free the prediction (one row per stacked grid row, several columns):
   # hundreds of thousands of rows on Atl IMRP.
   rm(p)
@@ -839,7 +851,7 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
 
   # ---- Optional draws: per-cell and per-total intervals ----
   # Default: no draws, so the interval columns are NA.
-  lo <- hi <- rep(NA_real_, nrow(grid))
+  lo <- hi <- n_so <- rep(NA_real_, nrow(grid))
   tot_d <- NULL
   if (nsim > 0) {
     # predict(nsim = ) draws parameters from their joint (Gaussian)
@@ -848,6 +860,24 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     draws <- step("draws", do.call(stats::predict, c(list(fit, newdata = g, offset = off0, nsim = nsim),
                                                      re_args)))
     if (!is.null(draws)) {
+      # Second-order surface (0.43.0). v is each stacked row's variance of the
+      # log density over the draws; dens * (1 + v/2) is the second-order mean
+      # of a log-normal at that row, which #130 trial 6b found calibrated in
+      # sample where the plug-in is low and the draw mean high. It matters
+      # most away from survey effort, where the field's conditional variance
+      # approaches its marginal one: on Atl IMRP's held-out data the plug-in
+      # fell to 1/2-1/3 of the observed beyond 25 km from training effort
+      # (Atlantic-DSM R/Check_sdmtmb_heldout_distance.R). Summed over the
+      # platform copies of each cell like N. Rows in draws are stacked grid
+      # rows, so v lines up with dens and g$area element by element.
+      # Row variance in base R. draws - rowMeans(draws) subtracts each row's
+      # mean from that row: the matrix is stored column by column, so a
+      # vector as long as one column recycles down each column in row order.
+      # It makes one temporary copy of draws (about 200 MB at 256,000 stacked
+      # rows x 100 draws).
+      v <- rowSums((draws - rowMeans(draws))^2) / (ncol(draws) - 1)
+      n_so <- rowsum(dens * (1 + v / 2) * g$area, row_of, reorder = TRUE)[, 1]
+      rm(v)
       # exp() to density (times re_mult, the mean random-intercept level), x
       # area to abundance, then sum the platform copies of each cell (rowsum
       # works on every column at once): Nd is cells x draws. Platform levels
@@ -880,6 +910,8 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
                    N = pick(ix_bc, s, "est"), se_log = pick(ix_bc, s, "se"),
                    N_plain = pick(ix_plain, s, "est"), se_log_plain = pick(ix_plain, s, "se"),
                    N_median_sum = sum(n_cell[season == s]),
+                   # Sum of the second-order cells (NA without draws).
+                   N_so_sum = sum(n_so[season == s]),
                    lo_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.025)),
                    hi_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.975)))
   })
@@ -891,7 +923,8 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # index failed, N is NA, and so is N_rescaled.
   scale <- totals$N / totals$N_median_sum
   cells <- tibble::tibble(Season = factor(season, levels = season.levels), N = n_cell,
-                          N_rescaled = n_cell * scale[match(season, totals$Season)], lo = lo, hi = hi)
+                          N_rescaled = n_cell * scale[match(season, totals$Season)], N_so = n_so,
+                          lo = lo, hi = hi)
   # Identify each cell as the caller did: by its coordinates, or by cell.col.
   # setNames() names the column after cell.col, avoiding rlang's `:=`.
   # Every vector above is in grid row order, so the id columns line up.
