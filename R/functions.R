@@ -2301,7 +2301,9 @@ ds.eda <-
     if (do.final.only == TRUE) {
       vars <- all.vars(df.spec$final.formula)
     } else {
-      vars <- df.spec$candidate.covars
+      # candidate.covars may hold groups of alternatives (a list, see
+      # gen.form.N()); plot every covariate named in it once
+      vars <- unique(unlist(df.spec$candidate.covars))
     }
 
     # plot individual covars
@@ -5846,9 +5848,13 @@ create.model.name <- function(key, form, adj) {
         herm = "hp",
         poly = "sp")[adj]
   } else {
-    # Convert formula to dotted notation
+    # Convert formula to dotted notation: "Season + size + Windspeed" ->
+    # "Season.size.Windspeed", the label gen.form.N() gave the file. Every
+    # " + " must go: str_replace() (first match only) was used until 0.44.0
+    # and turned a three-term formula into "Season.size + Windspeed", so
+    # 01.03 found no file for it (Atlantic-DSM #168).
     form <-
-      stringr::str_replace(as.character(form)[2], stringr::fixed(" + "), ".")
+      stringr::str_replace_all(as.character(form)[2], stringr::fixed(" + "), ".")
   }
   # Deal with adjustment that might be NULL with ifelse()
   nam <- paste0(key, ifelse(is.null(form), "", paste0(".", form)))
@@ -6599,20 +6605,39 @@ fit.adjustment.series <- function(data,
 }
 
 
-#' Generate all n-way covariate combinations for a key function
+#' Generate all n-term covariate combinations for a key function
 #'
-#' Produces a data frame of model specifications with all C(length(covars), n)
-#' covariate combinations for the given key function.
+#' Produces a data frame of model specifications with every way of choosing
+#' \code{n} covariate TERMS from \code{covars} for the given key function.
 #'
-#' @param n Integer number of covariates to include per model (\code{0} for
-#'   intercept-only).
+#' A term is either a single covariate or a group of alternatives
+#' (Atlantic-DSM issue #168). With \code{covars} a character vector each
+#' element is its own term, exactly as before. With \code{covars} a list, an
+#' element that is a character vector of length > 1 is a group of
+#' ALTERNATIVES: a formula takes at most one of them. So
+#' \code{list("Season", "size", c("Windspeed", "SeaStateGrp"))} gives, for
+#' \code{n = 1}, \code{~Season}, \code{~size}, \code{~Windspeed} and
+#' \code{~SeaStateGrp}, but never \code{~Windspeed + SeaStateGrp}. Over all
+#' \code{n} the number of formulas per key is \code{prod(1 + lengths(groups))}
+#' (see \code{\link{n.candidate.formulas}}).
+#'
+#' @param n Integer number of covariate terms to include per model (\code{0}
+#'   for intercept-only).
 #' @param key Character string key function (e.g. \code{"hn"}).
-#' @param covars Character vector of candidate covariate names.
+#' @param covars Character vector of candidate covariate names, or a list
+#'   whose elements are covariate names or character vectors of alternatives.
 #' @return Data frame with columns \code{form}, \code{label}, \code{key}, and
-#'   \code{adj}.
+#'   \code{adj}. Labels join the covariates with dots in the order the terms
+#'   appear in \code{covars} (e.g. \code{hr.Season.size.Windspeed}), which is
+#'   what \code{\link{create.model.name}} rebuilds from a formula.
+#' @examples
+#' gen.form.N(2, "hr", list("Season", "size", c("Windspeed", "SeaStateGrp")))
 #' @export
 gen.form.N <- function(n, key, covars){
-  require(utils)
+  checkmate::assert_count(n)
+  checkmate::assert_string(key)
+  if (n > 0) checkmate::assert(checkmate::check_character(covars, min.len = 1),
+                               checkmate::check_list(covars, types = "character", min.len = 1))
 
   # if n == 0 then no covars, just key function.
   if (n == 0) {
@@ -6625,14 +6650,194 @@ gen.form.N <- function(n, key, covars){
     ))
   }
 
-  # get all combinations of chooseing n items from covars
-  covarList <- combn(covars, n, simplify = F)
+  # Normalise to a list of terms; a plain character vector means one
+  # single-covariate term per element (the behaviour before groups existed).
+  groups <- as.list(covars)
+  if (n > length(groups))
+    stop(sprintf("gen.form.N: n = %d but only %d covariate term(s)", n, length(groups)))
 
-  plyr::ldply(covarList, function(item) {
+  # Every way of choosing n TERMS (indices into groups, kept in input order),
+  # then, within each choice, every combination of one alternative per chosen
+  # group. expand.grid() gives one row per combination with one column per
+  # chosen group, so each row is one formula's covariates in term order.
+  term.sets <- utils::combn(seq_along(groups), n, simplify = FALSE)
+  items <- unlist(lapply(term.sets, function(idx) {
+    alts <- expand.grid(groups[idx], stringsAsFactors = FALSE)
+    lapply(seq_len(nrow(alts)), function(r) unlist(alts[r, ], use.names = FALSE))
+  }), recursive = FALSE)
+
+  # One row per formula: the formula text, and a filename label joining the
+  # covariates with dots (labels must not contain "_", which do.ds() splits
+  # result file names on).
+  do.call(rbind, lapply(items, function(item) {
     data.frame(form = paste("~", paste(item, collapse = " + ")), key = key,
-               label = paste(key, paste(item, collapse = "."), sep = "."), adj = "", stringsAsFactors = F)
+               label = paste(key, paste(item, collapse = "."), sep = "."), adj = "",
+               stringsAsFactors = FALSE)
+  }))
+}
+
+
+#' Number of covariate formulas per key function
+#'
+#' How many covariate candidates \code{\link{do.ds}} generates for each key
+#' function that takes covariates (hn, hr), intercept-only included:
+#' \code{prod(1 + lengths(groups))}. Each term either is absent or contributes
+#' one of its alternatives. For a plain character vector of k covariates this
+#' is \code{2^k}, as before groups existed.
+#'
+#' @param covars Character vector or list of covariate terms, as for
+#'   \code{\link{gen.form.N}}.
+#' @return Integer count.
+#' @examples
+#' n.candidate.formulas(c("Season", "size"))                                # 4
+#' n.candidate.formulas(list("Season", "size", c("Windspeed", "SeaStateGrp"))) # 12
+#' @export
+n.candidate.formulas <- function(covars) {
+  if (is.null(covars) || !length(covars)) return(1L)
+  as.integer(prod(1 + lengths(as.list(covars))))
+}
+
+
+#' Add the weather covariates used by the detection-function candidates
+#'
+#' Fills missing wind speed and adds a 2-level sea-state factor to the
+#' observation data, so that every candidate detection function is fitted to
+#' the SAME rows (AIC compares models only on identical data) and every bird
+#' keeps a detection probability. A bird a ddf drops for a missing covariate
+#' has no p, and \code{dsm()} then silently sets its whole segment's count to
+#' 0 (Atlantic-DSM #107 recorded the mechanism). Atlantic-DSM issue #168.
+#'
+#' Call it on \code{the.data$distdata} wherever distdata enters a ddf: before
+#' the candidate and final fits (\code{Generic_1_ddf_fitting.Rmd}) and before
+#' \code{01.90} predicts p for the fishing-affected birds it adds back
+#' (\code{Generic_1.90_dsm_data.Rmd}), so fitting and prediction see the same
+#' values.
+#'
+#' \code{Windspeed} (knots) is filled in this order, and \code{WindSource}
+#' records which step supplied each value:
+#' \enumerate{
+#'   \item \code{"recorded"}: as in the data. For ECSAS this already includes
+#'     values converted from Beaufort force, which \code{create.survey.data()}
+#'     (ship) and \code{00.01} (aerial) fill in before this runs;
+#'   \item \code{"beaufort"}: from \code{Windforce} through
+#'     \code{beaufort.table}, for anything still missing;
+#'   \item \code{"seastate"}: the median recorded wind speed for the row's sea
+#'     state (\code{wind.by.seastate}, built by
+#'     \code{R/Make_wind_by_seastate.R} in Atlantic-DSM);
+#'   \item \code{"neighbour"}: copied from the observation nearest in time
+#'     recorded by the same observer on the same date (in practice the same
+#'     ship and cruise), for rows with neither wind nor sea state.
+#' }
+#'
+#' \code{SeaStateGrp} is a factor with levels \code{"0-2"} and \code{"3+"}
+#' (labels follow \code{seastate.high.from}). Sea state is ordinal, not a
+#' ratio scale, so it enters as a factor; two levels keep it to one parameter.
+#' A row with no sea state is grouped by its wind speed
+#' (\code{>= wind.high.kt} is high), or by its neighbour as above.
+#'
+#' @param distdata Observation data frame with \code{SeaState} and
+#'   \code{Windspeed}; \code{Windforce}, \code{Date}, \code{ObserverName} and
+#'   \code{ObsTime} are used when present.
+#' @param wind.by.seastate Data frame with columns \code{SeaState} and
+#'   \code{wind_kt} (\code{WIND_BY_SEASTATE} in analysis_settings.R).
+#' @param seastate.high.from First sea-state code of the high group.
+#' @param wind.high.kt Wind speed (knots) from which a row with no sea state
+#'   is put in the high group.
+#' @param beaufort.table Optional data frame with columns \code{beaufort} and
+#'   \code{speed.kts} (\code{beaufort_conversion}).
+#' @return \code{distdata} with \code{Windspeed} filled and two new columns,
+#'   \code{SeaStateGrp} (factor) and \code{WindSource} (character). Stops if any
+#'   row is left without either value, naming the watches.
+#' @examples
+#' d <- data.frame(SeaState = c(1, NA, 4, NA), Windspeed = c(8, 18, NA, NA),
+#'                 Windforce = NA, Date = as.Date("2020-06-01"),
+#'                 ObserverName = "A", ObsTime = as.POSIXct("2020-06-01 10:00") + 0:3 * 600)
+#' add.weather.covars(d, data.frame(SeaState = 0:9, wind_kt = c(6, 10, 12, 15.8, 20, 25, 30, 35, 35, 44)))
+#' @export
+add.weather.covars <- function(distdata, wind.by.seastate, seastate.high.from = 3,
+                               wind.high.kt = 15, beaufort.table = NULL) {
+  checkmate::assert_data_frame(distdata)
+  checkmate::assert_names(names(distdata), must.include = c("SeaState", "Windspeed"))
+  checkmate::assert_data_frame(wind.by.seastate, min.rows = 1)
+  checkmate::assert_names(names(wind.by.seastate), must.include = c("SeaState", "wind_kt"))
+  checkmate::assert_count(seastate.high.from, positive = TRUE)
+  checkmate::assert_number(wind.high.kt, lower = 0)
+  if (!is.null(beaufort.table)) {
+    checkmate::assert_data_frame(beaufort.table)
+    checkmate::assert_names(names(beaufort.table), must.include = c("beaufort", "speed.kts"))
   }
-  )
+
+  d <- distdata
+  n <- nrow(d)
+  if (n == 0) {
+    d$SeaStateGrp <- factor(character(0), levels = c(sprintf("0-%d", seastate.high.from - 1),
+                                                      sprintf("%d+", seastate.high.from)))
+    d$WindSource <- character(0)
+    return(d)
+  }
+  ws <- as.numeric(d$Windspeed)
+  ss <- as.numeric(d$SeaState)
+  src <- ifelse(!is.na(ws), "recorded", NA_character_)
+
+  # 2. Beaufort force -> knots, where wind speed is still missing
+  if (!is.null(beaufort.table) && "Windforce" %in% names(d)) {
+    i <- is.na(ws) & !is.na(d$Windforce)
+    ws[i] <- beaufort.table$speed.kts[match(as.numeric(d$Windforce[i]), beaufort.table$beaufort)]
+    src[i & !is.na(ws)] <- "beaufort"
+  }
+
+  # 3. Sea state -> median recorded wind speed for that code
+  i <- is.na(ws) & !is.na(ss)
+  ws[i] <- wind.by.seastate$wind_kt[match(ss[i], wind.by.seastate$SeaState)]
+  src[i & !is.na(ws)] <- "seastate"
+
+  # Sea-state group: from the code where recorded, else from wind speed. TRUE
+  # = high group. A sea-state code missing from wind.by.seastate (e.g. a code
+  # never seen) still gets a group here, since only the cut matters.
+  high <- ss >= seastate.high.from
+  i <- is.na(high) & !is.na(ws)
+  high[i] <- ws[i] >= wind.high.kt
+
+  # 4. Neighbour: rows still missing either value take both from the nearest
+  # complete observation by the same observer on the same date. Few rows
+  # (7 of ~151,000 NL ship rows), so a plain loop is fine.
+  miss <- which(is.na(ws) | is.na(high))
+  if (length(miss) && all(c("Date", "ObserverName") %in% names(d))) {
+    day.obs <- paste(as.Date(d$Date), d$ObserverName)
+    tt <- if ("ObsTime" %in% names(d) && inherits(d$ObsTime, "POSIXt"))
+      as.numeric(d$ObsTime) else rep(NA_real_, n)
+    ok <- !is.na(ws) & !is.na(high)
+    for (r in miss) {
+      cand <- which(ok & day.obs == day.obs[r])
+      if (!length(cand)) next
+      # nearest in time when both times are known, else the first that day
+      dt <- abs(tt[cand] - tt[r])
+      j <- if (all(is.na(dt))) cand[1] else cand[which.min(dt)]
+      ws[r] <- ws[j]; high[r] <- high[j]; src[r] <- "neighbour"
+    }
+  }
+
+  left <- which(is.na(ws) | is.na(high))
+  if (length(left)) {
+    ids <- if ("WatchID" %in% names(d)) unique(d$WatchID[left]) else left
+    stop(sprintf(paste("add.weather.covars: %d row(s) have no wind speed or sea state and no",
+                       "same-observer, same-day neighbour to take them from. Watches/rows: %s.",
+                       "Fill or drop them explicitly before fitting."),
+                 length(left), paste(utils::head(ids, 20), collapse = ", ")))
+  }
+
+  d$Windspeed <- ws
+  d$SeaStateGrp <- factor(ifelse(high, sprintf("%d+", seastate.high.from),
+                                 sprintf("0-%d", seastate.high.from - 1)),
+                          levels = c(sprintf("0-%d", seastate.high.from - 1),
+                                     sprintf("%d+", seastate.high.from)))
+  d$WindSource <- src
+  tab <- table(factor(src, levels = c("recorded", "beaufort", "seastate", "neighbour")))
+  message(sprintf("add.weather.covars: %d rows; wind speed %s; sea-state group %s",
+                  n, paste(sprintf("%s %d", names(tab), tab), collapse = ", "),
+                  paste(sprintf("%s %d", levels(d$SeaStateGrp), tabulate(d$SeaStateGrp, 2)),
+                        collapse = ", ")))
+  d
 }
 
 #' Fit all candidate distance sampling models
@@ -6692,6 +6897,7 @@ do.ds <-
         if (k == "unif")
           gen.form.N(0, k, NULL)
         else
+          # 0..number of TERMS; a group of alternatives counts as one term
           purrr::map_dfr(0:length(covars), gen.form.N, k, covars)
       }, covars = covars)
 
@@ -12719,6 +12925,7 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
     p_se = stats$DetSE, p_cv = stats$DetCV, gof_p = stats$ChisquareP,
     chi = stats$ChiScores, chi_first_max = NA, nadj = NA_integer_,
     opt_flag = "", n_par = NA_integer_, mono = NA, hr_spike = NA,
+    weather_term = "", weather_beta = NA_real_, weather_se = NA_real_,
     n_p_low = NA_integer_, min_p = NA_real_, max_adj_size = NA_real_,
     season_n = "", season_p = "", min_season_n = NA_integer_,
     obs = list(NULL), expected = list(NULL), bins = list(NULL),
@@ -12746,6 +12953,21 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
   d <- m$ddf
   row$n_par <- length(d$par)
   row$hr_spike <- parts$key == "hr" && d$par[1] < sqrt(.Machine$double.eps)
+
+  # Weather covariate (Atlantic-DSM #168): its scale coefficient and SE. mrds
+  # names scale coefficients after the model-matrix columns, so a numeric
+  # covariate is "Windspeed" and the 2-level factor's non-baseline level is
+  # "SeaStateGrp3+" (baseline "0-2"). Rough weather should make detection
+  # fall off faster, i.e. a NEGATIVE coefficient; flag.ddf.candidates() raises
+  # weather-pos when it isn't. The SE comes from the inverse Hessian, as in
+  # size.sensitivity(); a singular Hessian leaves it NA.
+  w <- grep("^(Windspeed|SeaStateGrp)", names(d$par))
+  if (length(w)) {
+    row$weather_term <- names(d$par)[w[1]]
+    row$weather_beta <- unname(d$par[w[1]])
+    vc <- tryCatch(solve(d$hessian), error = function(e) NULL)
+    if (!is.null(vc)) row$weather_se <- sqrt(diag(vc))[w[1]]
+  }
 
   srch <- attr(m, "adj.search")
   if (!is.null(srch)) {
@@ -12806,7 +13028,10 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' chi-square contribution); \code{not-monotone}; \code{params>3}; \code{low-p}
 #' (any per-observation p below the threshold used in
 #' \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
-#' than \code{min.season.n} observations).
+#' than \code{min.season.n} observations); \code{weather-pos} (a weather
+#' covariate - wind speed or the sea-state group - with a positive scale
+#' coefficient, i.e. birds detected farther away in rougher weather, which is
+#' implausible) and \code{weather-weak} (its coefficient within 2 SE of 0).
 #'
 #' Choice flags: \code{no-choice}; \code{not-a-candidate}; \code{no-note}
 #' (more than 2 AIC behind the best with an empty note); \code{p-spread} (the
@@ -12888,6 +13113,9 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     flag(get("n_par", NA) > max.par, "params>3"),
     flag(get("n_p_low", NA) > 0, "low-p"),
     flag(get("min_season_n", NA) < min.season.n, "sparse-season"),
+    # weather checks (#168): columns from collect.ddf.candidates()
+    flag(get("weather_beta", NA) > 0, "weather-pos"),
+    flag(abs(get("weather_beta", NA)) < 2 * get("weather_se", NA), "weather-weak"),
     # size checks: columns from size.sensitivity(), when joined in
     flag(get("size_beta", NA) < 0, "size-neg"),
     flag(abs(get("size_beta", NA)) < 2 * get("size_se", NA), "size-weak"),

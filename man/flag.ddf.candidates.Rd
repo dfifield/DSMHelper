@@ -83,7 +83,10 @@ candidates within \code{close.aic}); \code{hr-spike}; \code{gof}
 chi-square contribution); \code{not-monotone}; \code{params>3}; \code{low-p}
 (any per-observation p below the threshold used in
 \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
-than \code{min.season.n} observations).
+than \code{min.season.n} observations); \code{weather-pos} (a weather
+covariate - wind speed or the sea-state group - with a positive scale
+coefficient, i.e. birds detected farther away in rougher weather, which is
+implausible) and \code{weather-weak} (its coefficient within 2 SE of 0).
 
 Choice flags: \code{no-choice}; \code{not-a-candidate}; \code{no-note}
 (more than 2 AIC behind the best with an empty note); \code{p-spread} (the
