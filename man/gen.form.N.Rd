@@ -2,23 +2,41 @@
 % Please edit documentation in R/functions.R
 \name{gen.form.N}
 \alias{gen.form.N}
-\title{Generate all n-way covariate combinations for a key function}
+\title{Generate all n-term covariate combinations for a key function}
 \usage{
 gen.form.N(n, key, covars)
 }
 \arguments{
-\item{n}{Integer number of covariates to include per model (\code{0} for
-intercept-only).}
+\item{n}{Integer number of covariate terms to include per model (\code{0}
+for intercept-only).}
 
 \item{key}{Character string key function (e.g. \code{"hn"}).}
 
-\item{covars}{Character vector of candidate covariate names.}
+\item{covars}{Character vector of candidate covariate names, or a list
+whose elements are covariate names or character vectors of alternatives.}
 }
 \value{
 Data frame with columns \code{form}, \code{label}, \code{key}, and
-\code{adj}.
+\code{adj}. Labels join the covariates with dots in the order the terms
+appear in \code{covars} (e.g. \code{hr.Season.size.Windspeed}), which is
+what \code{\link{create.model.name}} rebuilds from a formula.
 }
 \description{
-Produces a data frame of model specifications with all C(length(covars), n)
-covariate combinations for the given key function.
+Produces a data frame of model specifications with every way of choosing
+\code{n} covariate TERMS from \code{covars} for the given key function.
+}
+\details{
+A term is either a single covariate or a group of alternatives
+(Atlantic-DSM issue #168). With \code{covars} a character vector each
+element is its own term, exactly as before. With \code{covars} a list, an
+element that is a character vector of length > 1 is a group of
+ALTERNATIVES: a formula takes at most one of them. So
+\code{list("Season", "size", c("Windspeed", "SeaStateGrp"))} gives, for
+\code{n = 1}, \code{~Season}, \code{~size}, \code{~Windspeed} and
+\code{~SeaStateGrp}, but never \code{~Windspeed + SeaStateGrp}. Over all
+\code{n} the number of formulas per key is \code{prod(1 + lengths(groups))}
+(see \code{\link{n.candidate.formulas}}).
+}
+\examples{
+gen.form.N(2, "hr", list("Season", "size", c("Windspeed", "SeaStateGrp")))
 }
