@@ -56,7 +56,7 @@ test_that("flag.ddf.candidates raises the checklist codes", {
   expect_match(f[["hn.cos"]], "bin1")
   expect_match(f[["hn.cos"]], "not-monotone")
   expect_match(f[["hn.Season"]], "p-outlier")
-  expect_match(f[["hn.Season"]], "params>3")
+  expect_match(f[["hn.Season"]], "shape>3")   # no n_cov column: all 4 parameters count
   expect_match(f[["hn.Season"]], "low-p")
   expect_match(f[["hn.Season"]], "sparse-season")
   expect_equal(f[["hr.size"]], "failed")

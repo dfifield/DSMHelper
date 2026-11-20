@@ -12895,7 +12895,12 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
     stop("collect.ddf.candidates: no candidate files under ", results.dir)
   dplyr::bind_rows(rows) %>%
     dplyr::group_by(species, ddftype) %>%
-    dplyr::mutate(delta_aic = AIC - min(AIC, na.rm = TRUE),
+    # BIC = AIC + n_par * (log(n) - 2): a penalty of log(n) per parameter
+    # (about 8.5 at n = 5,000) instead of AIC's 2. A model that wins on both is
+    # safe; one that wins on AIC only is where "does p change" decides (#168).
+    dplyr::mutate(BIC = AIC + n_par * (log(n) - 2),
+                  delta_aic = AIC - min(AIC, na.rm = TRUE),
+                  delta_bic = BIC - min(BIC, na.rm = TRUE),
                   rank = rank(AIC, na.last = "keep", ties.method = "min")) %>%
     dplyr::ungroup() %>%
     dplyr::arrange(species, ddftype, failed, AIC)
@@ -12924,7 +12929,7 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
     failed = FALSE, AIC = stats$AIC, n = stats$NObs, p = stats$DetProb,
     p_se = stats$DetSE, p_cv = stats$DetCV, gof_p = stats$ChisquareP,
     chi = stats$ChiScores, chi_first_max = NA, nadj = NA_integer_,
-    opt_flag = "", n_par = NA_integer_, mono = NA, hr_spike = NA,
+    opt_flag = "", n_par = NA_integer_, n_cov = NA_integer_, mono = NA, hr_spike = NA,
     weather_term = "", weather_beta = NA_real_, weather_se = NA_real_,
     n_p_low = NA_integer_, min_p = NA_real_, max_adj_size = NA_real_,
     season_n = "", season_p = "", min_season_n = NA_integer_,
@@ -12952,6 +12957,12 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
   m <- env$model
   d <- m$ddf
   row$n_par <- length(d$par)
+  # Covariate coefficients: the scale's design-matrix columns minus its
+  # intercept (0 for a model without covariates). n_par - n_cov is then the
+  # shape part - scale intercept, hazard-rate shape and adjustment terms -
+  # which is what the "about 3 parameters" advice is about (#168).
+  dm <- d$ds$aux$ddfobj$scale$dm
+  row$n_cov <- if (is.null(dm)) 0L else as.integer(ncol(dm) - 1)
   row$hr_spike <- parts$key == "hr" && d$par[1] < sqrt(.Machine$double.eps)
 
   # Weather covariate (Atlantic-DSM #168): its scale coefficient and SE. mrds
@@ -13025,7 +13036,17 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' \code{p-outlier} (p more than \code{p.outlier} from the median p of the
 #' candidates within \code{close.aic}); \code{hr-spike}; \code{gof}
 #' (\code{gof_p < gof.alpha}); \code{bin1} (the first bin has the largest
-#' chi-square contribution); \code{not-monotone}; \code{params>3}; \code{low-p}
+#' chi-square contribution); \code{not-monotone}; \code{shape>3} (more than
+#' \code{max.par} shape parameters: scale intercept, hazard-rate shape and
+#' adjustment terms, i.e. \code{n_par - n_cov}; covariate coefficients are not
+#' counted, because each covariate level brings its own histogram);
+#' \code{gof-df0} (the pooled chi-square has no degrees of freedom left, bins
+#' - 1 - n_par <= 0, so its p-value says nothing: read \code{gof-season});
+#' \code{gof-season} (the per-season chi-square of \code{\link{ddf.season.fit}},
+#' from \code{season_gof_p}, below \code{gof.alpha}); \code{term-no-p} (some
+#' covariate term changes neither the average p nor any season's p by more
+#' than \code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
+#' \code{low-p}
 #' (any per-observation p below the threshold used in
 #' \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
 #' than \code{min.season.n} observations); \code{weather-pos} (a weather
@@ -13046,7 +13067,10 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #'   \code{p-outlier}.
 #' @param p.outlier Absolute p difference for \code{p-outlier}.
 #' @param gof.alpha Threshold for \code{gof}.
-#' @param max.par Parameter count above which \code{params>3} is raised.
+#' @param max.par Shape-parameter count above which \code{shape>3} is raised.
+#' @param term.p.change Relative change in p (average or any season) below
+#'   which dropping a covariate term counts as making no difference
+#'   (\code{term-no-p}).
 #' @param min.season.n Season size for \code{sparse-season}.
 #' @param p.spread Relative p spread for \code{p-spread}.
 #' @param size.p.change Change in average p, after dropping the largest flocks
@@ -13078,7 +13102,7 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
                                 gof.alpha = 0.05, max.par = 3, min.season.n = 20,
                                 p.spread = 0.05, size.p.change = 0.02, bin1.tol = 0.15,
                                 season.p.spread = 0.3, min.n = 250,
-                                fishing.species = character(0)) {
+                                fishing.species = character(0), term.p.change = 0.02) {
   checkmate::assert_data_frame(cands, min.rows = 1)
   checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model",
                                                           "failed", "AIC", "delta_aic", "p"))
@@ -13093,6 +13117,9 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     dplyr::pull(.m)
   # observed / expected count in the first distance bin
   first <- function(x) if (length(x)) x[1] else NA_real_
+  # number of distance bins, from the observed counts per bin
+  n.bins <- if ("obs" %in% names(cands))
+    vapply(cands$obs, function(x) if (length(x)) length(x) else NA_real_, 0) else rep(NA_real_, nrow(cands))
   bin1.ratio <- if (all(c("obs", "expected") %in% names(cands)))
     vapply(cands$obs, first, 0) / vapply(cands$expected, first, 0) else rep(NA_real_, nrow(cands))
   # spread of per-season p, from collect.ddf.candidates()' "Fall 0.42; Spring 0.33" text
@@ -13110,7 +13137,12 @@ flag.ddf.candidates <- function(cands, choices, close.aic = 10, p.outlier = 0.1,
     flag(get("gof_p", NA) < gof.alpha, "gof"),
     flag(get("chi_first_max", NA), "bin1"),
     flag(!get("mono", NA), "not-monotone"),
-    flag(get("n_par", NA) > max.par, "params>3"),
+    # shape parameters only (n_par - n_cov); without n_cov, all parameters
+    flag(get("n_par", NA) - ifelse(is.na(get("n_cov", NA)), 0L, get("n_cov", NA)) > max.par, "shape>3"),
+    # pooled chi-square with no degrees of freedom left: bins - 1 - n_par <= 0
+    flag(n.bins - 1 - get("n_par", NA) <= 0, "gof-df0"),
+    flag(get("season_gof_p", NA) < gof.alpha, "gof-season"),
+    flag(get("drop_min_change", NA) < term.p.change, "term-no-p"),
     flag(get("n_p_low", NA) > 0, "low-p"),
     flag(get("min_season_n", NA) < min.season.n, "sparse-season"),
     # weather checks (#168): columns from collect.ddf.candidates()
@@ -13316,4 +13348,396 @@ size.sensitivity <- function(cands, cache.file, trim = 0.01,
   out$size_beta_trim <- cs2[1]; out$size_se_trim <- cs2[2]
   out$p_trim <- length(fp) / sum(1 / fp)
   out
+}
+
+
+#' Per-season fit of a binned detection function
+#'
+#' Splits a fitted binned \code{mrds} detection function's goodness of fit by
+#' Season: for each season, the observed count in each distance bin, the count
+#' the model expects there, the season's chi-square, its Horvitz-Thompson
+#' average p, and the season-average detection function to draw over the
+#' season's histogram. It is what the review page's per-season plots and the
+#' "season GOF" column are built from (Atlantic-DSM #168).
+#'
+#' Why it is needed: \code{plot()} of a fitted model and \code{mrds::ddf.gof()}
+#' pool every observation, so a model without Season can misfit each season in
+#' opposite directions and still look fine pooled, and a model WITH Season
+#' can't be checked season by season at all. With 4 ship bins the pooled
+#' chi-square also has \code{4 - 1 - n_par} degrees of freedom, none left once
+#' a covariate model has 3 or more parameters; split by season it has
+#' \code{S * (4 - 1) - n_par}.
+#'
+#' How: for observation i with covariates z_i, the probability that it falls
+#' in bin j, given that it was detected, is
+#' \eqn{\int_{bin j} g(x|z_i) dx / \int_{left}^{W} g(x|z_i) dx}. Each integral is
+#' \code{predict(ddf, int.range = ...)}, which returns \eqn{\int g / W} for
+#' any key, adjustment series or covariates (with \code{esw = FALSE};
+#' \code{esw = TRUE} multiplies by the range length a second time). Summing
+#' these probabilities over a season's observations gives its expected counts,
+#' and over all observations it reproduces \code{ddf.gof()}'s expected counts
+#' exactly (checked on NL_EXPL_DRL_RA LHSP ship-flying for hr ~ Season + size +
+#' Windspeed, hn.cos, hr ~ Season, unif.cos and hn ~ SeaStateGrp).
+#'
+#' The curve for a season is the Horvitz-Thompson average
+#' \eqn{\bar g(x) = \sum_i g(x|z_i)/p_i / \sum_i 1/p_i}: the detection function
+#' of the season's population rather than of its detections. Scaled by
+#' \eqn{p_s W / n_s}, the season's histogram has the same area as that curve,
+#' and the mean of the curve over a bin is exactly that bin's expected bar.
+#'
+#' @param ddf A fitted binned \code{ds} detection function (\code{model$ddf}).
+#' @param curve.n Number of distances at which the season curves are evaluated.
+#' @param curve.max.obs At most this many observations per season are used for
+#'   the curve (an evenly spaced subset; the expected counts always use all).
+#' @return A list: \code{breaks}; \code{seasons} (names, "all" when the data
+#'   have no Season column); \code{obs} and \code{expected} (seasons x bins
+#'   matrices of counts); \code{n} and \code{p} (per season); \code{chi}
+#'   (per-season chi-square); \code{chi_total}, \code{df} (seasons x (bins - 1)
+#'   minus the number of parameters) and \code{gof_p}; \code{curve_x} and
+#'   \code{curve} (seasons x \code{curve.n} matrix of the season-average g).
+#' @examples
+#' \dontrun{
+#' load("AIC_1234.5_hr.Season.RData")   # gives `model`
+#' sf <- ddf.season.fit(model$ddf)
+#' sf$chi; sf$gof_p
+#' }
+#' @export
+ddf.season.fit <- function(ddf, curve.n = 30, curve.max.obs = 1500) {
+  checkmate::assert_class(ddf, "ds")
+  checkmate::assert_count(curve.n, positive = TRUE)
+  checkmate::assert_count(curve.max.obs, positive = TRUE)
+  br <- ddf$meta.data$breaks
+  if (is.null(br) || !isTRUE(ddf$meta.data$binned))
+    stop("ddf.season.fit: the detection function is not binned")
+
+  dat <- ddf$data
+  n.all <- nrow(dat)
+  nb <- length(br) - 1
+  left <- ddf$meta.data$left
+  W <- ddf$meta.data$width
+  if (is.null(left)) left <- 0
+
+  # predict() wrapper: integral of g over [a, b] for every row of nd, divided
+  # by W (see the description). a and b are recycled to nrow(nd).
+  int.g <- function(nd, a, b) {
+    k <- nrow(nd)
+    stats::predict(ddf, newdata = nd, compute = TRUE, esw = FALSE,
+                   int.range = cbind(rep(a, length.out = k), rep(b, length.out = k)))$fitted
+  }
+
+  # 1. P(bin j | z_i, detected): an n x nb matrix, each row summing to 1. The
+  # bins tile [left, W], so the row sums are the integral over the full range.
+  I <- vapply(seq_len(nb), function(j) int.g(dat, br[j], br[j + 1]), numeric(n.all))
+  if (n.all == 1) I <- matrix(I, nrow = 1)
+  P <- I / rowSums(I)
+  # each observation's p over the full range is the same integral (int.g
+  # divides by W, and fitted() is that quantity)
+  p.i <- rowSums(I)
+
+  # 2. Observed bin of each observation. Binned ds data carry distbegin /
+  # distend; match on distbegin, which is one of the breaks.
+  bin.i <- match(round(dat$distbegin, 10), round(br[-length(br)], 10))
+  if (anyNA(bin.i)) stop("ddf.season.fit: distbegin values that are not bin starts")
+
+  # 3. Group by season (or one group "all")
+  season.i <- if ("Season" %in% names(dat)) as.character(dat$Season) else rep("all", n.all)
+  seasons <- sort(unique(season.i))
+  S <- length(seasons)
+  obs <- expd <- matrix(0, S, nb, dimnames = list(seasons, sprintf("%g-%g", br[-length(br)], br[-1])))
+  n.s <- p.s <- chi <- stats::setNames(numeric(S), seasons)
+  for (s in seq_len(S)) {
+    rows <- which(season.i == seasons[s])
+    obs[s, ] <- tabulate(bin.i[rows], nbins = nb)
+    expd[s, ] <- colSums(P[rows, , drop = FALSE])
+    n.s[s] <- length(rows)
+    # Horvitz-Thompson average p of the season: n / sum(1/p)
+    p.s[s] <- length(rows) / sum(1 / p.i[rows])
+    chi[s] <- sum((obs[s, ] - expd[s, ])^2 / expd[s, ])
+  }
+  # degrees of freedom: S multinomials with nb - 1 free cells each, minus the
+  # parameters estimated from them
+  n.par <- length(ddf$par)
+  df <- S * (nb - 1) - n.par
+  chi.total <- sum(chi)
+  gof.p <- if (df > 0) stats::pchisq(chi.total, df, lower.tail = FALSE) else NA_real_
+
+  # 4. Season-average g(x): g(x|z_i) ~ int.g over [x, x + dl] * W / dl, from a
+  # short interval above x (below it at x = W). An evenly spaced subset of at
+  # most curve.max.obs observations per season keeps this to a few seconds.
+  xs <- seq(left, W, length.out = curve.n)
+  dl <- (W - left) / 2000
+  curve <- matrix(NA_real_, S, curve.n, dimnames = list(seasons, NULL))
+  for (s in seq_len(S)) {
+    rows <- which(season.i == seasons[s])
+    if (length(rows) > curve.max.obs)
+      rows <- rows[unique(round(seq(1, length(rows), length.out = curve.max.obs)))]
+    nd <- dat[rows, , drop = FALSE]
+    w <- 1 / p.i[rows]
+    for (k in seq_along(xs)) {
+      a <- min(xs[k], W - dl)
+      g <- int.g(nd, a, a + dl) * W / dl
+      curve[s, k] <- sum(g * w) / sum(w)
+    }
+  }
+
+  list(breaks = br, seasons = seasons, obs = obs, expected = expd, n = n.s, p = p.s,
+       chi = chi, chi_total = chi.total, df = df, gof_p = gof.p,
+       curve_x = xs, curve = curve)
+}
+
+
+#' Draw a per-season fit from ddf.season.fit()
+#'
+#' One panel per season: the season's histogram (grey bars) scaled to the
+#' g(x) axis by the season's average p, the model's expected bars (dashed
+#' outline) and the season-average detection function (line). If the model
+#' fits that season, the grey bars match the dashed outline. Bars, outline and
+#' curve all enclose the same area, \eqn{p_s (W - left)}, so a season with low
+#' p has short bars because its curve is narrow, not because it has few birds.
+#'
+#' @param sf Output of \code{\link{ddf.season.fit}}.
+#' @param main Overall title, drawn above the panels.
+#' @param col Colour of the model's curve and expected bars.
+#' @return Nothing; draws on the current device (2 x 2 panels for 4 seasons).
+#' @examples
+#' \dontrun{
+#' draw.ddf.season.fit(ddf.season.fit(model$ddf), main = "hr.Season")
+#' }
+#' @export
+draw.ddf.season.fit <- function(sf, main = "", col = "firebrick") {
+  checkmate::assert_list(sf)
+  checkmate::assert_names(names(sf), must.include = c("breaks", "obs", "expected", "p", "curve"))
+  br <- sf$breaks
+  wid <- diff(br)
+  W <- max(br) - min(br)
+  S <- nrow(sf$obs)
+  nr <- ceiling(sqrt(S)); nc <- ceiling(S / nr)
+  op <- graphics::par(mfrow = c(nr, nc), mar = c(3.6, 3.6, 2.4, 0.8), mgp = c(2.2, 0.7, 0),
+                      oma = c(0, 0, if (nzchar(main)) 1.6 else 0, 0))
+  on.exit(graphics::par(op))
+  # bar heights on the g(x) scale: count / width, times p_s * W / n_s (see
+  # ddf.season.fit() for why that makes bars and curve enclose the same area)
+  scale <- sf$p * W / sf$n
+  h <- sweep(sweep(sf$obs, 2, wid, "/"), 1, scale, "*")
+  e <- sweep(sweep(sf$expected, 2, wid, "/"), 1, scale, "*")
+  ymax <- max(1.1, h, e, sf$curve, na.rm = TRUE) * 1.03
+  for (s in seq_len(S)) {
+    graphics::plot(NA, xlim = range(br), ylim = c(0, ymax), xlab = "Distance (km)", ylab = "g(x)",
+                   main = sprintf("%s: n %d, p %.3f, chi2 %.1f (%d df)", rownames(sf$obs)[s],
+                                  as.integer(sf$n[s]), sf$p[s], sf$chi[s], length(wid) - 1),
+                   cex.main = 0.9)
+    graphics::rect(br[-length(br)], 0, br[-1], h[s, ], col = "grey88", border = "grey55")
+    graphics::rect(br[-length(br)], 0, br[-1], e[s, ], border = col, lwd = 2, lty = 2)
+    graphics::lines(sf$curve_x, sf$curve[s, ], col = col, lwd = 2.2)
+    graphics::abline(h = 1, col = "grey70", lty = 3)
+  }
+  if (nzchar(main)) graphics::mtext(main, outer = TRUE, cex = 0.95, font = 2)
+  invisible(NULL)
+}
+
+
+#' Figures and per-season statistics for every candidate detection function
+#'
+#' For each fitted candidate from \code{\link{collect.ddf.candidates}}, writes
+#' three PNGs and returns the per-season statistics of
+#' \code{\link{ddf.season.fit}}. The review page links the PNGs from every
+#' candidate's details, so every candidate - not only the few within a small
+#' delta AIC - has its detection-function plot, its per-season fit and its
+#' per-observation p histogram (Atlantic-DSM #168: about 680 candidates for
+#' NL, too many to embed in one page).
+#'
+#' The files are \code{<out.dir>/<species>/<ddftype>/<model>_df.png}
+#' (\code{plot()} of the model, as on the species pages), \code{_season.png}
+#' (\code{\link{draw.ddf.season.fit}}) and \code{_p.png}. Work runs on
+#' \code{workers} parallel R processes and is cached in \code{cache.file},
+#' keyed by each model file's path and modification time, so a re-render only
+#' redraws candidates whose model changed (or whose PNGs are missing).
+#'
+#' @param cands Output of \code{\link{collect.ddf.candidates}}.
+#' @param out.dir Folder for the PNGs (created if needed); the review page
+#'   refers to them relative to its own folder.
+#' @param cache.file Path of the statistics cache (an \code{.rds} under
+#'   \code{RDataDir}).
+#' @param workers Parallel R processes. 1 runs in this session.
+#' @return A tibble, one row per fitted candidate: \code{species},
+#'   \code{ddftype}, \code{model}; \code{fig_df}, \code{fig_season},
+#'   \code{fig_p} (paths relative to \code{dirname(out.dir)}, "" when a figure
+#'   could not be drawn); \code{season_chi}, \code{season_df},
+#'   \code{season_gof_p}; list columns \code{season_p_num} (named per-season
+#'   p; \code{season_p} is collect.ddf.candidates()' text version),
+#'   \code{season_obs} (seasons x bins counts) and \code{breaks}; and
+#'   \code{fig_note} (the error, if the season fit failed).
+#' @examples
+#' \dontrun{
+#' figs <- ddf.review.figures(cands, file.path(ResultsDir, "ddf_review_files"),
+#'                            file.path(RDataDir, "ddf_review_figures.rds"))
+#' }
+#' @export
+ddf.review.figures <- function(cands, out.dir, cache.file,
+                               workers = max(1, parallel::detectCores() - 4)) {
+  checkmate::assert_data_frame(cands)
+  checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model", "failed", "rdata"))
+  checkmate::assert_string(out.dir)
+  checkmate::assert_string(cache.file)
+  checkmate::assert_count(workers, positive = TRUE)
+
+  # Bump when the figures or statistics change, so cached ones are redrawn.
+  FIG_VERSION <- 1L
+  todo <- cands[!cands$failed & file.exists(cands$rdata), c("species", "ddftype", "model", "rdata")]
+  if (!nrow(todo)) return(tibble::tibble())
+  dir.create(out.dir, recursive = TRUE, showWarnings = FALSE)
+  todo$rel <- file.path(basename(out.dir), todo$species, todo$ddftype, todo$model)
+  todo$abs <- file.path(dirname(out.dir), todo$rel)
+  todo$cache_key <- paste(todo$rdata, as.numeric(file.mtime(todo$rdata)), FIG_VERSION, sep = "|")
+
+  cache <- if (file.exists(cache.file)) readRDS(cache.file) else list()
+  have.png <- file.exists(paste0(todo$abs, "_season.png")) & file.exists(paste0(todo$abs, "_df.png"))
+  need <- which(!(todo$cache_key %in% names(cache)) | !have.png)
+  if (length(need)) {
+    jobs <- todo[need, ]
+    nw <- min(workers, nrow(jobs))
+    message(sprintf("ddf.review.figures: drawing %d candidate(s) on %d worker(s)", nrow(jobs), nw))
+    job.list <- split(jobs, seq_len(nrow(jobs)))
+    res <- if (nw == 1) {
+      lapply(job.list, .review.figures.one)
+    } else {
+      cl <- parallel::makeCluster(nw)
+      on.exit(parallel::stopCluster(cl), add = TRUE)
+      # workers need this session's library paths (renv), or Distance/mrds and
+      # DSMHelper are missing (the knitr-worker problem of Atlantic-DSM #159)
+      parallel::clusterCall(cl, function(p) invisible(.libPaths(p)), .libPaths())
+      parallel::parLapplyLB(cl, job.list, .review.figures.one)
+    }
+    names(res) <- jobs$cache_key
+    # keep only entries for current model files, so the cache doesn't grow
+    cache <- c(cache[names(cache) %in% todo$cache_key & !names(cache) %in% names(res)], res)
+    saveRDS(cache, cache.file)
+  }
+
+  out <- lapply(seq_len(nrow(todo)), function(i) {
+    r <- cache[[todo$cache_key[i]]]
+    rel <- function(suffix) {
+      f <- paste0(todo$rel[i], suffix)
+      if (file.exists(file.path(dirname(out.dir), f))) f else ""
+    }
+    tibble::tibble(species = todo$species[i], ddftype = todo$ddftype[i], model = todo$model[i],
+                   fig_df = rel("_df.png"), fig_season = rel("_season.png"), fig_p = rel("_p.png"),
+                   season_chi = r$season_chi, season_df = r$season_df,
+                   season_gof_p = r$season_gof_p, season_p_num = list(r$season_p),
+                   season_obs = list(r$season_obs), breaks = list(r$breaks),
+                   fig_note = r$note)
+  })
+  dplyr::bind_rows(out)
+}
+
+# One candidate for ddf.review.figures(): load the model, write its three
+# PNGs and return its per-season statistics. Runs on a cluster worker, so it
+# loads what it needs itself and never stops: a failure becomes a note.
+.review.figures.one <- function(job) {
+  out <- list(season_chi = NA_real_, season_df = NA_integer_, season_gof_p = NA_real_,
+              season_p = NULL, season_obs = NULL, breaks = NULL, note = "")
+  # A loaded model does not load its packages: without these namespaces,
+  # plot() and predict() would not find the dsmodel / ds methods on a worker.
+  requireNamespace("Distance", quietly = TRUE)
+  requireNamespace("mrds", quietly = TRUE)
+  e <- new.env()
+  ok <- tryCatch({ load(job$rdata, envir = e); TRUE }, error = function(err) FALSE)
+  if (!ok || is.null(e$model$ddf)) { out$note <- "could not load model"; return(out) }
+  dir.create(dirname(job$abs), recursive = TRUE, showWarnings = FALSE)
+
+  # PNG helper: a drawing error leaves no file (the page then shows none)
+  png.file <- function(file, width, height, draw) {
+    grDevices::png(file, width = width, height = height, units = "in", res = 90)
+    ok <- tryCatch({ draw(); TRUE }, error = function(err) FALSE)
+    grDevices::dev.off()
+    if (!ok) unlink(file)
+    ok
+  }
+
+  # 1. the overall plot, as plot(model) draws it on the species pages
+  png.file(paste0(job$abs, "_df.png"), 4.6, 3.6, function() {
+    graphics::par(mar = c(4, 4, 2.2, 1))
+    plot(e$model, main = job$model, cex.main = 0.9)
+  })
+  # 2. per-observation p
+  png.file(paste0(job$abs, "_p.png"), 4.6, 3.2, function() {
+    graphics::par(mar = c(4, 4, 2, 1))
+    graphics::hist(stats::fitted(e$model$ddf), breaks = 20, col = "grey80",
+                   main = "per-observation p", xlab = "p")
+  })
+  # 3. per-season fit and its statistics
+  sf <- tryCatch(suppressWarnings(ddf.season.fit(e$model$ddf)), error = function(err) err)
+  if (inherits(sf, "error")) { out$note <- paste("season fit failed:", conditionMessage(sf)); return(out) }
+  png.file(paste0(job$abs, "_season.png"), 8, 6.4, function()
+    draw.ddf.season.fit(sf, main = sprintf("%s   season chi2 %.1f on %d df", job$model,
+                                           sf$chi_total, as.integer(sf$df))))
+  out$season_chi <- sf$chi_total
+  out$season_df <- as.integer(sf$df)
+  out$season_gof_p <- sf$gof_p
+  out$season_p <- sf$p
+  out$season_obs <- sf$obs
+  out$breaks <- sf$breaks
+  out
+}
+
+
+#' What dropping each covariate term does to a candidate
+#'
+#' For each candidate with covariates, and each term in its formula, finds the
+#' candidate with the same key and that term removed, and reports the change
+#' in AIC, BIC and average p, and the largest change in any season's p. It is
+#' the review checklist's "does the extra term change p?" test (Atlantic-DSM
+#' #168): with thousands of detections AIC keeps a term whose effect is real
+#' but too small to matter for abundance, so a term that moves neither the
+#' average nor any season's p by much is a candidate for dropping, whatever
+#' its AIC.
+#'
+#' @param cands Output of \code{\link{collect.ddf.candidates}}, with
+#'   \code{BIC} and, from \code{\link{ddf.review.figures}}, \code{season_p_num}.
+#' @return \code{cands} with \code{drop_text} (one line per term, for the
+#'   page) and \code{drop_min_change} (over the formula's terms, the smallest
+#'   of max(|relative change in average p|, |largest relative change in a
+#'   season's p|): small means some term barely matters).
+#' @examples
+#' \dontrun{
+#' cands <- ddf.term.drop(cands)
+#' }
+#' @export
+ddf.term.drop <- function(cands) {
+  checkmate::assert_data_frame(cands)
+  checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model", "key",
+                                                          "formula", "failed", "AIC", "p"))
+  cands$drop_text <- ""
+  cands$drop_min_change <- NA_real_
+  terms.of <- function(f) if (is.na(f) || f == "~1") character(0) else attr(stats::terms(stats::as.formula(f)), "term.labels")
+  has.bic <- "BIC" %in% names(cands)
+  has.sp <- "season_p_num" %in% names(cands)
+  for (i in which(!cands$failed & !is.na(cands$formula) & cands$formula != "~1")) {
+    tt <- terms.of(cands$formula[i])
+    same <- which(cands$species == cands$species[i] & cands$ddftype == cands$ddftype[i] &
+                  cands$key == cands$key[i] & is.na(cands$adj) & !cands$failed)
+    lines <- character(0); changes <- numeric(0)
+    for (t in tt) {
+      rest <- setdiff(tt, t)
+      # the nested candidate: same key, the other terms (order-insensitive)
+      j <- same[vapply(same, function(k) setequal(terms.of(cands$formula[k]), rest), logical(1))]
+      if (!length(j)) { lines <- c(lines, sprintf("&minus;%s: not fitted", t)); next }
+      j <- j[1]
+      dp <- cands$p[j] / cands$p[i] - 1
+      ds <- NA_real_
+      if (has.sp && length(cands$season_p_num[[i]]) && length(cands$season_p_num[[j]])) {
+        a <- cands$season_p_num[[i]]; b <- cands$season_p_num[[j]][names(a)]
+        ds <- max(abs(b / a - 1), na.rm = TRUE)
+      }
+      changes <- c(changes, max(abs(dp), ds, na.rm = TRUE))
+      lines <- c(lines, sprintf("&minus;%s: &Delta;AIC %+.1f%s, p %+.1f%%%s", t,
+                                cands$AIC[j] - cands$AIC[i],
+                                if (has.bic) sprintf(", &Delta;BIC %+.1f", cands$BIC[j] - cands$BIC[i]) else "",
+                                100 * dp,
+                                if (is.na(ds)) "" else sprintf(", seasons up to %.1f%%", 100 * ds)))
+    }
+    cands$drop_text[i] <- paste(lines, collapse = "<br>")
+    if (length(changes)) cands$drop_min_change[i] <- min(changes)
+  }
+  cands
 }
