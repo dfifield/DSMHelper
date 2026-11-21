@@ -76,8 +76,20 @@ a log-link Gaussian random intercept. The surface, \code{get_index()}'s totals a
 each draw are multiplied by the same factor; the draws get no level noise.
 The factor uses the point estimate of each sigma, so the standard errors and
 the draws leave out the uncertainty in sigma, and understate the
-uncertainty of the mean-level surface by that much. Only a single log-link
-component is handled; a delta model with random intercepts stops.
+uncertainty of the mean-level surface by that much.
+
+A \strong{delta model} (logit presence x log positive mean; \code{delta_lognormal()},
+\code{delta_gamma()}) with random intercepts is handled since 0.46.0 (Atlantic-DSM
+#142). Each part has its own intercept SD, sigma1 and sigma2. The positive
+part's factor is \code{exp(sigma2^2 / 2)} as above, but on the logit link the
+mean over levels of \code{plogis(eta1 + u)} has no closed form, so it is
+integrated per row by Gauss-Hermite quadrature (\code{logitnormal.mean()}). The
+two parts' intercepts are treated as independent, which is how sdmTMB fits
+them. Each row's density is then multiplied by its own factor, so the
+\code{get_index()} totals are scaled by each season's ratio of mean-level to
+median-level plug-in totals, and each draw by its row's factor taken at the
+point estimates (exact for a single log-link part, where every row's factor
+is the same constant).
 }
 \examples{
 \dontrun{

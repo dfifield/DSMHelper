@@ -680,8 +680,20 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' each draw are multiplied by the same factor; the draws get no level noise.
 #' The factor uses the point estimate of each sigma, so the standard errors and
 #' the draws leave out the uncertainty in sigma, and understate the
-#' uncertainty of the mean-level surface by that much. Only a single log-link
-#' component is handled; a delta model with random intercepts stops.
+#' uncertainty of the mean-level surface by that much.
+#'
+#' A **delta model** (logit presence x log positive mean; `delta_lognormal()`,
+#' `delta_gamma()`) with random intercepts is handled since 0.46.0 (Atlantic-DSM
+#' #142). Each part has its own intercept SD, sigma1 and sigma2. The positive
+#' part's factor is `exp(sigma2^2 / 2)` as above, but on the logit link the
+#' mean over levels of `plogis(eta1 + u)` has no closed form, so it is
+#' integrated per row by Gauss-Hermite quadrature (`logitnormal.mean()`). The
+#' two parts' intercepts are treated as independent, which is how sdmTMB fits
+#' them. Each row's density is then multiplied by its own factor, so the
+#' `get_index()` totals are scaled by each season's ratio of mean-level to
+#' median-level plug-in totals, and each draw by its row's factor taken at the
+#' point estimates (exact for a single log-link part, where every row's factor
+#' is the same constant).
 #'
 #' @param fit Fitted `sdmTMB` ([fit.sdmtmb.dsm()]).
 #' @param grid One row per cell x season, with no `platform` column: `x`, `y`
@@ -774,54 +786,98 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # random intercept at 0, the median level, and needs no grouping column in
   # newdata (checked on sdmTMB 1.2.0). The mean over levels of exp(eta + u),
   # u ~ N(0, sigma^2), is exp(eta) * exp(sigma^2 / 2), so each prediction is
-  # multiplied by re_mult = exp(sum of sigma^2 / 2) over the intercepts: the
+  # multiplied by exp(sum of sigma^2 / 2) over the intercepts: the
   # surface, get_index()'s totals (and their CI limits; the SE of the log
   # total is unchanged, treating sigma as known) and the draws. That is exact
-  # only for a single log-link component, so a delta model with random
-  # intercepts stops here rather than being silently mis-scaled.
+  # for a single log-link component. A delta model (0.46.0) has a logit
+  # presence part, where the mean over levels has no closed form; it is
+  # integrated per row in the plug-in block below.
   # tidy(fit, "ran_pars") lists each random intercept's SD as the term
   # "sd__(Intercept)" with its grouping variable in group_name; every other
   # row (range, phi, sigma_Z, the smooths' "sd__s(...)") has group_name NA.
   # A model with no random intercepts has no group_name column at all
-  # (sdmTMB 1.2.0), so read it as all-NA then.
-  rp_all <- as.data.frame(sdmTMB::tidy(fit, "ran_pars"))
-  grp <- if ("group_name" %in% names(rp_all)) rp_all$group_name else rep(NA_character_, nrow(rp_all))
-  re <- rp_all[!is.na(grp), , drop = FALSE]
-  re$group_name <- grp[!is.na(grp)]
-  re_mult <- 1
-  re_args <- list()
-  if (nrow(re)) {
+  # (sdmTMB 1.2.0), so read it as all-NA then. For a delta model, tidy()
+  # reports one part at a time (model = 1 presence, model = 2 positive), and
+  # each part has its own SD (checked on sdmTMB 1.2.0 with a synthetic
+  # delta_lognormal fit, (1 | day): sd 0.70 for presence, 0.64 positive).
+  delta <- isTRUE(fit$family$delta)
+  n_comp <- if (delta) 2L else 1L
+  # re_sd[k]: SD of part k's total random intercept. Several iid intercepts in
+  # one part are independent normals, so their sum has SD sqrt(sum sigma^2).
+  re_sd <- numeric(n_comp)
+  re_desc <- character()
+  for (k in seq_len(n_comp)) {
+    rp_all <- as.data.frame(if (delta) sdmTMB::tidy(fit, "ran_pars", model = k) else sdmTMB::tidy(fit, "ran_pars"))
+    grp <- if ("group_name" %in% names(rp_all)) rp_all$group_name else rep(NA_character_, nrow(rp_all))
+    re <- rp_all[!is.na(grp), , drop = FALSE]
+    if (!nrow(re)) next
     if (!all(re$term == "sd__(Intercept)"))
       stop("get.sdmtmb.surface: only iid random intercepts are handled; the model has ",
            paste(unique(re$term), collapse = ", "))
-    if (isTRUE(fit$family$delta) || !identical(fit$family$link, "log"))
-      stop("get.sdmtmb.surface: random intercepts are handled for a single log-link component only")
-    re_mult <- exp(sum(re$estimate^2) / 2)
-    re_args <- list(re_form_iid = NA)
-    notes <- c(notes, sprintf("random intercept(s) %s at the mean level: x%.4g",
-                              paste(sprintf("%s (sd %.3g)", re$group_name, re$estimate), collapse = ", "),
-                              re_mult))
+    re_sd[k] <- sqrt(sum(re$estimate^2))
+    re_desc <- c(re_desc, sprintf("%s%s (sd %.3g)", grp[!is.na(grp)],
+                                  if (delta) c(" [presence]", " [positive]")[k] else "", re$estimate))
+  }
+  has_re <- length(re_desc) > 0
+  # re_form_iid = NA: every random intercept at 0 in predict() and get_index().
+  re_args <- if (has_re) list(re_form_iid = NA) else list()
+  if (has_re) {
+    # The two mean-level factors below assume these links: log for a single
+    # part; logit presence and log positive mean for a delta model. Anything
+    # else (e.g. delta_poisson_link(), log/log) stops rather than mis-scaling.
+    links <- as.character(fit$family$link)
+    ok_links <- if (delta) identical(links, c("logit", "log")) else identical(links, "log")
+    if (!ok_links)
+      stop("get.sdmtmb.surface: random intercepts are handled for a log link, or a logit/log delta model; ",
+           "this model's links are ", paste(links, collapse = "/"))
   }
 
   # ---- Plug-in surface ----
-  # type = "response" gives exp(linear predictor) in p$est: the density at the
-  # parameter estimates. For a log-normal quantity this is the median, not the
-  # mean, so these cells sum to less than the bias-corrected total.
+  # dens_med: density per stacked row at the parameter estimates, with every
+  # random intercept at 0. For a log-normal quantity this is the median, not
+  # the mean, so these cells sum to less than the bias-corrected total.
+  # dens: the same moved to the mean random-intercept level (equal to dens_med
+  # without random intercepts).
+  if (has_re && delta) {
+    # type = "link" gives each part's linear predictor: est1 = logit of the
+    # presence probability, est2 = log of the positive part's mean (checked on
+    # sdmTMB 1.2.0: plogis(est1) * exp(est2) equals type = "response"'s est).
+    p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "link"), re_args))
+    dens_med <- stats::plogis(p$est1) * exp(p$est2)
+    # Mean over day levels = E[plogis(est1 + u1)] x exp(est2) x E[exp(u2)],
+    # with u1 ~ N(0, re_sd[1]^2), u2 ~ N(0, re_sd[2]^2) independent.
+    dens <- logitnormal.mean(p$est1, re_sd[1]) * exp(p$est2) * exp(re_sd[2]^2 / 2)
+  } else {
+    # type = "response" gives exp(linear predictor) in p$est (for a delta
+    # model without random intercepts, presence x positive mean).
+    p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
+    dens_med <- p$est
+    dens <- p$est * exp(re_sd[1]^2 / 2)
+  }
+  # Free the prediction (one row per stacked grid row, several columns):
+  # hundreds of thousands of rows on Atl IMRP.
+  rm(p)
+  # mult: each stacked row's mean-level / median-level factor, used for the
+  # index and the draws below. A constant exp(sigma^2 / 2) for a single
+  # log-link part, 1 without random intercepts. A row whose median density
+  # underflows to 0 gets factor 1 (its mean-level density is then ~0 too).
+  mult <- ifelse(dens_med > 0, dens / dens_med, 1)
   # Abundance per stacked row = density x cell area (km^2; coastal cells are
   # smaller than the nominal cell). rowsum() sums the platform copies of each
   # cell: it groups by row_of and returns a 1-column matrix in row_of order
   # (reorder = TRUE sorts the groups, which here is 1..n, the grid order), so
   # [, 1] gives a vector aligned with grid.
-  # re_args adds re_form_iid = NA for a model with random intercepts, and
-  # re_mult (1 otherwise) moves the median level to the mean (see above).
-  p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
-  # dens: plug-in density per stacked row, kept for the second-order surface
-  # in the draws block below (one numeric vector, not the whole prediction).
-  dens <- p$est * re_mult
   n_cell <- rowsum(dens * g$area, row_of, reorder = TRUE)[, 1]
-  # Free the prediction (one row per stacked grid row, several columns):
-  # hundreds of thousands of rows on Atl IMRP.
-  rm(p)
+  # Per season, the ratio of mean-level to median-level plug-in totals, which
+  # scales get_index()'s totals below. Seasons of the stacked rows are
+  # season[row_of]; rowsum() gives one row per season, named by season.
+  season_g <- season[row_of]
+  re_ratio <- rowsum(dens * g$area, season_g)[, 1] / rowsum(dens_med * g$area, season_g)[, 1]
+  rm(dens_med)
+  if (has_re)
+    notes <- c(notes, sprintf("random intercept(s) %s at the mean level: plug-in totals x%s",
+                              paste(re_desc, collapse = ", "),
+                              paste(sprintf("%.4g", re_ratio), collapse = "/")))
 
   # ---- Seasonal totals with get_index() ----
   # get_index() sums density x area over the rows of each time value (season)
@@ -837,11 +893,12 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     # predict() call for a model with random intercepts.
     ix <- sdmTMB::get_index(fit, newdata = g, area = g$area, offset = off0, bias_correct = bc,
                             predict_args = re_args)
-    # Median level to mean level (re_mult = 1 without random intercepts). The
-    # interval limits scale with the estimate; se (of the log total) does not.
-    for (cl in intersect(c("est", "lwr", "upr"), names(ix))) ix[[cl]] <- ix[[cl]] * re_mult
     # get_index() labels its rows by season_num (1, 2, ...); translate back.
     ix$Season <- season.levels[ix$season_num]
+    # Median level to mean level: each season's re_ratio (1 without random
+    # intercepts), looked up by name. The interval limits scale with the
+    # estimate; se (of the log total) does not.
+    for (cl in intersect(c("est", "lwr", "upr"), names(ix))) ix[[cl]] <- ix[[cl]] * unname(re_ratio[ix$Season])
     ix
   }
   # Each version only if asked for (bias.correct can hold TRUE, FALSE or both);
@@ -878,12 +935,16 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
       v <- rowSums((draws - rowMeans(draws))^2) / (ncol(draws) - 1)
       n_so <- rowsum(dens * (1 + v / 2) * g$area, row_of, reorder = TRUE)[, 1]
       rm(v)
-      # exp() to density (times re_mult, the mean random-intercept level), x
-      # area to abundance, then sum the platform copies of each cell (rowsum
-      # works on every column at once): Nd is cells x draws. Platform levels
-      # must be summed within each draw, before any quantile, because a
-      # quantile of a sum is not the sum of quantiles.
-      Nd <- rowsum(exp(draws) * re_mult * g$area, row_of, reorder = TRUE)
+      # exp() to density (times mult, the row's mean random-intercept level
+      # factor at the point estimates), x area to abundance, then sum the
+      # platform copies of each cell (rowsum works on every column at once):
+      # Nd is cells x draws. mult and g$area are as long as one column of
+      # draws, so they recycle down each column in row order. For a delta
+      # model, draws are the combined log density (presence x positive), so
+      # the factor cannot be recomputed per draw. Platform levels must be
+      # summed within each draw, before any quantile, because a quantile of a
+      # sum is not the sum of quantiles.
+      Nd <- rowsum(exp(draws) * mult * g$area, row_of, reorder = TRUE)
       rm(draws)
       # Per cell, the 2.5% and 97.5% quantiles across draws. apply() over rows
       # returns a 2 x cells matrix, so t() makes it cells x 2.
@@ -933,4 +994,50 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   cells <- dplyr::bind_cols(id, cells)
   list(cells = cells, totals = totals, notes = notes,
        pred_min = as.numeric(difftime(Sys.time(), t0, units = "mins")))
+}
+
+#' Mean of a logit-normal variable, by Gauss-Hermite quadrature
+#'
+#' `E[plogis(eta + u)]` with `u ~ N(0, sigma^2)`, for each element of `eta`:
+#' the presence probability of a delta model averaged over the levels of a
+#' Gaussian random intercept on the logit scale, which has no closed form
+#' (unlike `exp(sigma^2 / 2)` on a log link). Used by [get.sdmtmb.surface()]
+#' (0.46.0, Atlantic-DSM #142).
+#'
+#' @param eta Numeric vector of logit-scale linear predictors.
+#' @param sigma The random intercept's SD (>= 0); 0 returns `plogis(eta)`.
+#' @param n.nodes Number of quadrature nodes. 40 nodes integrate a smooth
+#'   function like `plogis()` to near machine precision for the SDs met here
+#'   (well under 5 on the logit scale).
+#' @return Numeric vector like `eta`.
+#' @examples
+#' \dontrun{
+#' logitnormal.mean(c(-2, 0, 2), 1)
+#' }
+#' @noRd
+logitnormal.mean <- function(eta, sigma, n.nodes = 40L) {
+  checkmate::expect_numeric(eta)
+  checkmate::expect_number(sigma, lower = 0, finite = TRUE)
+  checkmate::expect_int(n.nodes, lower = 2)
+  # No spread: nothing to average.
+  if (sigma == 0) return(stats::plogis(eta))
+  # Gauss-Hermite nodes and weights for the weight function exp(-x^2), by the
+  # Golub-Welsch method: the nodes are the eigenvalues of the symmetric
+  # tridiagonal Jacobi matrix with off-diagonal sqrt(i / 2), i = 1..n-1, and
+  # each weight is sqrt(pi) x (first element of its unit eigenvector)^2. This
+  # avoids a dependency (statmod::gauss.quad) for 10 lines of base R.
+  i <- seq_len(n.nodes - 1L)
+  J <- matrix(0, n.nodes, n.nodes)
+  J[cbind(i, i + 1L)] <- sqrt(i / 2)
+  J[cbind(i + 1L, i)] <- sqrt(i / 2)
+  e <- eigen(J, symmetric = TRUE)
+  x <- e$values
+  w <- sqrt(pi) * e$vectors[1, ]^2
+  # Change of variable u = sqrt(2) sigma x turns E[f(u)], u ~ N(0, sigma^2),
+  # into sum_j w_j f(sqrt(2) sigma x_j) / sqrt(pi). Accumulate node by node so
+  # memory stays one vector as long as eta (hundreds of thousands of rows),
+  # not a rows x nodes matrix.
+  out <- numeric(length(eta))
+  for (j in seq_len(n.nodes)) out <- out + w[j] * stats::plogis(eta + sqrt(2) * sigma * x[j])
+  out / sqrt(pi)
 }
