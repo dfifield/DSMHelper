@@ -90,6 +90,12 @@ them. Each row's density is then multiplied by its own factor, so the
 median-level plug-in totals, and each draw by its row's factor taken at the
 point estimates (exact for a single log-link part, where every row's factor
 is the same constant).
+
+A \strong{Poisson-link delta} (Thorson 2018; \code{type = "poisson-link"}, which is how
+\code{\link[=sdmtmb.family]{sdmtmb.family()}} builds \code{"dl"} and \code{"dg"}) has expected density
+\code{exp(eta1 + eta2)}, log-linear in both parts, so with random intercepts its
+factor is exactly \code{exp((sigma1^2 + sigma2^2) / 2)}, one constant as for a
+single log link (0.46.1; 0.46.0 stopped on its log/log links).
 }
 \examples{
 \dontrun{

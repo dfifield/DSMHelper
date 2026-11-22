@@ -695,6 +695,12 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' point estimates (exact for a single log-link part, where every row's factor
 #' is the same constant).
 #'
+#' A **Poisson-link delta** (Thorson 2018; `type = "poisson-link"`, which is how
+#' [sdmtmb.family()] builds `"dl"` and `"dg"`) has expected density
+#' `exp(eta1 + eta2)`, log-linear in both parts, so with random intercepts its
+#' factor is exactly `exp((sigma1^2 + sigma2^2) / 2)`, one constant as for a
+#' single log link (0.46.1; 0.46.0 stopped on its log/log links).
+#'
 #' @param fit Fitted `sdmTMB` ([fit.sdmtmb.dsm()]).
 #' @param grid One row per cell x season, with no `platform` column: `x`, `y`
 #'   (metres), `Season`, `area` (km²), the covariates, and `fishing = 0` for a
@@ -821,16 +827,25 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   has_re <- length(re_desc) > 0
   # re_form_iid = NA: every random intercept at 0 in predict() and get_index().
   re_args <- if (has_re) list(re_form_iid = NA) else list()
-  if (has_re) {
-    # The two mean-level factors below assume these links: log for a single
-    # part; logit presence and log positive mean for a delta model. Anything
-    # else (e.g. delta_poisson_link(), log/log) stops rather than mis-scaling.
-    links <- as.character(fit$family$link)
-    ok_links <- if (delta) identical(links, c("logit", "log")) else identical(links, "log")
-    if (!ok_links)
-      stop("get.sdmtmb.surface: random intercepts are handled for a log link, or a logit/log delta model; ",
-           "this model's links are ", paste(links, collapse = "/"))
-  }
+  # The mean-level factors below are worked out for three kinds of model:
+  #  - a single log-link part: density = exp(eta), factor exp(sigma^2 / 2);
+  #  - a Poisson-link delta (Thorson 2018; type = "poisson-link", as
+  #    sdmtmb.family() builds "dl" and "dg"; sdmTMB reports its links as
+  #    log/log and its type as "poisson_link_delta"). Its expected density is
+  #    exp(eta1 + eta2), log-linear in both parts (checked on sdmTMB 1.2.0:
+  #    type = "response"'s est equals exp(est1 + est2) for delta_lognormal()
+  #    and delta_gamma()), so with independent intercepts in the two parts the
+  #    factor is exactly exp((sigma1^2 + sigma2^2) / 2), as for one log link;
+  #  - a standard delta (logit presence x log positive mean), where the
+  #    presence part is integrated numerically (0.46.0).
+  # Anything else stops rather than being silently mis-scaled.
+  links <- as.character(fit$family$link)
+  poisson_link <- delta && identical(links, c("log", "log")) &&
+    identical(as.character(fit$family$type), "poisson_link_delta")
+  logit_delta <- delta && identical(links, c("logit", "log"))
+  if (has_re && !(identical(links, "log") || poisson_link || logit_delta))
+    stop("get.sdmtmb.surface: random intercepts are handled for a log link, a Poisson-link delta ",
+         "or a logit/log delta model; this model's links are ", paste(links, collapse = "/"))
 
   # ---- Plug-in surface ----
   # dens_med: density per stacked row at the parameter estimates, with every
@@ -838,7 +853,7 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # the mean, so these cells sum to less than the bias-corrected total.
   # dens: the same moved to the mean random-intercept level (equal to dens_med
   # without random intercepts).
-  if (has_re && delta) {
+  if (has_re && logit_delta) {
     # type = "link" gives each part's linear predictor: est1 = logit of the
     # presence probability, est2 = log of the positive part's mean (checked on
     # sdmTMB 1.2.0: plogis(est1) * exp(est2) equals type = "response"'s est).
@@ -849,10 +864,13 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     dens <- logitnormal.mean(p$est1, re_sd[1]) * exp(p$est2) * exp(re_sd[2]^2 / 2)
   } else {
     # type = "response" gives exp(linear predictor) in p$est (for a delta
-    # model without random intercepts, presence x positive mean).
+    # model, presence x positive mean). The factor is exp(sum of each part's
+    # sigma^2 / 2): one part for a single log link; both parts for a
+    # Poisson-link delta, whose density is exp(eta1 + eta2) (see above). A
+    # delta model without random intercepts has re_sd = c(0, 0), factor 1.
     p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
     dens_med <- p$est
-    dens <- p$est * exp(re_sd[1]^2 / 2)
+    dens <- p$est * exp(sum(re_sd^2) / 2)
   }
   # Free the prediction (one row per stacked grid row, several columns):
   # hundreds of thousands of rows on Atl IMRP.
