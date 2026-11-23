@@ -701,6 +701,18 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' factor is exactly `exp((sigma1^2 + sigma2^2) / 2)`, one constant as for a
 #' single log link (0.46.1; 0.46.0 stopped on its log/log links).
 #'
+#' **Days-based level** (0.47.0, reported only). `exp(sigma^2 / 2)` is
+#' exponential in the estimated sigma, and an intercept that absorbs other
+#' short-lived noise inflates sigma: in the #142 simulation a Tweedie fit's
+#' cruise-day SD was 2.4 against a true 1.7 and its totals ran about 2.5x
+#' high. `totals$re_level_days` is the mean over the fitted levels of
+#' `exp(u_d + v_d / 2)` (predicted intercept and its conditional variance;
+#' summed over a Poisson-link delta's parts), beside `totals$re_level`, the
+#' factor applied. Multiply any total or surface by
+#' `re_level_days / re_level` for the days-based version. Computed for one
+#' random-intercept term on a log link or a Poisson-link delta; `NA`
+#' otherwise.
+#'
 #' @param fit Fitted `sdmTMB` ([fit.sdmtmb.dsm()]).
 #' @param grid One row per cell x season, with no `platform` column: `x`, `y`
 #'   (metres), `Season`, `area` (km²), the covariates, and `fishing = 0` for a
@@ -714,7 +726,8 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
 #' @return List: `cells` (the grid's cell id, `Season`, `N`, `N_rescaled`,
 #'   `N_so`, `lo`, `hi`), `totals` (per season: `N` and `se_log`
 #'   bias-corrected, `N_plain` and `se_log_plain`, `N_median_sum`, `N_so_sum`,
-#'   `lo_draws`, `hi_draws`),
+#'   `lo_draws`, `hi_draws`, and since 0.47.0 `N_draws_mean`, `re_level`,
+#'   `re_level_days`),
 #'   `notes`, `pred_min`.
 #' @examples
 #' \dontrun{
@@ -812,6 +825,9 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # one part are independent normals, so their sum has SD sqrt(sum sigma^2).
   re_sd <- numeric(n_comp)
   re_desc <- character()
+  # n_re_terms: the most random-intercept terms in any one part; the days-based
+  # level below handles only one term (one grouping factor).
+  n_re_terms <- 0L
   for (k in seq_len(n_comp)) {
     rp_all <- as.data.frame(if (delta) sdmTMB::tidy(fit, "ran_pars", model = k) else sdmTMB::tidy(fit, "ran_pars"))
     grp <- if ("group_name" %in% names(rp_all)) rp_all$group_name else rep(NA_character_, nrow(rp_all))
@@ -821,6 +837,7 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
       stop("get.sdmtmb.surface: only iid random intercepts are handled; the model has ",
            paste(unique(re$term), collapse = ", "))
     re_sd[k] <- sqrt(sum(re$estimate^2))
+    n_re_terms <- max(n_re_terms, nrow(re))
     re_desc <- c(re_desc, sprintf("%s%s (sd %.3g)", grp[!is.na(grp)],
                                   if (delta) c(" [presence]", " [positive]")[k] else "", re$estimate))
   }
@@ -896,6 +913,32 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
     notes <- c(notes, sprintf("random intercept(s) %s at the mean level: plug-in totals x%s",
                               paste(re_desc, collapse = ", "),
                               paste(sprintf("%.4g", re_ratio), collapse = "/")))
+
+  # ---- Days-based mean level (0.47.0; reported, not applied) ----
+  # The factor above, exp(sigma^2 / 2), is the mean over all possible levels
+  # (days) of a Gaussian intercept, and it is exponential in the estimated
+  # sigma^2. In the #142 simulation a Tweedie fit's cruise-day sigma came out
+  # at 2.4 against a true day SD of 1.7, because the intercept also soaked up
+  # along-track patchiness, and the factor then put seasonal totals about 2.5x
+  # too high. The alternative here is the mean over the levels the model was
+  # actually fitted to, given the data: mean over levels d of
+  # exp(u_d + v_d / 2), u_d the predicted intercept and v_d its conditional
+  # variance (summed over the two parts of a Poisson-link delta, whose density
+  # is exp(eta1 + eta2)). It does not depend on sigma's distributional
+  # assumption, only on the levels that were sampled. It is returned beside
+  # the sigma-based factor (totals$re_level_days and totals$re_level) so a
+  # caller can compare the two; nothing above or below is scaled by it.
+  # Handled for a single log link and a Poisson-link delta with one random
+  # intercept term; NA otherwise (a logit delta has no constant factor, and
+  # with several terms the stacked levels of re_b_pars would mix groupings).
+  re_level_days <- NA_real_
+  if (has_re && !logit_delta && n_re_terms == 1L) {
+    lv_days <- step("days-based level", days.re.level(fit))
+    if (!is.null(lv_days)) {
+      re_level_days <- lv_days
+      notes <- c(notes, sprintf("days-based mean level x%.4g (not applied)", re_level_days))
+    }
+  }
 
   # ---- Seasonal totals with get_index() ----
   # get_index() sums density x area over the rows of each time value (season)
@@ -992,7 +1035,17 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
                    # Sum of the second-order cells (NA without draws).
                    N_so_sum = sum(n_so[season == s]),
                    lo_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.025)),
-                   hi_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.975)))
+                   hi_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.975)),
+                   # 0.47.0: the mean of the draws' totals, a third estimate of
+                   # the mean-level total beside get_index()'s two (in #142
+                   # the bias-corrected index of a Poisson-link delta with a
+                   # cruise-day intercept fell below the uncorrected one).
+                   N_draws_mean = if (is.null(tot_d)) NA_real_ else mean(tot_d[s, ]),
+                   # 0.47.0: the mean-level factor applied (sigma-based; 1
+                   # without random intercepts) and the days-based one
+                   # (reported only; NA where not computed). N x
+                   # re_level_days / re_level is the days-based total.
+                   re_level = unname(re_ratio[s]), re_level_days = re_level_days)
   })
   # ---- Per-cell table ----
   # The rescaled surface: each season's plug-in cells multiplied by one factor,
@@ -1012,6 +1065,43 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   cells <- dplyr::bind_cols(id, cells)
   list(cells = cells, totals = totals, notes = notes,
        pred_min = as.numeric(difftime(Sys.time(), t0, units = "mins")))
+}
+
+#' Mean over the fitted levels of a model's random intercept
+#'
+#' `mean_d exp(u_d + v_d / 2)` over the levels `d` of the model's one iid
+#' random intercept, where `u_d` is the predicted intercept and `v_d` its
+#' conditional variance; for a Poisson-link delta, `u_d` and `v_d` are summed
+#' over the two parts. Used by [get.sdmtmb.surface()] (0.47.0).
+#'
+#' @param fit Fitted `sdmTMB` with one random-intercept term.
+#' @return One number.
+#' @noRd
+days.re.level <- function(fit) {
+  checkmate::expect_class(fit, "sdmTMB")
+  # parList() returns the parameters at the optimum as named arrays, random
+  # effects at their predicted (conditional mode) values. re_b_pars holds the
+  # iid random intercepts as a levels x parts matrix: one column for a single
+  # part, two (presence, positive) for a delta model (checked on sdmTMB 1.2.0
+  # with a synthetic (1 | day) fit: 20 x 1 for tweedie, 20 x 2 for
+  # delta_lognormal(type = "poisson-link")).
+  u <- as.matrix(fit$tmb_obj$env$parList()$re_b_pars)
+  if (!length(u)) stop("the model has no re_b_pars")
+  # diag.cov.random: the conditional variance of every random effect, in the
+  # order of par.random, whose names repeat the parameter name once per
+  # element. The re_b_pars elements come in R's column-major order (all levels
+  # of part 1, then of part 2), the order matrix() fills, so v lines up with u.
+  sdr <- fit$sd_report
+  v_all <- sdr$diag.cov.random
+  if (is.null(v_all)) stop("the sdreport has no diag.cov.random")
+  v <- v_all[names(sdr$par.random) == "re_b_pars"]
+  if (length(v) != length(u)) stop("re_b_pars and its conditional variances differ in length")
+  v <- matrix(v, nrow = nrow(u))
+  # rowSums over parts: a Poisson-link delta's density is exp(eta1 + eta2), so
+  # a level's multiplier is exp(u1 + u2), with variance v1 + v2 when the two
+  # parts' predicted intercepts are treated as independent (their conditional
+  # covariance is left out).
+  mean(exp(rowSums(u) + rowSums(v) / 2))
 }
 
 #' Mean of a logit-normal variable, by Gauss-Hermite quadrature

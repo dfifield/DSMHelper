@@ -34,7 +34,8 @@ and \code{FALSE}.}
 List: \code{cells} (the grid's cell id, \code{Season}, \code{N}, \code{N_rescaled},
 \code{N_so}, \code{lo}, \code{hi}), \code{totals} (per season: \code{N} and \code{se_log}
 bias-corrected, \code{N_plain} and \code{se_log_plain}, \code{N_median_sum}, \code{N_so_sum},
-\code{lo_draws}, \code{hi_draws}),
+\code{lo_draws}, \code{hi_draws}, and since 0.47.0 \code{N_draws_mean}, \code{re_level},
+\code{re_level_days}),
 \code{notes}, \code{pred_min}.
 }
 \description{
@@ -96,6 +97,18 @@ A \strong{Poisson-link delta} (Thorson 2018; \code{type = "poisson-link"}, which
 \code{exp(eta1 + eta2)}, log-linear in both parts, so with random intercepts its
 factor is exactly \code{exp((sigma1^2 + sigma2^2) / 2)}, one constant as for a
 single log link (0.46.1; 0.46.0 stopped on its log/log links).
+
+\strong{Days-based level} (0.47.0, reported only). \code{exp(sigma^2 / 2)} is
+exponential in the estimated sigma, and an intercept that absorbs other
+short-lived noise inflates sigma: in the #142 simulation a Tweedie fit's
+cruise-day SD was 2.4 against a true 1.7 and its totals ran about 2.5x
+high. \code{totals$re_level_days} is the mean over the fitted levels of
+\code{exp(u_d + v_d / 2)} (predicted intercept and its conditional variance;
+summed over a Poisson-link delta's parts), beside \code{totals$re_level}, the
+factor applied. Multiply any total or surface by
+\code{re_level_days / re_level} for the days-based version. Computed for one
+random-intercept term on a log link or a Poisson-link delta; \code{NA}
+otherwise.
 }
 \examples{
 \dontrun{
