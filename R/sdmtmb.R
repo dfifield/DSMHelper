@@ -467,6 +467,82 @@ fix.fields.off <- function(params, off, sigma.hat, start, map, field.sd.off = 1e
   list(start = start, map = map)
 }
 
+# Fix the fixed-effect coefficients that the data cannot identify
+#
+# A 0/1 column of the fixed-effect design whose rows hold no detection has no
+# finite maximum-likelihood estimate. In the occurrence part (or a one-part
+# family) its coefficient heads to -Inf, because every row it touches is a
+# zero; in a delta model's positive part it has no data at all. Either way the
+# likelihood is flat along it and the Hessian is not positive definite. Atl
+# IMRP Gulls (0.49.0): 160 fishing-affected Spring segment-rows with no
+# detection, so SeasonSpring:fishing went to -11.95 in the occurrence part
+# (Hessian eigenvalue 4e-6) and stayed at 0 in the positive part (eigenvalue
+# -4e-14).
+#
+# Such a coefficient is fixed, not estimated, through start and map:
+#  - occurrence part (component 1), or the only part: at `sep.value` (-20).
+#    That is the limit the estimate was heading to: those rows' expected value
+#    is then at most exp(-20) = 2e-9 times their segment's level, so they add
+#    nothing to the likelihood and pull on no other parameter. Dave chose
+#    (2026-11-23) to drop such rows; fixing the coefficient there gives the
+#    same estimates to about 1e-9 without removing rows, which would mean
+#    rebuilding the mesh (its projection matrix is per row), in every
+#    cross-validation fold too.
+#  - positive part (component 2): at 0. No positive row uses it, so its value
+#    changes nothing.
+# An all-zero column (no rows at all) is fixed at 0 in both parts.
+#
+# Only 0/1 columns are examined. A continuous column with no detection on
+# its nonzero rows is not separated in this simple way, and is left alone.
+# Predictions are unaffected for the fishing term, because every prediction
+# grid has fishing = 0.
+#
+# X: list of design matrices, one per component (tmb_data$X_ij), rows in
+#   dat's order, columns named as in model.matrix().
+# y: the response, one value per row.
+# params: tmb_params (the parameter layout: b_j, and b_j2 for two parts).
+# start, map: lists to add to; existing entries for other parameters kept.
+# Returns list(start, map, fixed), fixed a character vector of "<column>
+# (component k) = <value>" for the note.
+fix.separated.coefs <- function(X, y, params, start, map, sep.value = -20) {
+  fixed <- character(0)
+  pos <- y > 0
+  # b_j belongs to component 1, b_j2 to component 2 (sdmTMB 1.2.0 builds the
+  # parameter list as b_j = rep(0, ncol(X_ij[[1]])), b_j2 likewise for 2).
+  par_names <- c("b_j", "b_j2")
+  for (k in seq_along(X)) {
+    Xk <- as.matrix(X[[k]])
+    # 0/1 columns only: every entry is exactly 0 or 1.
+    is01 <- apply(Xk, 2, function(v) all(v == 0 | v == 1))
+    n_rows <- colSums(Xk != 0)
+    # Detections on each column's nonzero rows: crossprod of the nonzero
+    # indicator with the positive indicator, one count per column.
+    n_pos <- as.vector(crossprod(Xk != 0, pos))
+    empty <- n_rows == 0
+    no_det <- is01 & n_rows > 0 & n_pos == 0
+    # Value per column: NA = estimated as usual.
+    val <- rep(NA_real_, ncol(Xk))
+    val[empty] <- 0
+    val[no_det] <- if (k == 1L) sep.value else 0
+    if (all(is.na(val))) next
+    pn <- par_names[k]
+    # Start from whatever start already holds for this parameter (a warm
+    # start), otherwise from the build's layout (zeros).
+    b <- if (!is.null(start[[pn]])) start[[pn]] else params[[pn]]
+    b[!is.na(val)] <- val[!is.na(val)]
+    start[[pn]] <- b
+    # map: NA for a fixed coefficient, a distinct integer for each free one.
+    # Any earlier map entry for this parameter is respected (NA stays NA).
+    m <- seq_along(b)
+    if (!is.null(map[[pn]])) m[is.na(map[[pn]])] <- NA
+    m[!is.na(val)] <- NA
+    map[[pn]] <- factor(m)
+    w <- which(!is.na(val))
+    fixed <- c(fixed, sprintf("%s (component %d) = %g", colnames(Xk)[w], k, val[w]))
+  }
+  list(start = start, map = map, fixed = fixed)
+}
+
 #' Fit an sdmTMB DSM to #130's spec
 #'
 #' One Matern field per season (`spatial_varying = ~ 0 + Season`, `time =
@@ -496,6 +572,16 @@ fix.fields.off <- function(params, off, sigma.hat, start, map, field.sd.off = 1e
 #' @param collapsed.sd Smooth SD below which a smooth counts as collapsed.
 #' @param collapsed.field.sd Field SD (`sigma_Z`) below which a season's
 #'   spatially varying field counts as collapsed. `0` never fixes a field.
+#' @param fix.separated Fix any 0/1 fixed-effect column with no detection on
+#'   its rows instead of estimating it (0.49.0): at `separated.coef` in the
+#'   occurrence part or a one-part family, where its estimate heads to -Inf,
+#'   and at 0 in a delta model's positive part, where it has no data. Atl IMRP
+#'   Gulls' `SeasonSpring:fishing` (160 rows, no detection) needs it for a
+#'   positive definite Hessian. The fixed ones are in `attr(fit,
+#'   "fixed_coefs")`.
+#' @param separated.coef The value such a coefficient is fixed at (log
+#'   scale). `-20` makes those rows' expected value at most 2e-9 of their
+#'   level, so they contribute nothing, which is what dropping them would do.
 #' @param previous.fit A fit of the same model to the same rows, to warm-start
 #'   from (`sdmTMB(previous_fit = )`); only the response may differ. It also
 #'   carries over that fit's map, so any smooth it fixed off stays off.
@@ -510,7 +596,8 @@ fix.fields.off <- function(params, off, sigma.hat, start, map, field.sd.off = 1e
 #'   season; set per model in `sdmtmb.mod.specs`.
 #' @param nthreads TMB threads (`sdmTMBcontrol(parallel = )`).
 #' @return The fitted `sdmTMB`, with attributes `fit_min` (minutes, all fits
-#'   included), `refit_note` (`NULL` if no refit), `sanity_failed` and
+#'   included), `refit_note` (`NULL` if no refit), `fixed_coefs` (see
+#'   `fix.separated`), `sanity_failed` and
 #'   `range_km` (the range of each component, km: `range.km` when fixed, the
 #'   estimate when `range.km = NULL`).
 #' @examples
@@ -522,6 +609,7 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
                            offset = "log_area", positive.smooths = FALSE,
                            refit.collapsed = TRUE, collapsed.sd = 1e-3,
                            collapsed.field.sd = 1e-2,
+                           fix.separated = TRUE, separated.coef = -20,
                            previous.fit = NULL, warm.start = NULL,
                            spatial.varying = ~ 0 + Season, nthreads = 1L) {
   check.sdmtmb.installed("sdmTMB")
@@ -535,6 +623,8 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   checkmate::expect_flag(refit.collapsed)
   checkmate::expect_number(collapsed.sd, lower = 0)
   checkmate::expect_number(collapsed.field.sd, lower = 0)
+  checkmate::expect_flag(fix.separated)
+  checkmate::expect_number(separated.coef, finite = TRUE, upper = 0)
   if (!is.null(previous.fit)) checkmate::expect_class(previous.fit, "sdmTMB")
   if (!is.null(warm.start)) checkmate::expect_class(warm.start, "sdmTMB")
   # The two warm starts do different things (see @param) and combining them
@@ -621,11 +711,26 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   # delta model when the formula has smooths, so both parts get the full
   # formula, and the positive part's smooths are then fixed at zero through
   # start and map.
+  # Build without fitting, to get the parameter layout: tmb_params has the
+  # shapes, tmb_data$X_ij the fixed-effect design per component, and
+  # tmb_data$b_smooth_start where each smooth's coefficients begin. Takes
+  # seconds to a minute, against an hour or more for the fit.
+  built <- fit.it(start, map, do.fit = FALSE)
+
+  # ---- Coefficients the data cannot identify ----
+  # A 0/1 fixed-effect column with no detection on its rows (Gulls'
+  # SeasonSpring:fishing on Atl IMRP) is fixed at its limit; see
+  # fix.separated.coefs() above. The response is the formula's left-hand side.
+  fixed_coefs <- character(0)
+  if (fix.separated) {
+    y <- dat[[all.vars(formula[[2]])[1]]]
+    sep <- fix.separated.coefs(built$tmb_data$X_ij, y, built$tmb_params, start, map, separated.coef)
+    start <- sep$start
+    map <- sep$map
+    fixed_coefs <- sep$fixed
+  }
+
   if (n_comp == 2L && !positive.smooths) {
-    # Build without fitting, to get the parameter layout: tmb_params has the
-    # shapes, and tmb_data$b_smooth_start gives where each smooth's
-    # coefficients begin.
-    built <- fit.it(start, map, do.fit = FALSE)
     n_sm <- length(built$tmb_data$b_smooth_start)
     if (n_sm > 0) {
       # off: smooths x components. Column 1 (occurrence) all FALSE, column 2
@@ -742,6 +847,9 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   san <- sdmTMB::sanity(fit, silent = TRUE)
   attr(fit, "sanity_failed") <- setdiff(names(san)[!unlist(san)], "all_ok")
   attr(fit, "refit_note") <- refit_note
+  # Which coefficients were fixed because no detection identifies them
+  # (character(0) if none), e.g. "SeasonSpring:fishing (component 1) = -20".
+  attr(fit, "fixed_coefs") <- fixed_coefs
   attr(fit, "range_km") <- range.fit
   attr(fit, "fit_min") <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
   fit

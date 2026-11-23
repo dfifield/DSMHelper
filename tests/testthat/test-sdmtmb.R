@@ -241,3 +241,56 @@ test_that("a collapsed season field is fixed off in the refit (0.48.0)", {
                                             collapsed.field.sd = 0))
   expect_null(fit_nf$tmb_map$ln_tau_Z)
 })
+
+test_that("a fishing term with no detection in a season is fixed, as if its rows were dropped (0.49.0)", {
+  # About 10% of rows fishing-affected, and every Spring one of them a zero:
+  # SeasonSpring:fishing then has no finite estimate (Atl IMRP Gulls had 160
+  # such rows and no detection on them).
+  d <- make.sim.data()
+  set.seed(2)
+  d$fishing <- stats::rbinom(nrow(d), 1, 0.1)
+  d$abundance.est[d$fishing == 1 & d$Season == "Spring"] <- 0
+  dd <- prepare.sdmtmb.data(d, seasons)
+  mesh_f <- bind.sdmtmb.mesh(dd, fm, land)
+  form <- sdmtmb.dsm.formula("depth", fishing = TRUE)
+  fit <- suppressWarnings(fit.sdmtmb.dsm(form, dd, mesh_f, "tw", range.km = 60))
+  X <- fit$tmb_data$X_ij[[1]]
+  j <- which(colnames(X) == "SeasonSpring:fishing")
+  expect_length(j, 1)
+  # Fixed at -20 (map NA), the other seasons' fishing terms estimated.
+  expect_identical(attr(fit, "fixed_coefs"), "SeasonSpring:fishing (component 1) = -20")
+  expect_true(is.na(fit$tmb_map$b_j[j]))
+  expect_equal(fit$parlist$b_j[j], -20)
+  others <- grep(":fishing$", colnames(X))
+  expect_false(any(is.na(fit$tmb_map$b_j[setdiff(others, j)])))
+
+  # Same estimates as dropping those rows: refit without them (new mesh
+  # binding, since the projection matrix is per row). The Spring fishing
+  # column is then all zero, so it is fixed at 0 there. The platform and the
+  # other fishing coefficients must agree to well within the optimiser's
+  # tolerance. The Season intercepts may not: dropping rows also changes the
+  # depth smooth's basis, which s() builds from the data (its centring
+  # constraint is a mean over the rows), and that moves the intercepts by
+  # about 0.007 on this data, so they get a looser 0.02.
+  keep <- !(dd$fishing == 1 & dd$Season == "Spring")
+  dk <- dd[keep, ]
+  fit_drop <- suppressWarnings(fit.sdmtmb.dsm(form, dk, bind.sdmtmb.mesh(dk, fm, land), "tw", range.km = 60))
+  expect_identical(attr(fit_drop, "fixed_coefs"), "SeasonSpring:fishing (component 1) = 0")
+  ints <- grep("^Season[A-Za-z]+$", colnames(X))
+  rest <- setdiff(seq_len(ncol(X)), c(ints, j))
+  expect_equal(fit$parlist$b_j[rest], fit_drop$parlist$b_j[rest], tolerance = 1e-4)
+  expect_true(all(abs(fit$parlist$b_j[ints] - fit_drop$parlist$b_j[ints]) < 0.02))
+
+  # Delta-lognormal: also fixed at 0 in the positive part, which has no data
+  # for it; no flat direction is left from it in either part.
+  fit_dl <- suppressWarnings(fit.sdmtmb.dsm(form, dd, mesh_f, "dl", range.km = 60))
+  expect_true(all(c("SeasonSpring:fishing (component 1) = -20", "SeasonSpring:fishing (component 2) = 0") %in%
+                    attr(fit_dl, "fixed_coefs")))
+  expect_true(is.na(fit_dl$tmb_map$b_j2[j]))
+
+  # fix.separated = FALSE estimates it, as before 0.49.0.
+  fit_off <- suppressWarnings(fit.sdmtmb.dsm(form, dd, mesh_f, "tw", range.km = 60, fix.separated = FALSE))
+  expect_length(attr(fit_off, "fixed_coefs"), 0)
+  # sdmTMB always fills a map for b_j itself, so check nothing in it is fixed.
+  expect_false(any(is.na(fit_off$tmb_map$b_j)))
+})

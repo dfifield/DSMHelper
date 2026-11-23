@@ -15,6 +15,8 @@ fit.sdmtmb.dsm(
   refit.collapsed = TRUE,
   collapsed.sd = 0.001,
   collapsed.field.sd = 0.01,
+  fix.separated = TRUE,
+  separated.coef = -20,
   previous.fit = NULL,
   warm.start = NULL,
   spatial.varying = ~0 + Season,
@@ -47,6 +49,17 @@ Hessian is not positive definite.}
 \item{collapsed.field.sd}{Field SD (\code{sigma_Z}) below which a season's
 spatially varying field counts as collapsed. \code{0} never fixes a field.}
 
+\item{fix.separated}{Fix any 0/1 fixed-effect column with no detection on
+its rows instead of estimating it (0.49.0): at \code{separated.coef} in the
+occurrence part or a one-part family, where its estimate heads to -Inf,
+and at 0 in a delta model's positive part, where it has no data. Atl IMRP
+Gulls' \code{SeasonSpring:fishing} (160 rows, no detection) needs it for a
+positive definite Hessian. The fixed ones are in \code{attr(fit, "fixed_coefs")}.}
+
+\item{separated.coef}{The value such a coefficient is fixed at (log
+scale). \code{-20} makes those rows' expected value at most 2e-9 of their
+level, so they contribute nothing, which is what dropping them would do.}
+
 \item{previous.fit}{A fit of the same model to the same rows, to warm-start
 from (\code{sdmTMB(previous_fit = )}); only the response may differ. It also
 carries over that fit's map, so any smooth it fixed off stays off.}
@@ -66,7 +79,8 @@ season; set per model in \code{sdmtmb.mod.specs}.}
 }
 \value{
 The fitted \code{sdmTMB}, with attributes \code{fit_min} (minutes, all fits
-included), \code{refit_note} (\code{NULL} if no refit), \code{sanity_failed} and
+included), \code{refit_note} (\code{NULL} if no refit), \code{fixed_coefs} (see
+\code{fix.separated}), \code{sanity_failed} and
 \code{range_km} (the range of each component, km: \code{range.km} when fixed, the
 estimate when \code{range.km = NULL}).
 }
