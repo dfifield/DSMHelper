@@ -14,6 +14,7 @@ fit.sdmtmb.dsm(
   positive.smooths = FALSE,
   refit.collapsed = TRUE,
   collapsed.sd = 0.001,
+  collapsed.field.sd = 0.01,
   previous.fit = NULL,
   warm.start = NULL,
   spatial.varying = ~0 + Season,
@@ -42,6 +43,9 @@ for the #142 simulation, which tests why.}
 Hessian is not positive definite.}
 
 \item{collapsed.sd}{Smooth SD below which a smooth counts as collapsed.}
+
+\item{collapsed.field.sd}{Field SD (\code{sigma_Z}) below which a season's
+spatially varying field counts as collapsed. \code{0} never fixes a field.}
 
 \item{previous.fit}{A fit of the same model to the same rows, to warm-start
 from (\code{sdmTMB(previous_fit = )}); only the response may differ. It also
@@ -72,9 +76,11 @@ at \code{range.km} by mapping \code{ln_kappa}, and the offset as a column. For a
 family the positive part's smooths are fixed off unless
 \code{positive.smooths = TRUE}, since sdmTMB will not take a simpler formula
 there. If the Hessian is not positive definite and some smooth SDs are below
-\code{collapsed.sd}, the model is refitted once with those smooths fixed off,
-which restored it in the #134 simulation; draws and the bias-corrected index
-need a positive definite Hessian.
+\code{collapsed.sd}, or some per-season field SDs are below
+\code{collapsed.field.sd}, the model is refitted once with those smooths and
+fields fixed off. Smooths alone restored it in the #134 simulation; Atl IMRP
+Gulls needed a field fixed off too (0.48.0). Draws and the bias-corrected
+index need a positive definite Hessian.
 }
 \examples{
 \dontrun{

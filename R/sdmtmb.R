@@ -409,6 +409,64 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
   list(start = start, map = map)
 }
 
+#' Fix chosen spatially varying fields at "off" in a start/map pair
+#'
+#' The field twin of `fix.smooths.off()`. A field is off when its SD is fixed
+#' at `field.sd.off` (effectively zero) and its values at every mesh vertex at
+#' 0. Used when a season's field SD collapses towards 0, which leaves the
+#' Hessian not positive definite (Atl IMRP Gulls, delta-lognormal: the positive
+#' part's Summer field went to 2e-4, #130).
+#'
+#' @param params A fit's `parlist` (supplies shapes and the starting values
+#'   kept for the other fields).
+#' @param off Logical matrix, fields x components: which to fix.
+#' @param sigma.hat Matrix of the fitted field SDs, same shape as `off`.
+#' @param start,map The start and map lists to add to.
+#' @param field.sd.off The SD a fixed-off field is held at.
+#' @return List with `start` and `map`.
+#' @noRd
+fix.fields.off <- function(params, off, sigma.hat, start, map, field.sd.off = 1e-6) {
+  # The two sdmTMB parameters behind spatial_varying fields (sdmTMB 1.2.0):
+  #  - ln_tau_Z: matrix, fields x components (here 4 seasons x 2 parts). tau
+  #    scales the field's precision; the field SD is
+  #    sigma_Z = 1 / sqrt(4 pi tau^2 kappa^2), so sigma_Z is proportional to
+  #    exp(-ln_tau_Z) at a fixed range;
+  #  - zeta_s: array, mesh vertices x fields x components, the field values
+  #    (random effects).
+  # As in fix.smooths.off(), "fixed" means a start value plus an NA in map.
+  ltz <- matrix(params$ln_tau_Z, nrow = nrow(off), ncol = ncol(off))
+  zeta <- array(params$zeta_s, dim = c(length(params$zeta_s) / length(off), nrow(off), ncol(off)))
+
+  # Existing map codes, or all-distinct codes if nothing is mapped yet (so
+  # every element is estimated separately). Earlier NA entries are kept.
+  ltz_map <- if (is.null(map$ln_tau_Z)) matrix(seq_along(ltz), nrow = nrow(off)) else
+    matrix(as.integer(map$ln_tau_Z), nrow = nrow(off))
+  zeta_map <- if (is.null(map$zeta_s)) array(seq_along(zeta), dim = dim(zeta)) else
+    array(as.integer(map$zeta_s), dim = dim(zeta))
+
+  for (k in seq_len(ncol(off))) for (j in which(off[, k])) {
+    # Move ln_tau_Z so the SD becomes field.sd.off. Since sigma is
+    # proportional to exp(-ln_tau), shifting ln_tau by log(sigma.hat /
+    # field.sd.off) divides sigma by sigma.hat / field.sd.off, exactly, at any
+    # range and whatever mesh scaling sdmTMB applies. Not exactly zero SD,
+    # because TMB still evaluates the field's density with this precision.
+    ltz[j, k] <- ltz[j, k] + log(sigma.hat[j, k] / field.sd.off)
+    ltz_map[j, k] <- NA
+    # Field values fixed at 0 at every vertex: the season gets no spatial
+    # surface in this component. It had almost none anyway (that is what a
+    # collapsed SD means), so the fit is essentially unchanged.
+    zeta[, j, k] <- 0
+    zeta_map[, j, k] <- NA
+  }
+
+  # factor() over the column-major elements, NAs kept: the order TMB expects.
+  start$ln_tau_Z <- ltz
+  start$zeta_s <- zeta
+  map$ln_tau_Z <- factor(ltz_map)
+  map$zeta_s <- factor(zeta_map)
+  list(start = start, map = map)
+}
+
 #' Fit an sdmTMB DSM to #130's spec
 #'
 #' One Matern field per season (`spatial_varying = ~ 0 + Season`, `time =
@@ -417,9 +475,11 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 #' family the positive part's smooths are fixed off unless
 #' `positive.smooths = TRUE`, since sdmTMB will not take a simpler formula
 #' there. If the Hessian is not positive definite and some smooth SDs are below
-#' `collapsed.sd`, the model is refitted once with those smooths fixed off,
-#' which restored it in the #134 simulation; draws and the bias-corrected index
-#' need a positive definite Hessian.
+#' `collapsed.sd`, or some per-season field SDs are below
+#' `collapsed.field.sd`, the model is refitted once with those smooths and
+#' fields fixed off. Smooths alone restored it in the #134 simulation; Atl IMRP
+#' Gulls needed a field fixed off too (0.48.0). Draws and the bias-corrected
+#' index need a positive definite Hessian.
 #'
 #' @param formula From [sdmtmb.dsm.formula()].
 #' @param dat Data from [prepare.sdmtmb.data()].
@@ -434,6 +494,8 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 #' @param refit.collapsed Refit once with collapsed smooths fixed off when the
 #'   Hessian is not positive definite.
 #' @param collapsed.sd Smooth SD below which a smooth counts as collapsed.
+#' @param collapsed.field.sd Field SD (`sigma_Z`) below which a season's
+#'   spatially varying field counts as collapsed. `0` never fixes a field.
 #' @param previous.fit A fit of the same model to the same rows, to warm-start
 #'   from (`sdmTMB(previous_fit = )`); only the response may differ. It also
 #'   carries over that fit's map, so any smooth it fixed off stays off.
@@ -459,6 +521,7 @@ fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
 fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
                            offset = "log_area", positive.smooths = FALSE,
                            refit.collapsed = TRUE, collapsed.sd = 1e-3,
+                           collapsed.field.sd = 1e-2,
                            previous.fit = NULL, warm.start = NULL,
                            spatial.varying = ~ 0 + Season, nthreads = 1L) {
   check.sdmtmb.installed("sdmTMB")
@@ -471,6 +534,7 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
   checkmate::expect_flag(positive.smooths)
   checkmate::expect_flag(refit.collapsed)
   checkmate::expect_number(collapsed.sd, lower = 0)
+  checkmate::expect_number(collapsed.field.sd, lower = 0)
   if (!is.null(previous.fit)) checkmate::expect_class(previous.fit, "sdmTMB")
   if (!is.null(warm.start)) checkmate::expect_class(warm.start, "sdmTMB")
   # The two warm starts do different things (see @param) and combining them
@@ -598,14 +662,55 @@ fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
     # Collapsed: estimated, and SD below collapsed.sd (1e-3 by default). A
     # shrunk-out smooth's SD is typically 1e-4 to 1e-5 (trial 2), and a smooth
     # in use has an SD of order 0.1-10, so the threshold separates them widely.
+    # A model without smooths has an empty ln_smooth_sigma; matrix() of it has
+    # 0 rows, so `off` is empty and nothing is fixed.
     off <- exp(lss_hat) < collapsed.sd & lss_map
-    if (any(off)) {
+
+    # ---- Collapsed per-season fields ----
+    # The same failure in a spatially varying field: its SD heads to 0, its
+    # log precision ln_tau_Z to +Inf, and the likelihood is flat along it.
+    # Atl IMRP Gulls (delta-lognormal, 2026-11-22): the positive part's Summer
+    # field sat at 2e-4 at both 150 and 450 km, about 400x below the next
+    # smallest field (0.077), and the smooth-only refit left the Hessian
+    # singular. collapsed.field.sd (1e-2 by default) sits between: fields in
+    # use on Atl IMRP BLKI and Gulls run 0.077-4.7.
+    # The fitted SDs come from the TMB report at the optimum (sigma_Z, fields x
+    # components). Fields already fixed by the map (none, normally) are
+    # excluded, as for the smooths.
+    z_off <- matrix(FALSE, 0, n_comp)
+    sigma_z <- NULL
+    if (length(fit$parlist$ln_tau_Z) > 0 && collapsed.field.sd > 0) {
+      rep_opt <- fit$tmb_obj$report(fit$tmb_obj$env$last.par.best)
+      sigma_z <- matrix(rep_opt$sigma_Z, ncol = n_comp)
+      z_map <- if (is.null(map$ln_tau_Z)) matrix(TRUE, nrow(sigma_z), n_comp) else
+        matrix(!is.na(map$ln_tau_Z), ncol = n_comp)
+      z_off <- sigma_z < collapsed.field.sd & z_map
+    }
+
+    if (any(off) || any(z_off)) {
       # Start from this fit's estimates (parlist), so the refit is warm, and
-      # add the newly fixed smooths to the existing start and map.
-      sm <- fix.smooths.off(fit$parlist, fit$tmb_data$b_smooth_start, off, start, map)
-      refit_note <- sprintf("refitted with %d collapsed smooth(s) fixed off; first fit's Hessian not positive definite",
-                            sum(off))
-      fit <- fit.it(sm$start, sm$map)
+      # add the newly fixed smooths and fields to the existing start and map.
+      if (any(off)) {
+        sm <- fix.smooths.off(fit$parlist, fit$tmb_data$b_smooth_start, off, start, map)
+        start <- sm$start
+        map <- sm$map
+      }
+      if (any(z_off)) {
+        fz <- fix.fields.off(fit$parlist, z_off, sigma_z, start, map)
+        start <- fz$start
+        map <- fz$map
+      }
+      # Which fields, named "<column of spatial.varying's model matrix>
+      # (component k)", so the note says e.g. "SeasonSummer (component 2)".
+      z_names <- if (any(z_off)) {
+        cols <- colnames(fit$tmb_data$z_i)
+        if (is.null(cols)) cols <- paste0("field", seq_len(nrow(z_off)))
+        w <- which(z_off, arr.ind = TRUE)
+        paste(sprintf("%s (component %d)", cols[w[, 1]], w[, 2]), collapse = ", ")
+      }
+      refit_note <- sprintf("refitted with %d collapsed smooth(s) and %d collapsed field(s)%s fixed off; first fit's Hessian not positive definite",
+                            sum(off), sum(z_off), if (any(z_off)) paste0(" [", z_names, "]") else "")
+      fit <- fit.it(start, map)
     }
   }
 

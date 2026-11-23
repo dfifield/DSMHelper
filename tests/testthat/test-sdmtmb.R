@@ -207,3 +207,37 @@ test_that("delta-lognormal: the positive part's smooths are fixed off", {
     expect_equal(unique(rp$estimate[rp$term == "range"]), 60, tolerance = 1e-6)
   }
 })
+
+test_that("a collapsed season field is fixed off in the refit (0.48.0)", {
+  # The first delta-lognormal fit on this data has a non-positive-definite
+  # Hessian (test above), so the refit runs. The threshold is set just above
+  # the second-smallest fitted field SD (over both parts; several are tiny on
+  # this synthetic data), so exactly two fields count as collapsed: they must
+  # come back fixed at SD 1e-6 with all their values 0, the others left free.
+  f0 <- suppressWarnings(fit.sdmtmb.dsm(sdmtmb.dsm.formula("depth"), dat, mesh, "dl", range.km = 60,
+                                        refit.collapsed = FALSE))
+  expect_false(isTRUE(f0$sd_report$pdHess))
+  sig0 <- matrix(f0$tmb_obj$report(f0$tmb_obj$env$last.par.best)$sigma_Z, ncol = 2)
+  thr <- sort(sig0)[2] * (1 + 1e-6)          # catches the two smallest
+  fit <- suppressWarnings(fit.sdmtmb.dsm(sdmtmb.dsm.formula("depth"), dat, mesh, "dl", range.km = 60,
+                                         collapsed.field.sd = thr))
+  want <- sig0 < thr
+  expect_identical(sum(want), 2L)
+  expect_match(attr(fit, "refit_note"), "2 collapsed field\\(s\\) \\[")
+  expect_match(attr(fit, "refit_note"), "Season[A-Za-z]+ \\(component [12]\\)")
+  # Fixed: map NA, SD 1e-6, every vertex value 0. Free: map not NA.
+  ltz_map <- matrix(fit$tmb_map$ln_tau_Z, ncol = 2)
+  expect_identical(is.na(ltz_map), want)
+  sig1 <- matrix(fit$tmb_obj$report(fit$tmb_obj$env$last.par.best)$sigma_Z, ncol = 2)
+  expect_equal(sig1[want], rep(1e-6, 2), tolerance = 1e-6)
+  zeta <- array(fit$parlist$zeta_s, dim = c(length(fit$parlist$zeta_s) / 8, 4, 2))
+  for (w in which(want)) {
+    j <- (w - 1) %% 4 + 1
+    k <- (w - 1) %/% 4 + 1
+    expect_true(all(zeta[, j, k] == 0))
+  }
+  # collapsed.field.sd = 0 switches the field check off: smooths only, as before.
+  fit_nf <- suppressWarnings(fit.sdmtmb.dsm(sdmtmb.dsm.formula("depth"), dat, mesh, "dl", range.km = 60,
+                                            collapsed.field.sd = 0))
+  expect_null(fit_nf$tmb_map$ln_tau_Z)
+})
