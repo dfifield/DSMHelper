@@ -11849,8 +11849,10 @@ gradient.disagg.factor <- function(src, coarse.km, mid.lat) {
 #' @param coarse.km numeric(1). Cell length of `coarse` in km.
 #' @param mid.lat numeric(1). Study area centre latitude.
 #' @param clamp.lower numeric(1) or NULL. Values below this are clamped up to
-#'   it before differentiating. Used for depth, where land is clamped to the
-#'   waterline rather than removed.
+#'   it on the fine grid, in both the returned covariate and the gradient's
+#'   input. Used for depth, where land is clamped to the waterline (0 m) rather
+#'   than removed. Before DSMHelper 0.50.0 only the gradient's input was
+#'   clamped, so the returned depth kept land elevations as negative depths.
 #' @param fill logical(1). Whether to NA-fill before differentiating. FALSE for
 #'   covariates with no gaps.
 #' @return list with `covar` and `grad`, both SpatRasters on `coarse`.
@@ -11868,6 +11870,7 @@ fine.gradient <- function(src, coarse, coarse.km, mid.lat,
   checkmate::expect_class(coarse, "SpatRaster")
   checkmate::expect_number(coarse.km, lower = 0, finite = TRUE)
   checkmate::expect_flag(fill)
+  checkmate::expect_number(clamp.lower, finite = TRUE, null.ok = TRUE)
 
   n <- gradient.disagg.factor(src, coarse.km, mid.lat)
   fine <- if (n > 1) terra::disagg(coarse, fact = n) else coarse
@@ -11876,9 +11879,21 @@ fine.gradient <- function(src, coarse, coarse.km, mid.lat,
   x <- terra::project(src, fine, method = "average", threads = TRUE)
   names(x) <- names(src)
 
-  g.in <- x
+  # Clamp the covariate itself, on the fine grid, before both the gradient and
+  # the reduction to `coarse` (0.50.0). Until 0.49.0 only the gradient's input
+  # was clamped and `covar` was returned unclamped, so for depth a coastal cell
+  # that is mostly land kept the land's elevation as a negative depth: 2,479 Atl
+  # IMRP segment rows (down to -251 m) and 770 of its 15,991 prediction cells
+  # (down to -390 m), mostly ships in harbour, where the "depth" said more about
+  # the hills behind the port than the water. Clamping here, at the same point
+  # the gradient input was always clamped, leaves the gradient bit-identical and
+  # changes only the covariate. Clamping commutes with the median reduction
+  # below (median of clamped values = clamp of the median), so it is the same
+  # as clamping the reduced raster when GRADIENT_AGG_FUN is median.
   if (!is.null(clamp.lower))
-    g.in <- terra::clamp(g.in, lower = clamp.lower, values = TRUE)
+    x <- terra::clamp(x, lower = clamp.lower, values = TRUE)
+
+  g.in <- x
   if (fill)
     for (i in seq_len(GRADIENT_NA_FILL_PASSES))
       g.in <- terra::focal(g.in, w = 3, fun = mean, na.rm = TRUE,

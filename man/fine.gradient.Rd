@@ -16,8 +16,10 @@ fine.gradient(src, coarse, coarse.km, mid.lat, clamp.lower = NULL, fill = TRUE)
 \item{mid.lat}{numeric(1). Study area centre latitude.}
 
 \item{clamp.lower}{numeric(1) or NULL. Values below this are clamped up to
-it before differentiating. Used for depth, where land is clamped to the
-waterline rather than removed.}
+it on the fine grid, in both the returned covariate and the gradient's
+input. Used for depth, where land is clamped to the waterline (0 m) rather
+than removed. Before DSMHelper 0.50.0 only the gradient's input was
+clamped, so the returned depth kept land elevations as negative depths.}
 
 \item{fill}{logical(1). Whether to NA-fill before differentiating. FALSE for
 covariates with no gaps.}
