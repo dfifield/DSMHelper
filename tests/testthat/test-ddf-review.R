@@ -156,6 +156,22 @@ test_that("size.sensitivity reports the coefficient, size distribution and trimm
   t0 <- Sys.time(); sz2 <- size.sensitivity(cands, cache, workers = 1)
   expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 5)
   expect_equal(sz2$size_beta_trim, sz$size_beta_trim)
+  expect_equal(sz$size_term, "size")
+
+  # The same data with log flock size as the covariate (#168): the
+  # coefficient is found under its own name, and sigma_ratio is on the log
+  # scale, exp(beta * (log(q95) - log(q50))).
+  dat$logsize <- log(dat$size)
+  folder2 <- file.path(res, "NOFU", "DF Summaries_ECSAS_Ship_F_D")
+  dir.create(folder2, recursive = TRUE)
+  suppressWarnings(run.ddf.model(data.frame(label = "hn.logsize", key = "hn", adj = "", form = "~logsize"),
+                                 data = dat, folder = folder2, verbose = FALSE, truncation = 0.3))
+  cands2 <- collect.ddf.candidates(res, list(NOFU = list(ECSAS_Ship_F_D = list())))
+  sl <- size.sensitivity(cands2[cands2$species == "NOFU", ], file.path(res, "sl.rds"), workers = 1)
+  expect_equal(sl$size_term, "logsize")
+  expect_false(is.na(sl$size_beta))
+  expect_equal(sl$sigma_ratio, exp(sl$size_beta * (log(sl$size_q95) - log(sl$size_q50))))
+  expect_false(is.na(sl$size_beta_trim))
 })
 
 test_that("bin1, season-p, sparse-ddftype and fishing-excl flags", {

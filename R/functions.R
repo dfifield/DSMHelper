@@ -13280,12 +13280,18 @@ ddf.choices.text <- function(choices) {
 
 #' Size-effect checks for candidate detection functions
 #'
-#' For every fitted candidate with a \code{size} covariate, answers the review
-#' checklist's size question: is the coefficient plausible, and do a few
-#' extreme flocks drive it? Reports the size coefficient and its SE (from the
-#' saved fit's Hessian), the flock-size distribution, how much sigma changes
-#' between the median and the 95th-percentile flock, and a refit without the
-#' largest \code{trim} share of flocks.
+#' For every fitted candidate with a \code{size} or \code{logsize} covariate,
+#' answers the review checklist's size question: is the coefficient plausible,
+#' and do a few extreme flocks drive it? Reports the size coefficient and its
+#' SE (from the saved fit's Hessian), the flock-size distribution, how much
+#' sigma changes between the median and the 95th-percentile flock, and a refit
+#' without the largest \code{trim} share of flocks.
+#'
+#' \code{logsize} is \code{log(size)}, a data column the pipeline adds
+#' (Atlantic-DSM #168, Dave 2026-11-24): on the log scale each doubling of
+#' flock size changes sigma by the same factor, so a few very large flocks
+#' pull on the coefficient far less than with \code{size}. Its coefficient is
+#' per unit of log size, and \code{sigma_ratio} is computed on that scale.
 #'
 #' The refit is the slow part: about 2.5 min for one hazard-rate
 #' \code{~ Season + size} fit on NL_EXPL_DRL_RA BLKI ship-flying (n = 5,445),
@@ -13303,7 +13309,7 @@ ddf.choices.text <- function(choices) {
 #'   \code{sigma_ratio} (sigma at the 95th-percentile flock over sigma at the
 #'   median), \code{trim_above}, \code{n_trimmed}, \code{size_beta_trim},
 #'   \code{size_se_trim}, \code{p_trim} (Horvitz-Thompson average p of the
-#'   refit) and \code{trim_note}.
+#'   refit), \code{size_term} ("size" or "logsize") and \code{trim_note}.
 #' @examples
 #' \dontrun{
 #' sz <- size.sensitivity(cands, file.path(RDataDir, "ddf_review_size_sensitivity.rds"))
@@ -13350,10 +13356,12 @@ size.sensitivity <- function(cands, cache.file, trim = 0.01,
              size_q95 = NA_real_, size_q99 = NA_real_, size_max = NA_real_,
              sigma_ratio = NA_real_, trim_above = NA_real_, n_trimmed = NA_integer_,
              size_beta_trim = NA_real_, size_se_trim = NA_real_, p_trim = NA_real_,
-             trim_note = "")
+             size_term = NA_character_, trim_note = "")
+  # The size term is either "size" (flock size) or "logsize" (log of it);
+  # mrds names the coefficient after the data column.
   coef.se <- function(d) {
-    i <- which(names(d$par) == "size")
-    if (!length(i)) return(c(NA, NA))
+    i <- which(names(d$par) %in% c("size", "logsize"))[1]
+    if (is.na(i)) return(c(NA, NA))
     vc <- tryCatch(solve(d$hessian), error = function(e) NULL)
     c(d$par[i], if (is.null(vc)) NA else sqrt(diag(vc))[i])
   }
@@ -13367,7 +13375,12 @@ size.sensitivity <- function(cands, cache.file, trim = 0.01,
   out <- na
   out$size_beta <- cs[1]; out$size_se <- cs[2]
   out$size_q50 <- q[1]; out$size_q95 <- q[2]; out$size_q99 <- q[3]; out$size_max <- max(sz)
-  out$sigma_ratio <- exp(cs[1] * (q[2] - q[1]))
+  # sigma = exp(... + beta * x), so the ratio between the 95th-percentile and
+  # the median flock is exp(beta * (x95 - x50)), with x the covariate's own
+  # scale: flock size, or log flock size for a logsize term.
+  out$size_term <- if ("logsize" %in% names(d$par)) "logsize" else "size"
+  x <- if (out$size_term == "logsize") log(q) else q
+  out$sigma_ratio <- exp(cs[1] * (x[2] - x[1]))
   cut <- stats::quantile(sz, 1 - trim, names = FALSE, type = 1)
   keep <- sz <= cut
   out$trim_above <- cut
