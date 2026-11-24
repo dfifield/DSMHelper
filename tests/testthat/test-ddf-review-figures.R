@@ -122,12 +122,13 @@ test_that("ddf.term.drop compares each covariate candidate with its nested ones"
   expect_false(grepl("term-no-p", f[["hr.Season"]]))
 })
 
-test_that("ddf.term.drop reports birds and moved from per-detection p", {
-  # Three detections: flocks of 1, 1 and 10. Without size every p is 0.5; with
-  # size the big flock's p rises to 0.8 and the singles' fall to 0.4. With
-  # size the birds are N = 2.5 + 2.5 + 12.5 = 17.5, without N = 2 + 2 + 20 = 24.
-  obs.with <- data.frame(object = 1:3, size = c(1, 1, 10), p = c(0.4, 0.4, 0.8))
-  obs.wo   <- data.frame(object = 3:1, size = c(10, 1, 1), p = c(0.5, 0.5, 0.5))  # shuffled order
+test_that("ddf.term.drop reports abundance and shifted from per-detection p", {
+  # Three detections, each on its own segment: flocks of 1, 1 and 10. Without
+  # size every p is 0.5; with size the big flock's p rises to 0.8 and the
+  # singles' fall to 0.4. Estimated abundance with size is
+  # 2.5 + 2.5 + 12.5 = 17.5, without 2 + 2 + 20 = 24.
+  obs.with <- data.frame(object = 1:3, segment = c("a", "b", "c"), size = c(1, 1, 10), p = c(0.4, 0.4, 0.8))
+  obs.wo   <- data.frame(object = 3:1, segment = c("c", "b", "a"), size = c(10, 1, 1), p = 0.5)  # shuffled order
   cands <- tibble::tibble(
     species = "NOFU", ddftype = "ECSAS_Ship_W_D",
     model = c("hr.size", "hr"), key = "hr", formula = c("~ size", "~1"),
@@ -135,17 +136,25 @@ test_that("ddf.term.drop reports birds and moved from per-detection p", {
     obs_p = list(obs.with, obs.wo))
   out <- ddf.term.drop(cands)
   d <- out$drop_text[out$model == "hr.size"]
-  # dropping size: birds 24 / 17.5 - 1 = +37.1%
-  expect_match(d, "birds \\+37.1%")
-  # shares with size: 1/7, 1/7, 5/7; without: 1/12, 1/12, 10/12.
-  # moved = 0.5 * (2 * (1/7 - 1/12) + (10/12 - 5/7)) = 0.5 * (10/84 + 10/84) = 10/84
-  expect_match(d, sprintf("moved %.1f%%", 100 * 10 / 84))
+  # dropping size: abundance 24 / 17.5 - 1 = +37.1%
+  expect_match(d, "abundance \\+37.1%")
+  # segment shares with size: 1/7, 1/7, 5/7; without: 1/12, 1/12, 10/12.
+  # shifted = 0.5 * (2 * (1/7 - 1/12) + (10/12 - 5/7)) = 0.5 * (10/84 + 10/84) = 10/84
+  expect_match(d, sprintf("shifted %.1f%%", 100 * 10 / 84))
   expect_equal(out$drop_min_change[out$model == "hr.size"], 24 / 17.5 - 1)
-  # a mismatched pair (different detections) gives no birds measures, not a guess
-  cands$obs_p[[2]] <- data.frame(object = 4:6, size = 1, p = 0.5)
-  expect_false(grepl("birds", ddf.term.drop(cands)$drop_text[1]))
+  # Put the big flock and one single on the same segment "ac": a shift between
+  # those two detections no longer counts, because the DSM sees only the
+  # segment's total. Segment shares: "ac" 6/7 with size vs 11/12 without, "b"
+  # 1/7 vs 1/12, so shifted = 0.5 * 2 * (1/7 - 1/12) = 5/84, half the figure
+  # with every detection on its own segment.
+  cands$obs_p[[1]]$segment <- c("ac", "b", "ac")
+  cands$obs_p[[2]]$segment <- c("ac", "b", "ac")   # object 3, 2, 1
+  expect_match(ddf.term.drop(cands)$drop_text[1], sprintf("shifted %.1f%%", 100 * 5 / 84))
+  # a mismatched pair (different detections) gives no abundance measures, not a guess
+  cands$obs_p[[2]] <- data.frame(object = 4:6, segment = "x", size = 1, p = 0.5)
+  expect_false(grepl("abundance", ddf.term.drop(cands)$drop_text[1]))
   # without obs_p the text is as before
-  expect_false(grepl("birds", ddf.term.drop(cands[, names(cands) != "obs_p"])$drop_text[1]))
+  expect_false(grepl("abundance", ddf.term.drop(cands[, names(cands) != "obs_p"])$drop_text[1]))
 })
 
 test_that("ddf.obs.p reads each detection's object, size and p", {

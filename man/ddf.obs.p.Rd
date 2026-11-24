@@ -2,7 +2,7 @@
 % Please edit documentation in R/functions.R
 \name{ddf.obs.p}
 \alias{ddf.obs.p}
-\title{Each detection's p and flock size, for every key-only or covariate candidate}
+\title{Each detection's segment, p and flock size, for every key-only or covariate candidate}
 \usage{
 ddf.obs.p(cands, cache.file, workers = max(1, parallel::detectCores() - 4))
 }
@@ -16,20 +16,22 @@ ddf.obs.p(cands, cache.file, workers = max(1, parallel::detectCores() - 4))
 \value{
 A tibble, one row per loaded candidate: \code{species},
 \code{ddftype}, \code{model} and the list column \code{obs_p}, a data
-frame of \code{object}, \code{size} and \code{p} (NULL when the model
-could not be loaded).
+frame of \code{object}, \code{segment}, \code{size} and \code{p}
+(NULL when the model could not be loaded).
 }
 \description{
 Loads each fitted candidate without adjustment terms (the ones
 \code{\link{ddf.term.drop}} compares) and keeps, per detection, its object
-ID, flock size and fitted p. \code{ddf.term.drop()} needs these because a
-size or weather term can leave the average p unchanged and still change the
-estimate: the DSM counts each detection as \code{size / p}, so a term that
-raises p for some detections and lowers it for others moves birds between
-them, and a size term changes the total itself. Measured on NL_EXPL_DRL_RA
-NOFU ship-water (Atlantic-DSM #168): dropping size from
+ID, segment (\code{Sample.Label}), flock size and fitted p.
+\code{ddf.term.drop()} needs these because a size or weather term can leave
+the average p unchanged and still change the estimate: the DSM credits each
+segment with \eqn{\sum size/p} over its detections, so a term that raises p
+for some detections and lowers it for others shifts estimated abundance
+between segments, and a size term changes the total itself. Measured on
+NL_EXPL_DRL_RA NOFU ship-water (Atlantic-DSM #168): dropping size from
 \code{hr ~ Season + size + Windspeed} leaves the average p at 0.48 but
-gives 28\\% more birds, the extra all in flocks of 3 or fewer.
+raises the total estimated abundance by 28\\%, almost all of it on
+detections of flocks over 10, which then count about twice as much.
 }
 \details{
 Loading is the slow part (one \code{.RData} per candidate), so models load

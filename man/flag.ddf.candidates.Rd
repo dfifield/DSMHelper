@@ -65,7 +65,8 @@ left out of the fit (\code{fishingAffectedSpecies}); their ddftypes get
 
 \item{term.p.change}{Relative change below which dropping a covariate term
 counts as making no difference (\code{term-no-p}): in average p, any
-season's p, total birds, and the share of birds moved between detections.}
+season's p, total estimated abundance, and the share of it that shifts
+between segments.}
 }
 \value{
 A list: \code{candidates} (\code{cands} with \code{flags}) and
@@ -95,7 +96,7 @@ counted, because each covariate level brings its own histogram);
 \code{gof-season} (the per-season chi-square of \code{\link{ddf.season.fit}},
 from \code{season_gof_p}, below \code{gof.alpha}); \code{term-no-p} (some
 covariate term changes neither the average p, any season's p, the total
-birds nor where they sit (the share moved) by more than
+estimated abundance nor the share of it on each segment by more than
 \code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
 \code{low-p}
 (any per-observation p below the threshold used in
