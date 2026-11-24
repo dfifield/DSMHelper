@@ -975,11 +975,33 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   key <- if (is.null(cell.col)) paste(grid$x, grid$y, grid$Season) else paste(grid[[cell.col]], grid$Season)
   if (anyDuplicated(key)) stop("grid has more than one row per cell x season")
 
-  # g is the grid stacked length(lv) times: rows 1..n are level 1, rows
-  # n+1..2n level 2, and so on (rep(times = ) repeats the whole row sequence;
-  # rep(each = ) gives each level for a whole block of n rows, matching it).
-  g <- grid[rep(seq_len(nrow(grid)), times = length(lv)), , drop = FALSE]
-  g$platform <- factor(rep(lv, each = nrow(grid)), levels = lv)
+  # ---- The harbour mixture (#173, 0.51.0) ----
+  # A fit with the harbour term predicts each cell as (1 - s) of its area at
+  # harbour = 0 plus s at harbour = 1 (harbour.mixture.rows()): gx is the
+  # grid with those rows, the area column holding each row's share of its
+  # cell's area, and src the original grid row of each gx row. Everything
+  # below works per gx row and sums back to grid rows through row_of, which
+  # maps through src, so a cell's two rows are summed like its platform copies
+  # (within each draw too, before any quantile). get_index() weights each row
+  # by its own area, so its totals are the mixture's. Without the term gx is
+  # the grid and src 1..n, exactly as before.
+  if (model.uses.harbour(fit)) {
+    if (is.null(grid$harbour.share))
+      stop("get.sdmtmb.surface: the fit has the harbour term but the grid has no harbour.share column")
+    mix <- harbour.mixture.rows(grid, grid$area)
+    gx <- mix$df
+    gx$area <- mix$off.set
+    src <- mix$source.row
+  } else {
+    gx <- grid
+    src <- seq_len(nrow(grid))
+  }
+
+  # g is gx stacked length(lv) times: rows 1..m are level 1, rows m+1..2m
+  # level 2, and so on (rep(times = ) repeats the whole row sequence;
+  # rep(each = ) gives each level for a whole block of m rows, matching it).
+  g <- gx[rep(seq_len(nrow(gx)), times = length(lv)), , drop = FALSE]
+  g$platform <- factor(rep(lv, each = nrow(gx)), levels = lv)
   g <- prepare.sdmtmb.data(g, season.levels)
   # prepare.sdmtmb.data() drops unused platform levels. All levels are used
   # here, but re-impose the fit's exact level set and order anyway, because
@@ -987,10 +1009,11 @@ get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim =
   # mismatch would shift columns.
   g$platform <- factor(as.character(g$platform), levels = lv)
 
-  # row_of[i] is the original grid row of stacked row i: 1..n, 1..n, ...
-  # rowsum(..., row_of) then adds the platform copies of each cell back into
-  # one value per original grid row.
-  row_of <- rep(seq_len(nrow(grid)), times = length(lv))
+  # row_of[i] is the original grid row of stacked row i: src, src, ... (1..n,
+  # 1..n, ... without the harbour term). rowsum(..., row_of) then adds the
+  # platform copies of each cell, and its harbour copy, back into one value
+  # per original grid row.
+  row_of <- rep(src, times = length(lv))
 
   # Offset 0 for every prediction row. sdmTMB would otherwise look for the
   # offset column (log segment area), which the grid does not have. With

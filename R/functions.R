@@ -10997,10 +10997,29 @@ dsm.pred <-
     # this reaches the right place. It is a no-op for a model that was fitted
     # without discrete (e.g. via dsm.options$exact.refit), which is
     # the other, broader way to get the same guarantee.
-    ret <- ret %>%
-      dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area,
-                                   discrete = FALSE),
-                    Dens = NHat/area)
+    # A model with the harbour term (#173, DSMHelper 0.51.0) predicts each
+    # cell as the exact mixture (1 - s) x N(harbour = 0) + s x N(harbour = 1),
+    # s being the cell's harbour.share. harbour.mixture.rows() writes it as the
+    # grid's rows with their area scaled to 1 - s (harbour = 0), plus a copy
+    # with area x s (harbour = 1) for each partly-harbour cell; rowsum() over
+    # source.row adds each copy back into its own row, in row order. The same
+    # rows go to get.per.cell.var() in 04.00, so prediction and variance
+    # agree. A model without the term predicts exactly as before.
+    if (model.uses.harbour(model)) {
+      if (is.null(ret$harbour.share))
+        stop("dsm.pred: model '", modname, "' has the harbour term but predgrid has no ",
+             "harbour.share column; re-run 00.03 after 00.01 has written the ports")
+      mix <- harbour.mixture.rows(ret, ret$area)
+      n_rows <- predict(model, newdata = mix$df, off.set = mix$off.set, discrete = FALSE)
+      nhat <- rowsum(as.numeric(n_rows), mix$source.row, reorder = TRUE)[, 1]
+      stopifnot(length(nhat) == nrow(ret))
+      ret <- ret %>% dplyr::mutate(NHat = unname(nhat), Dens = NHat / area)
+    } else {
+      ret <- ret %>%
+        dplyr::mutate(NHat = predict(model, newdata=ret, off.set=ret$area,
+                                     discrete = FALSE),
+                      Dens = NHat/area)
+    }
 
     # Create summed (ie Combined Nhat) across all levels of platform.
     ret <- ret %>%
@@ -11664,7 +11683,11 @@ create.dsm.data <- function(species, df.mod.specs, init_segdata) {
       platform,
       ddftype_orig,
       Season,
-      dplyr::ends_with(".sc")
+      dplyr::ends_with(".sc"),
+      # The 0/1 harbour flag 00.04 adds (#173, 0.51.0): kept when present, so
+      # every species' DSM data carry it and harbourAffectedSpecies can use it.
+      # any_of() so segment data from before 0.51.0 still pass.
+      dplyr::any_of("harbour")
     ) %>%
     # Now that platform has been created, turn it into a factor, and assign
     # ddfobj based on conversion vector created above

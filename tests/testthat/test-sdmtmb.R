@@ -294,3 +294,36 @@ test_that("a fishing term with no detection in a season is fixed, as if its rows
   # sdmTMB always fills a map for b_j itself, so check nothing in it is fixed.
   expect_false(any(is.na(fit_off$tmb_map$b_j)))
 })
+
+test_that("a harbour fit predicts each cell as the mixture (0.51.0, Atlantic-DSM #173)", {
+  # Segments in the west strip (x < 30 km) are "harbour", with 5x the birds.
+  d <- make.sim.data(seed = 3)
+  d$harbour <- as.numeric(d$x < 3e4)
+  d$abundance.est <- d$abundance.est * ifelse(d$harbour == 1, 5, 1)
+  d <- prepare.sdmtmb.data(d, seasons)
+  m <- bind.sdmtmb.mesh(d, fm, land)
+  fit_h <- fit.sdmtmb.dsm(add.sdmtmb.harbour.term(sdmtmb.dsm.formula("depth")), d, m, "tw", range.km = 60)
+  expect_true(model.uses.harbour(fit_h))
+  expect_false(model.uses.harbour(fit_tw))
+  # A grid whose cells are 0, 30% and 100% harbour.
+  grid <- expand.grid(cell = 1:30, Season = seasons, stringsAsFactors = FALSE)
+  set.seed(4)
+  grid$x <- rep(stats::runif(30, 0, 2e5), 4)
+  grid$y <- rep(stats::runif(30, 0, 2e5), 4)
+  grid$depth <- grid$x / 1000
+  grid$area <- 4
+  share <- rep(c(0, 0.3, 1), length.out = 30)
+  grid$harbour.share <- rep(share, 4)
+  s <- get.sdmtmb.surface(fit_h, grid, seasons, cell.col = "cell", nsim = 10)
+  # Each cell is (1 - s) x its all-ordinary abundance + s x its all-harbour one.
+  s0 <- get.sdmtmb.surface(fit_h, transform(grid, harbour.share = 0), seasons, cell.col = "cell", bias.correct = FALSE)
+  s1 <- get.sdmtmb.surface(fit_h, transform(grid, harbour.share = 1), seasons, cell.col = "cell", bias.correct = FALSE)
+  expect_equal(s$cells$N, (1 - grid$harbour.share) * s0$cells$N + grid$harbour.share * s1$cells$N, tolerance = 1e-8)
+  # One row per grid row still, and get_index's plain total is the mixture's.
+  expect_identical(nrow(s$cells), nrow(grid))
+  expect_equal(s$totals$N_median_sum, s$totals$N_plain, tolerance = 1e-8)
+  expect_true(all(s$cells$lo <= s$cells$hi))
+  # Without harbour.share the harbour fit refuses to predict.
+  expect_error(get.sdmtmb.surface(fit_h, grid[, names(grid) != "harbour.share"], seasons, cell.col = "cell"),
+               "harbour.share")
+})
