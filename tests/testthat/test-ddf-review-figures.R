@@ -122,6 +122,55 @@ test_that("ddf.term.drop compares each covariate candidate with its nested ones"
   expect_false(grepl("term-no-p", f[["hr.Season"]]))
 })
 
+test_that("ddf.term.drop reports birds and moved from per-detection p", {
+  # Three detections: flocks of 1, 1 and 10. Without size every p is 0.5; with
+  # size the big flock's p rises to 0.8 and the singles' fall to 0.4. With
+  # size the birds are N = 2.5 + 2.5 + 12.5 = 17.5, without N = 2 + 2 + 20 = 24.
+  obs.with <- data.frame(object = 1:3, size = c(1, 1, 10), p = c(0.4, 0.4, 0.8))
+  obs.wo   <- data.frame(object = 3:1, size = c(10, 1, 1), p = c(0.5, 0.5, 0.5))  # shuffled order
+  cands <- tibble::tibble(
+    species = "NOFU", ddftype = "ECSAS_Ship_W_D",
+    model = c("hr.size", "hr"), key = "hr", formula = c("~ size", "~1"),
+    adj = NA, failed = FALSE, AIC = c(100, 110), BIC = c(104, 112), p = c(0.48, 0.5),
+    obs_p = list(obs.with, obs.wo))
+  out <- ddf.term.drop(cands)
+  d <- out$drop_text[out$model == "hr.size"]
+  # dropping size: birds 24 / 17.5 - 1 = +37.1%
+  expect_match(d, "birds \\+37.1%")
+  # shares with size: 1/7, 1/7, 5/7; without: 1/12, 1/12, 10/12.
+  # moved = 0.5 * (2 * (1/7 - 1/12) + (10/12 - 5/7)) = 0.5 * (10/84 + 10/84) = 10/84
+  expect_match(d, sprintf("moved %.1f%%", 100 * 10 / 84))
+  expect_equal(out$drop_min_change[out$model == "hr.size"], 24 / 17.5 - 1)
+  # a mismatched pair (different detections) gives no birds measures, not a guess
+  cands$obs_p[[2]] <- data.frame(object = 4:6, size = 1, p = 0.5)
+  expect_false(grepl("birds", ddf.term.drop(cands)$drop_text[1]))
+  # without obs_p the text is as before
+  expect_false(grepl("birds", ddf.term.drop(cands[, names(cands) != "obs_p"])$drop_text[1]))
+})
+
+test_that("ddf.obs.p reads each detection's object, size and p", {
+  skip_if_not_installed("Distance")
+  set.seed(1)
+  n <- 300
+  dat <- data.frame(object = seq_len(n), size = sample(1:5, n, replace = TRUE),
+                    distance = abs(rnorm(n, 0, 0.12)))
+  dat <- dat[dat$distance < 0.3, ]
+  model <- suppressWarnings(suppressMessages(
+    Distance::ds(dat, key = "hn", formula = ~ size, truncation = 0.3, quiet = TRUE)))
+  td <- tempfile("obsp"); dir.create(td); on.exit(unlink(td, recursive = TRUE), add = TRUE)
+  f <- file.path(td, "AIC_1_hn.size.RData")
+  save(model, file = f)
+  cands <- tibble::tibble(species = "X", ddftype = "Ship_W_D", model = "hn.size",
+                          failed = FALSE, adj = NA, rdata = f)
+  op <- ddf.obs.p(cands, file.path(td, "cache.rds"), workers = 1)
+  o <- op$obs_p[[1]]
+  expect_equal(o$object, model$ddf$data$object)
+  expect_equal(o$p, as.numeric(stats::fitted(model$ddf)))
+  # second call comes from the cache
+  expect_true(file.exists(file.path(td, "cache.rds")))
+  expect_equal(ddf.obs.p(cands, file.path(td, "cache.rds"), workers = 1)$obs_p[[1]], o)
+})
+
 test_that("shape>3 counts shape parameters only, gof-df0 and gof-season fire", {
   cands <- tibble::tibble(
     species = "BLKI", ddftype = "ECSAS_Ship_W_D",

@@ -13082,8 +13082,9 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' - 1 - n_par <= 0, so its p-value says nothing: read \code{gof-season});
 #' \code{gof-season} (the per-season chi-square of \code{\link{ddf.season.fit}},
 #' from \code{season_gof_p}, below \code{gof.alpha}); \code{term-no-p} (some
-#' covariate term changes neither the average p nor any season's p by more
-#' than \code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
+#' covariate term changes neither the average p, any season's p, the total
+#' birds nor where they sit (the share moved) by more than
+#' \code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
 #' \code{low-p}
 #' (any per-observation p below the threshold used in
 #' \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
@@ -13106,9 +13107,9 @@ collect.ddf.candidates <- function(results.dir, df.mod.list, p.low = 0.15) {
 #' @param p.outlier Absolute p difference for \code{p-outlier}.
 #' @param gof.alpha Threshold for \code{gof}.
 #' @param max.par Shape-parameter count above which \code{shape>3} is raised.
-#' @param term.p.change Relative change in p (average or any season) below
-#'   which dropping a covariate term counts as making no difference
-#'   (\code{term-no-p}).
+#' @param term.p.change Relative change below which dropping a covariate term
+#'   counts as making no difference (\code{term-no-p}): in average p, any
+#'   season's p, total birds, and the share of birds moved between detections.
 #' @param min.season.n Season size for \code{sparse-season}.
 #' @param p.spread Relative p spread for \code{p-spread}.
 #' @param size.p.change Change in average p, after dropping the largest flocks
@@ -13719,6 +13720,89 @@ ddf.review.figures <- function(cands, out.dir, cache.file,
 }
 
 
+#' Each detection's p and flock size, for every key-only or covariate candidate
+#'
+#' Loads each fitted candidate without adjustment terms (the ones
+#' \code{\link{ddf.term.drop}} compares) and keeps, per detection, its object
+#' ID, flock size and fitted p. \code{ddf.term.drop()} needs these because a
+#' size or weather term can leave the average p unchanged and still change the
+#' estimate: the DSM counts each detection as \code{size / p}, so a term that
+#' raises p for some detections and lowers it for others moves birds between
+#' them, and a size term changes the total itself. Measured on NL_EXPL_DRL_RA
+#' NOFU ship-water (Atlantic-DSM #168): dropping size from
+#' \code{hr ~ Season + size + Windspeed} leaves the average p at 0.48 but
+#' gives 28\% more birds, the extra all in flocks of 3 or fewer.
+#'
+#' Loading is the slow part (one \code{.RData} per candidate), so models load
+#' on \code{workers} parallel R processes and the result is cached in
+#' \code{cache.file}, keyed by each model file's path and modification time.
+#'
+#' @param cands Output of \code{\link{collect.ddf.candidates}}.
+#' @param cache.file Path of the cache (an \code{.rds} under \code{RDataDir}).
+#' @param workers Parallel R processes. 1 runs in this session.
+#' @return A tibble, one row per loaded candidate: \code{species},
+#'   \code{ddftype}, \code{model} and the list column \code{obs_p}, a data
+#'   frame of \code{object}, \code{size} and \code{p} (NULL when the model
+#'   could not be loaded).
+#' @examples
+#' \dontrun{
+#' op <- ddf.obs.p(cands, file.path(RDataDir, "ddf_review_obs_p.rds"))
+#' cands <- ddf.term.drop(dplyr::left_join(cands, op, by = c("species", "ddftype", "model")))
+#' }
+#' @export
+ddf.obs.p <- function(cands, cache.file, workers = max(1, parallel::detectCores() - 4)) {
+  checkmate::assert_data_frame(cands)
+  checkmate::assert_names(names(cands), must.include = c("species", "ddftype", "model", "failed", "adj", "rdata"))
+  checkmate::assert_string(cache.file)
+  checkmate::assert_count(workers, positive = TRUE)
+
+  # Only candidates ddf.term.drop() can pair up: fitted, no adjustment terms.
+  todo <- cands[!cands$failed & is.na(cands$adj) & file.exists(cands$rdata),
+                c("species", "ddftype", "model", "rdata")]
+  if (!nrow(todo)) return(tibble::tibble())
+  todo$cache_key <- paste(todo$rdata, as.numeric(file.mtime(todo$rdata)), sep = "|")
+
+  # Load only what the cache lacks; a changed model file has a new key.
+  cache <- if (file.exists(cache.file)) readRDS(cache.file) else list()
+  need <- unique(todo$cache_key[!todo$cache_key %in% names(cache)])
+  if (length(need)) {
+    files <- todo$rdata[match(need, todo$cache_key)]
+    nw <- min(workers, length(files))
+    message(sprintf("ddf.obs.p: loading %d candidate model(s) on %d worker(s)", length(files), nw))
+    res <- if (nw == 1) {
+      lapply(files, .obs.p.one)
+    } else {
+      cl <- parallel::makeCluster(nw)
+      on.exit(parallel::stopCluster(cl), add = TRUE)
+      # workers need this session's library paths (renv), or Distance/mrds are
+      # missing (the knitr-worker problem of Atlantic-DSM #159)
+      parallel::clusterCall(cl, function(p) invisible(.libPaths(p)), .libPaths())
+      parallel::parLapplyLB(cl, files, .obs.p.one)
+    }
+    names(res) <- need
+    # keep only entries for current model files, so the cache doesn't grow
+    cache <- c(cache[names(cache) %in% todo$cache_key & !names(cache) %in% need], res)
+    saveRDS(cache, cache.file)
+  }
+  tibble::tibble(species = todo$species, ddftype = todo$ddftype, model = todo$model,
+                 obs_p = unname(cache[todo$cache_key]))
+}
+
+# One candidate for ddf.obs.p(): its detections' object ID, flock size and
+# fitted p (mrds's fitted(), each detection's average detection probability
+# over 0..W given its covariates). Runs on a cluster worker, so it loads the
+# namespaces itself, and returns NULL rather than stopping on a bad file.
+.obs.p.one <- function(rdata) {
+  requireNamespace("Distance", quietly = TRUE)
+  requireNamespace("mrds", quietly = TRUE)
+  e <- new.env()
+  ok <- tryCatch({ load(rdata, envir = e); TRUE }, error = function(err) FALSE)
+  if (!ok || is.null(e$model$ddf)) return(NULL)
+  d <- e$model$ddf
+  data.frame(object = d$data$object, size = d$data$size, p = as.numeric(stats::fitted(d)))
+}
+
+
 #' What dropping each covariate term does to a candidate
 #'
 #' For each candidate with covariates, and each term in its formula, finds the
@@ -13730,12 +13814,27 @@ ddf.review.figures <- function(cands, out.dir, cache.file,
 #' average nor any season's p by much is a candidate for dropping, whatever
 #' its AIC.
 #'
+#' Average p is the wrong test for a size or weather term, though: the DSM
+#' counts each detection as \code{size / p}, so such a term can leave the
+#' average p unchanged while changing the number of birds or moving them
+#' between detections (see \code{\link{ddf.obs.p}}). When \code{cands} has
+#' the per-detection \code{obs_p} column, each line also reports
+#' \strong{birds}, the relative change in \eqn{\sum size/p} from dropping the
+#' term, and \strong{moved}, the share of the birds the two models put on
+#' different detections: half the summed absolute difference between the two
+#' models' shares, \eqn{\frac12 \sum_i |N_i/\sum N - N_i'/\sum N'|} with
+#' \eqn{N_i = size_i / p_i}. It is 0 when dropping the term only rescales
+#' every detection alike, and 1 at most. Both count towards
+#' \code{drop_min_change}.
+#'
 #' @param cands Output of \code{\link{collect.ddf.candidates}}, with
-#'   \code{BIC} and, from \code{\link{ddf.review.figures}}, \code{season_p_num}.
+#'   \code{BIC} and, from \code{\link{ddf.review.figures}}, \code{season_p_num};
+#'   optionally \code{obs_p} from \code{\link{ddf.obs.p}}.
 #' @return \code{cands} with \code{drop_text} (one line per term, for the
 #'   page) and \code{drop_min_change} (over the formula's terms, the smallest
 #'   of max(|relative change in average p|, |largest relative change in a
-#'   season's p|): small means some term barely matters).
+#'   season's p|, |relative change in birds|, share of birds moved): small
+#'   means some term barely matters).
 #' @examples
 #' \dontrun{
 #' cands <- ddf.term.drop(cands)
@@ -13750,6 +13849,22 @@ ddf.term.drop <- function(cands) {
   terms.of <- function(f) if (is.na(f) || f == "~1") character(0) else attr(stats::terms(stats::as.formula(f)), "term.labels")
   has.bic <- "BIC" %in% names(cands)
   has.sp <- "season_p_num" %in% names(cands)
+  has.obs <- "obs_p" %in% names(cands)
+
+  # Birds measures for one pair of candidates (i with the term, j without),
+  # from their per-detection object/size/p tables. Matched on object ID: both
+  # are fits to the same detections, so a mismatch means the tables don't
+  # belong together and the measures are skipped (NA) rather than guessed.
+  birds.change <- function(oi, oj) {
+    if (is.null(oi) || is.null(oj)) return(c(NA_real_, NA_real_))
+    m <- match(oi$object, oj$object)
+    if (anyNA(m) || nrow(oi) != nrow(oj)) return(c(NA_real_, NA_real_))
+    N <- oi$size / oi$p                  # birds each detection stands for, with
+    N0 <- oj$size[m] / oj$p[m]           # ... and without the term
+    c(sum(N0) / sum(N) - 1,              # change in total birds on dropping it
+      0.5 * sum(abs(N / sum(N) - N0 / sum(N0))))   # share of birds moved
+  }
+
   for (i in which(!cands$failed & !is.na(cands$formula) & cands$formula != "~1")) {
     tt <- terms.of(cands$formula[i])
     same <- which(cands$species == cands$species[i] & cands$ddftype == cands$ddftype[i] &
@@ -13767,12 +13882,15 @@ ddf.term.drop <- function(cands) {
         a <- cands$season_p_num[[i]]; b <- cands$season_p_num[[j]][names(a)]
         ds <- max(abs(b / a - 1), na.rm = TRUE)
       }
-      changes <- c(changes, max(abs(dp), ds, na.rm = TRUE))
-      lines <- c(lines, sprintf("&minus;%s: &Delta;AIC %+.1f%s, p %+.1f%%%s", t,
+      bc <- if (has.obs) birds.change(cands$obs_p[[i]], cands$obs_p[[j]]) else c(NA_real_, NA_real_)
+      changes <- c(changes, max(abs(dp), ds, abs(bc[1]), bc[2], na.rm = TRUE))
+      lines <- c(lines, sprintf("&minus;%s: &Delta;AIC %+.1f%s, p %+.1f%%%s%s", t,
                                 cands$AIC[j] - cands$AIC[i],
                                 if (has.bic) sprintf(", &Delta;BIC %+.1f", cands$BIC[j] - cands$BIC[i]) else "",
                                 100 * dp,
-                                if (is.na(ds)) "" else sprintf(", seasons up to %.1f%%", 100 * ds)))
+                                if (is.na(ds)) "" else sprintf(", seasons up to %.1f%%", 100 * ds),
+                                if (is.na(bc[1])) "" else sprintf(", birds %+.1f%%, moved %.1f%%",
+                                                                  100 * bc[1], 100 * bc[2])))
     }
     cands$drop_text[i] <- paste(lines, collapse = "<br>")
     if (length(changes)) cands$drop_min_change[i] <- min(changes)

@@ -63,9 +63,9 @@ median) above which \code{season-p} is raised.}
 left out of the fit (\code{fishingAffectedSpecies}); their ddftypes get
 \code{fishing-excl}, a reminder rather than a problem.}
 
-\item{term.p.change}{Relative change in p (average or any season) below
-which dropping a covariate term counts as making no difference
-(\code{term-no-p}).}
+\item{term.p.change}{Relative change below which dropping a covariate term
+counts as making no difference (\code{term-no-p}): in average p, any
+season's p, total birds, and the share of birds moved between detections.}
 }
 \value{
 A list: \code{candidates} (\code{cands} with \code{flags}) and
@@ -94,8 +94,9 @@ counted, because each covariate level brings its own histogram);
 \item 1 - n_par <= 0, so its p-value says nothing: read \code{gof-season});
 \code{gof-season} (the per-season chi-square of \code{\link{ddf.season.fit}},
 from \code{season_gof_p}, below \code{gof.alpha}); \code{term-no-p} (some
-covariate term changes neither the average p nor any season's p by more
-than \code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
+covariate term changes neither the average p, any season's p, the total
+birds nor where they sit (the share moved) by more than
+\code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
 \code{low-p}
 (any per-observation p below the threshold used in
 \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer

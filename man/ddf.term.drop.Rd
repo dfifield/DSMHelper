@@ -8,13 +8,15 @@ ddf.term.drop(cands)
 }
 \arguments{
 \item{cands}{Output of \code{\link{collect.ddf.candidates}}, with
-\code{BIC} and, from \code{\link{ddf.review.figures}}, \code{season_p_num}.}
+\code{BIC} and, from \code{\link{ddf.review.figures}}, \code{season_p_num};
+optionally \code{obs_p} from \code{\link{ddf.obs.p}}.}
 }
 \value{
 \code{cands} with \code{drop_text} (one line per term, for the
 page) and \code{drop_min_change} (over the formula's terms, the smallest
 of max(|relative change in average p|, |largest relative change in a
-season's p|): small means some term barely matters).
+season's p|, |relative change in birds|, share of birds moved): small
+means some term barely matters).
 }
 \description{
 For each candidate with covariates, and each term in its formula, finds the
@@ -25,6 +27,20 @@ the review checklist's "does the extra term change p?" test (Atlantic-DSM
 but too small to matter for abundance, so a term that moves neither the
 average nor any season's p by much is a candidate for dropping, whatever
 its AIC.
+}
+\details{
+Average p is the wrong test for a size or weather term, though: the DSM
+counts each detection as \code{size / p}, so such a term can leave the
+average p unchanged while changing the number of birds or moving them
+between detections (see \code{\link{ddf.obs.p}}). When \code{cands} has
+the per-detection \code{obs_p} column, each line also reports
+\strong{birds}, the relative change in \eqn{\sum size/p} from dropping the
+term, and \strong{moved}, the share of the birds the two models put on
+different detections: half the summed absolute difference between the two
+models' shares, \eqn{\frac12 \sum_i |N_i/\sum N - N_i'/\sum N'|} with
+\eqn{N_i = size_i / p_i}. It is 0 when dropping the term only rescales
+every detection alike, and 1 at most. Both count towards
+\code{drop_min_change}.
 }
 \examples{
 \dontrun{
