@@ -27,17 +27,23 @@ A tibble, one row per size candidate: \code{species},
 \code{sigma_ratio} (sigma at the 95th-percentile flock over sigma at the
 median), \code{trim_above}, \code{n_trimmed}, \code{size_beta_trim},
 \code{size_se_trim}, \code{p_trim} (Horvitz-Thompson average p of the
-refit) and \code{trim_note}.
+refit), \code{size_term} ("size" or "logsize") and \code{trim_note}.
 }
 \description{
-For every fitted candidate with a \code{size} covariate, answers the review
-checklist's size question: is the coefficient plausible, and do a few
-extreme flocks drive it? Reports the size coefficient and its SE (from the
-saved fit's Hessian), the flock-size distribution, how much sigma changes
-between the median and the 95th-percentile flock, and a refit without the
-largest \code{trim} share of flocks.
+For every fitted candidate with a \code{size} or \code{logsize} covariate,
+answers the review checklist's size question: is the coefficient plausible,
+and do a few extreme flocks drive it? Reports the size coefficient and its
+SE (from the saved fit's Hessian), the flock-size distribution, how much
+sigma changes between the median and the 95th-percentile flock, and a refit
+without the largest \code{trim} share of flocks.
 }
 \details{
+\code{logsize} is \code{log(size)}, a data column the pipeline adds
+(Atlantic-DSM #168, Dave 2026-11-24): on the log scale each doubling of
+flock size changes sigma by the same factor, so a few very large flocks
+pull on the coefficient far less than with \code{size}. Its coefficient is
+per unit of log size, and \code{sigma_ratio} is computed on that scale.
+
 The refit is the slow part: about 2.5 min for one hazard-rate
 \code{~ Season + size} fit on NL_EXPL_DRL_RA BLKI ship-flying (n = 5,445),
 where a warm start saved nothing. So refits run in parallel and are cached in

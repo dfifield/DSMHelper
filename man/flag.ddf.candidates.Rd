@@ -17,7 +17,8 @@ flag.ddf.candidates(
   bin1.tol = 0.15,
   season.p.spread = 0.3,
   min.n = 250,
-  fishing.species = character(0)
+  fishing.species = character(0),
+  term.p.change = 0.02
 )
 }
 \arguments{
@@ -34,7 +35,7 @@ label, \code{"strip"} or \code{NA}) and \code{notes}.}
 
 \item{gof.alpha}{Threshold for \code{gof}.}
 
-\item{max.par}{Parameter count above which \code{params>3} is raised.}
+\item{max.par}{Shape-parameter count above which \code{shape>3} is raised.}
 
 \item{min.season.n}{Season size for \code{sparse-season}.}
 
@@ -61,6 +62,11 @@ median) above which \code{season-p} is raised.}
 \item{fishing.species}{Species whose fishing-affected observations were
 left out of the fit (\code{fishingAffectedSpecies}); their ddftypes get
 \code{fishing-excl}, a reminder rather than a problem.}
+
+\item{term.p.change}{Relative change below which dropping a covariate term
+counts as making no difference (\code{term-no-p}): in average p, any
+season's p, total estimated abundance, and the share of it that shifts
+between segments.}
 }
 \value{
 A list: \code{candidates} (\code{cands} with \code{flags}) and
@@ -80,10 +86,26 @@ search kept no terms, so it is the plain key function); \code{optimiser}
 \code{p-outlier} (p more than \code{p.outlier} from the median p of the
 candidates within \code{close.aic}); \code{hr-spike}; \code{gof}
 (\code{gof_p < gof.alpha}); \code{bin1} (the first bin has the largest
-chi-square contribution); \code{not-monotone}; \code{params>3}; \code{low-p}
+chi-square contribution); \code{not-monotone}; \code{shape>3} (more than
+\code{max.par} shape parameters: scale intercept, hazard-rate shape and
+adjustment terms, i.e. \code{n_par - n_cov}; covariate coefficients are not
+counted, because each covariate level brings its own histogram);
+\code{gof-df0} (the pooled chi-square has no degrees of freedom left, bins
+\itemize{
+\item 1 - n_par <= 0, so its p-value says nothing: read \code{gof-season});
+\code{gof-season} (the per-season chi-square of \code{\link{ddf.season.fit}},
+from \code{season_gof_p}, below \code{gof.alpha}); \code{term-no-p} (some
+covariate term changes neither the average p, any season's p, the total
+estimated abundance nor the share of it on each segment by more than
+\code{term.p.change} when dropped, from \code{\link{ddf.term.drop}});
+\code{low-p}
 (any per-observation p below the threshold used in
 \code{collect.ddf.candidates}); \code{sparse-season} (a season with fewer
-than \code{min.season.n} observations).
+than \code{min.season.n} observations); \code{weather-pos} (a weather
+covariate - wind speed or the sea-state group - with a positive scale
+coefficient, i.e. birds detected farther away in rougher weather, which is
+implausible) and \code{weather-weak} (its coefficient within 2 SE of 0).
+}
 
 Choice flags: \code{no-choice}; \code{not-a-candidate}; \code{no-note}
 (more than 2 AIC behind the best with an empty note); \code{p-spread} (the

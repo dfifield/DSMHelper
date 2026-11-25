@@ -1,0 +1,1387 @@
+# sdmTMB density surface models (Atlantic-DSM issue #130)
+#
+# The spec settled in #130's Phase 1 trials (Atlantic-DSM
+# Docs/issue_130_sdmtmb.md): the response is dsm's Horvitz-Thompson
+# abundance.est with log segment area as the offset; one Matern field per
+# season (spatial_varying = ~ 0 + Season) in place of s(x, y, by = Season); the
+# range fixed rather than estimated; a barrier mesh so the field does not reach
+# across land; and the covariate smooths kept as bs = "ts". Coordinates are in
+# km throughout, so the range is in km.
+#
+# sdmTMB, fmesher and sdmTMBextra are Suggests, not Imports: sdmTMBextra is on
+# GitHub only, and the mgcv pipeline does not need any of them.
+
+#' Stop unless the sdmTMB packages are installed
+#'
+#' @param pkgs Package names.
+#' @return `TRUE`, invisibly.
+#' @examples
+#' \dontrun{
+#' check.sdmtmb.installed("sdmTMB")
+#' }
+#' @noRd
+check.sdmtmb.installed <- function(pkgs = c("sdmTMB", "fmesher")) {
+  checkmate::expect_character(pkgs, min.len = 1)
+  # requireNamespace() loads a package's namespace without attaching it and
+  # returns FALSE (rather than erroring) when it is not installed, so this
+  # collects every missing package at once instead of stopping at the first.
+  missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  # Packages in Suggests are not installed automatically with DSMHelper, so a
+  # missing one has to be reported here, with where to get it; otherwise the
+  # first sdmTMB:: call would fail with a less helpful message.
+  if (length(missing))
+    stop("the sdmTMB track needs ", paste(missing, collapse = ", "),
+         "; see renv.lock (sdmTMBextra is pbs-assess/sdmTMBextra on GitHub)", call. = FALSE)
+  invisible(TRUE)
+}
+
+#' Land polygons for an sdmTMB barrier mesh
+#'
+#' ETOPO altitude above 0 m around the domain, polygonised, projected to the
+#' domain's CRS, simplified, and converted to km with the CRS removed, which is
+#' what `sdmTMBextra::add_barrier_mesh()` needs when the mesh is in km.
+#'
+#' @param domain.sf The domain (sf), normally the buffered training study
+#'   area, in `segProj` metres.
+#' @param etopo.file Path to the ETOPO netCDF (`etopo180.nc`).
+#' @param margin.deg Degrees added around the domain's lon/lat box before
+#'   cropping, so land just outside it is included.
+#' @param simplify.m Simplification tolerance in metres.
+#' @return sf polygons of land, coordinates in km, no CRS.
+#' @examples
+#' \dontrun{
+#' land <- build.land.polygons(training.study.area.buffered,
+#'                             file.path(predLayerDir, "NetCDF", "etopo180.nc"))
+#' }
+#' @export
+build.land.polygons <- function(domain.sf, etopo.file, margin.deg = 2, simplify.m = 1000) {
+  checkmate::expect_class(domain.sf, "sf")
+  checkmate::expect_file_exists(etopo.file)
+  checkmate::expect_number(margin.deg, lower = 0)
+  checkmate::expect_number(simplify.m, lower = 0)
+
+  # The ETOPO grid is in lon/lat (EPSG:4326), so find the domain's extent in
+  # lon/lat to know which part of the (global) grid to read.
+  bb <- sf::st_bbox(sf::st_transform(domain.sf, 4326))
+
+  # Crop the global grid to that box plus a margin. The margin matters because
+  # the mesh extends beyond the domain (build.sdmtmb.mesh()'s outer ring is
+  # 4 x max.edge.km wide), and land out there must be a barrier too, or the
+  # field could route around a coastline through the mesh's outer edge.
+  alt <- terra::rast(etopo.file)
+  alt <- terra::crop(alt, terra::ext(bb[["xmin"]] - margin.deg, bb[["xmax"]] + margin.deg,
+                                     bb[["ymin"]] - margin.deg, bb[["ymax"]] + margin.deg))
+
+  # Turn the elevation grid into land polygons:
+  #  - `alt > 0` is a logical raster: 1 (TRUE) on land, 0 (FALSE) at sea;
+  #  - classify() maps 0 to NA, so only land cells keep a value;
+  #  - as.polygons(dissolve = TRUE) merges adjacent land cells into one
+  #    polygon per connected landmass (NA cells produce no polygon);
+  #  - project to the domain's CRS (segProj, metres), where distances mean km;
+  #  - simplify, so the coastline has a manageable number of vertices
+  #    (simplify.m metres of tolerance, much finer than any mesh triangle);
+  #  - st_make_valid() repairs self-intersections that simplification can
+  #    create, which would otherwise break the point-in-polygon tests below.
+  land <- terra::classify(alt > 0, cbind(0, NA)) %>%
+    terra::as.polygons(dissolve = TRUE) %>%
+    sf::st_as_sf() %>%
+    sf::st_transform(sf::st_crs(domain.sf)) %>%
+    sf::st_simplify(dTolerance = simplify.m) %>%
+    sf::st_make_valid()
+
+  # The mesh is in km (see build.sdmtmb.mesh()), so divide the coordinates by
+  # 1000. Dividing an sfc geometry by a number scales every coordinate. The
+  # CRS is then dropped, because a km version of segProj is not a defined CRS,
+  # and add_barrier_mesh() compares the polygons with the mesh's plain (CRS-
+  # free) coordinates.
+  sf::st_geometry(land) <- sf::st_geometry(land) / 1000
+  sf::st_crs(land) <- NA
+  land
+}
+
+#' The fmesher mesh for an sdmTMB DSM
+#'
+#' Vertices at the unique segment locations, refined to `max.edge.km` inside
+#' the domain and to 4x that in an outer extension, with a cutoff of a quarter
+#' of the edge. The mesh depends only on the locations and the domain, so it
+#' can be built once and cached; [bind.sdmtmb.mesh()] attaches it to a data
+#' set. On #130's trials: 8,625 vertices for NL_EXPL_DRL_RA and 6,515 for
+#' Atl IMRP at 50 km, following the domain's area rather than the row count.
+#'
+#' @param locs Data frame with `x` and `y` in `segProj` metres (segments or
+#'   segment x ddftype rows; duplicates are dropped).
+#' @param domain.sf The domain (sf), normally the buffered training study area.
+#' @param max.edge.km Largest triangle edge inside the domain, km.
+#' @return An `fm_mesh_2d` in km.
+#' @examples
+#' \dontrun{
+#' fm <- build.sdmtmb.mesh(segdata, training.study.area.buffered, 50)
+#' }
+#' @export
+build.sdmtmb.mesh <- function(locs, domain.sf, max.edge.km) {
+  check.sdmtmb.installed("fmesher")
+  checkmate::expect_data_frame(locs)
+  checkmate::expect_names(names(locs), must.include = c("x", "y"))
+  checkmate::expect_class(domain.sf, "sf")
+  checkmate::expect_number(max.edge.km, lower = 0, finite = TRUE)
+
+  # The domain boundary as a plain matrix of vertices, in km. st_coordinates()
+  # returns one row per vertex, with X and Y plus ring/part index columns
+  # (L1, L2, ...); only X and Y are wanted. fmesher uses these points to
+  # decide where the inner (fine) part of the mesh must reach.
+  domain <- sf::st_coordinates(sf::st_geometry(domain.sf))[, c("X", "Y")] / 1000
+
+  # The data locations, in km. segdata has one row per segment x ddftype, so
+  # every location appears several times; unique() keeps one copy of each, as
+  # duplicates would only slow the mesh build.
+  xy <- unique(cbind(locs$x, locs$y) / 1000)
+
+  # Build the triangulation (the same arguments every #130 trial used):
+  #  - loc: the data locations are used as vertices (thinned by `cutoff`), so
+  #    the mesh is finest where there is data;
+  #  - max.edge = c(inner, outer): the longest triangle edge allowed inside the
+  #    domain, and in the outer extension. The outer extension (4x coarser)
+  #    moves the mesh boundary away from the data, because the SPDE field's
+  #    variance is distorted near a mesh boundary;
+  #  - offset = c(inner, outer): how far the inner and outer regions reach
+  #    beyond the domain;
+  #  - cutoff: vertices closer than this are merged, so clustered segments
+  #    (along a ship track, every few km) do not produce thousands of tiny
+  #    triangles. A quarter of the edge length (12.5 km at 50 km).
+  fmesher::fm_mesh_2d_inla(loc = xy, loc.domain = domain,
+                           max.edge = c(1, 4) * max.edge.km, offset = c(1, 4) * max.edge.km,
+                           cutoff = max.edge.km / 4)
+}
+
+#' Attach a cached mesh to a data set, with the barrier if land is given
+#'
+#' `sdmTMB::make_mesh()` binds the mesh to the data's rows, so this is done
+#' once per data set (seconds), while [build.sdmtmb.mesh()] is done once.
+#' With `land`, `sdmTMBextra::add_barrier_mesh()` marks triangles whose centre
+#' is on land, which then get `range.fraction` x the range.
+#'
+#' @param dat Data with `X` and `Y` in km ([prepare.sdmtmb.data()]).
+#' @param fm The mesh from [build.sdmtmb.mesh()].
+#' @param land Land polygons from [build.land.polygons()], or `NULL` for no
+#'   barrier.
+#' @param range.fraction Share of the range a land triangle keeps (0.2, the
+#'   sdmTMBextra default, used in every #130 trial).
+#' @return An `sdmTMBmesh`.
+#' @examples
+#' \dontrun{
+#' mesh <- bind.sdmtmb.mesh(dat, fm, land)
+#' }
+#' @export
+bind.sdmtmb.mesh <- function(dat, fm, land = NULL, range.fraction = 0.2) {
+  check.sdmtmb.installed(c("sdmTMB", if (!is.null(land)) "sdmTMBextra"))
+  checkmate::expect_data_frame(dat)
+  checkmate::expect_names(names(dat), must.include = c("X", "Y"))
+  checkmate::expect_class(fm, "fm_mesh_2d")
+  if (!is.null(land)) checkmate::expect_class(land, "sf")
+  checkmate::expect_number(range.fraction, lower = 0, upper = 1)
+
+  # make_mesh() wraps the prebuilt triangulation (`mesh = fm`, so it does not
+  # build a new one) and computes the projection matrix A from it: one row per
+  # data row, giving the weights that interpolate the field at that row's
+  # location from the three vertices of the triangle it falls in. That matrix
+  # is why this step is per data set: A is tied to `dat`'s rows and order.
+  mesh <- sdmTMB::make_mesh(dat, xy_cols = c("X", "Y"), mesh = fm)
+
+  # The barrier (Bakka et al. 2019). add_barrier_mesh() tests each triangle's
+  # centre against the land polygons, records the land triangles in
+  # mesh$barrier_triangles, and builds the matrices that give those triangles
+  # range.fraction x the field's range. Correlation then dies out quickly
+  # across land instead of passing through it, so density on one side of a
+  # peninsula no longer leaks to the other.
+  #  - proj_scaling = 1: the mesh and the land polygons are both in km, so no
+  #    unit conversion is needed between them;
+  #  - plot = FALSE: the function can draw the mesh; not wanted in a package.
+  # Land triangles are kept in the mesh, not cut out as holes: a hole gives the
+  # field a hard boundary at the coast, which inflates its variance there.
+  if (!is.null(land))
+    mesh <- sdmTMBextra::add_barrier_mesh(mesh, land, range_fraction = range.fraction,
+                                          proj_scaling = 1, plot = FALSE)
+  mesh
+}
+
+#' The columns an sdmTMB DSM needs
+#'
+#' Adds `X` and `Y` (km), `Season` as a factor in `season.levels` order,
+#' `season_num` (the `time` variable), drops unused `platform` levels, and
+#' adds `log_area` where `segment.area` is present.
+#'
+#' @param d Segment rows or a prediction grid, with `x`, `y` (metres) and
+#'   `Season`.
+#' @param season.levels Season names in order (`season.names`).
+#' @return `d` with the columns added.
+#' @examples
+#' \dontrun{
+#' dat <- prepare.sdmtmb.data(dat, season.names)
+#' }
+#' @export
+prepare.sdmtmb.data <- function(d, season.levels) {
+  checkmate::expect_data_frame(d)
+  checkmate::expect_names(names(d), must.include = c("x", "y", "Season"))
+  checkmate::expect_character(season.levels, min.len = 1, unique = TRUE)
+
+  # A Season value missing from season.levels would silently become NA in the
+  # factor() call below, and those rows would then be dropped or mis-handled
+  # by sdmTMB. Stop instead, naming the offending values.
+  if (!all(as.character(d$Season) %in% season.levels))
+    stop("Season values not in season.levels: ",
+         paste(setdiff(unique(as.character(d$Season)), season.levels), collapse = ", "))
+
+  # Coordinates in km. The mesh is in km, and so the fitted range is in km: in
+  # metres the range parameter would be ~1e5 and its log-scale optimisation
+  # badly scaled. Upper case so the metre columns x and y are kept as they are.
+  d$X <- d$x / 1000
+  d$Y <- d$y / 1000
+
+  # Season as a factor with a fixed level order. as.character() first, so an
+  # existing factor with a different level order is re-levelled by name rather
+  # than by its integer codes.
+  d$Season <- factor(as.character(d$Season), levels = season.levels)
+
+  # sdmTMB's `time` argument needs an integer-like column. Each season's field
+  # is a spatially varying coefficient on its Season dummy, but sdmTMB still
+  # wants a time column to index the seasons in its output (get_index() returns
+  # one row per time value), so season_num is 1, 2, 3, 4 in season.levels order.
+  d$season_num <- as.integer(d$Season)
+
+  # A platform level with no rows (e.g. a ddftype this species never had)
+  # would be an all-zero dummy column, whose coefficient is not identified.
+  # droplevels() removes unused levels.
+  if ("platform" %in% names(d)) d$platform <- droplevels(factor(d$platform))
+
+  # The offset: log of each segment's surveyed area (km^2), so the linear
+  # predictor models density and exp(prediction) at offset 0 is birds per km^2.
+  # Prediction grids have no segment.area, so this is skipped for them.
+  if ("segment.area" %in% names(d)) d$log_area <- log(d$segment.area)
+  d
+}
+
+#' The formula of an sdmTMB DSM
+#'
+#' The mgcv candidates with `s(x, y, by = Season)` removed, since the
+#' per-season fields replace it: a Season intercept, `platform`, one smooth
+#' per covariate by Season, and `Season:fishing` for fishing-affected species
+#' (issue #107).
+#'
+#' @param covars Covariates with a smooth each.
+#' @param fishing Add `Season:fishing`.
+#' @param response Response column.
+#' @param bs Smooth basis; `"ts"` shrinks a smooth out entirely (#130 trial 2).
+#' @return A formula.
+#' @examples
+#' sdmtmb.dsm.formula()
+#' @export
+sdmtmb.dsm.formula <- function(covars = c("depth", "depth.g", "sst"), fishing = FALSE,
+                               response = "abundance.est", bs = "ts") {
+  checkmate::expect_character(covars, any.missing = FALSE, unique = TRUE)
+  checkmate::expect_flag(fishing)
+  checkmate::expect_string(response)
+  checkmate::expect_string(bs)
+
+  # The right-hand side, as text pieces joined with " + " below:
+  #  - "0 + Season": no global intercept, one intercept per season instead.
+  #    Each season gets its own level, which a by = Season smooth needs because
+  #    mgcv centres each factor-by smooth on zero;
+  #  - "platform": the ddftype level (WD, FD, WN, FN), additive on the log
+  #    scale, so each platform's copy of a segment gets its own multiplier;
+  #  - one smooth per covariate per season, e.g.
+  #      s(depth, by = Season, bs = "ts")
+  #    sdmTMB turns each into penalised random effects through
+  #    mgcv::smooth2random(); "ts" puts a penalty on the null space too, so a
+  #    smooth the data do not support shrinks to nothing (#130 trial 2).
+  #    There is no s(x, y): the per-season Matern fields are the spatial term.
+  rhs <- c("0 + Season + platform",
+           if (length(covars)) sprintf('s(%s, by = Season, bs = "%s")', covars, bs))
+
+  # Fishing-affected species (issue #107): one log-multiplier per season for
+  # segments surveyed while the ship was fishing. Predictions set fishing = 0.
+  if (fishing) rhs <- c(rhs, "Season:fishing")
+
+  # env = globalenv(): a formula carries the environment it was made in, and
+  # sdmTMB evaluates variables in it. This function's environment holds
+  # nothing useful, and keeping it would also keep it alive inside every
+  # saved fit.
+  stats::as.formula(paste(response, "~", paste(rhs, collapse = " + ")), env = globalenv())
+}
+
+#' An sdmTMB family from its short key
+#'
+#' @param key `"tw"` tweedie, `"nb"` nbinom2, `"dg"` delta-gamma, `"dl"`
+#'   delta-lognormal (both deltas with `type = "poisson-link"`).
+#' @return The family object.
+#' @examples
+#' \dontrun{
+#' sdmtmb.family("tw")
+#' }
+#' @export
+sdmtmb.family <- function(key) {
+  check.sdmtmb.installed("sdmTMB")
+  checkmate::expect_choice(key, c("tw", "nb", "dg", "dl"))
+  # All four use a log link on the combined expected density:
+  #  - tweedie and nbinom2 are single-part models with a log link;
+  #  - the deltas are hurdle models (occurrence x positive density). With
+  #    type = "poisson-link" (Thorson 2018) both parts share one log-linear
+  #    predictor for the combined density, so the log-area offset enters both
+  #    parts and get_index() sums densities exactly as for tweedie. The default
+  #    delta link (logit occurrence) would not take the offset that way.
+  switch(key,
+         tw = sdmTMB::tweedie(link = "log"),
+         nb = sdmTMB::nbinom2(link = "log"),
+         dg = sdmTMB::delta_gamma(type = "poisson-link"),
+         dl = sdmTMB::delta_lognormal(type = "poisson-link"))
+}
+
+#' Fix chosen smooths at "off" in a start/map pair
+#'
+#' A smooth is off when its SD is fixed at `log(1e-6)` and its coefficients at
+#' 0. Used for a delta model's positive part (sdmTMB 1.2.0 refuses different
+#' formulas in the two parts when they contain smooths) and for smooths whose
+#' SD collapsed towards 0, which leave the Hessian not positive definite.
+#'
+#' @param params `tmb_params` from a build or a fit's `parlist` (supplies
+#'   the shapes and the starting values kept for the other smooths).
+#' @param b.smooth.start `tmb_data$b_smooth_start`: 0-based first row of each
+#'   smooth's coefficients in `b_smooth`.
+#' @param off Logical matrix, smooths x components: which to fix.
+#' @param start,map The start and map lists to add to.
+#' @return List with `start` and `map`.
+#' @noRd
+fix.smooths.off <- function(params, b.smooth.start, off, start, map) {
+  # How TMB fixes parameters. `start` gives each parameter's starting value,
+  # and `map` says which are estimated: map$<name> is a factor with one entry
+  # per element of that parameter. Elements sharing a level are estimated as
+  # one value, and an NA element is not estimated at all; it stays at its
+  # start value. So fixing a smooth "off" means: start its SD at ~0 and its
+  # coefficients at 0, and set their map entries to NA.
+  #
+  # The two parameters involved, both stored by sdmTMB as matrices with one
+  # column per model component (1 for tweedie, 2 for a delta model):
+  #  - ln_smooth_sigma: log SD of each smooth's random coefficients, one row
+  #    per smooth (12 rows = 3 covariates x 4 seasons);
+  #  - b_smooth: the smooths' random coefficients, all smooths stacked in one
+  #    column (9 rows per ts smooth with k = 10, so 108 rows).
+  # params holds them as vectors or matrices; matrix(ncol = ) gives them the
+  # (rows x components) shape either way, filling column by column.
+  lss <- matrix(params$ln_smooth_sigma, ncol = ncol(off))
+  bsm <- matrix(params$b_smooth, ncol = ncol(off))
+
+  # The existing map for each, as integer codes in the same shape. If nothing
+  # is mapped yet, every element is estimated separately, which is the code
+  # sequence 1, 2, 3, ... (all distinct). If a map exists (e.g. the delta
+  # positive part's smooths already fixed off), keep it: its NA entries stay
+  # NA and its codes are reused, so earlier fixes are not undone.
+  lss_map <- if (is.null(map$ln_smooth_sigma)) matrix(seq_along(lss), ncol = ncol(off)) else
+    matrix(as.integer(map$ln_smooth_sigma), ncol = ncol(off))
+  bsm_map <- if (is.null(map$b_smooth)) matrix(seq_along(bsm), ncol = ncol(off)) else
+    matrix(as.integer(map$b_smooth), ncol = ncol(off))
+
+  # Number of coefficient rows of each smooth. b.smooth.start holds each
+  # smooth's first row in b_smooth, 0-based (it comes from the TMB C++ side),
+  # so the differences between successive starts, closing with the total row
+  # count, are the sizes. E.g. starts 0, 9, 18 with 27 rows give sizes 9, 9, 9.
+  size <- diff(c(b.smooth.start, nrow(bsm)))
+
+  # For every (smooth j, component k) marked in `off`:
+  for (k in seq_len(ncol(off))) for (j in which(off[, k])) {
+    # 1-based rows of smooth j in b_smooth: a 0-based start plus 1..size is
+    # exactly the 1-based rows start+1 .. start+size.
+    rows <- b.smooth.start[j] + seq_len(size[j])
+    # SD fixed at 1e-6, effectively zero. Not exactly zero, because log(0) is
+    # -Inf, and TMB still evaluates the random-effect density with this SD.
+    lss[j, k] <- log(1e-6)
+    lss_map[j, k] <- NA
+    # Coefficients fixed at 0, so the smooth contributes nothing.
+    bsm[rows, k] <- 0
+    bsm_map[rows, k] <- NA
+  }
+
+  # Write the results into the start and map lists. factor() of an integer
+  # matrix gives one level per distinct non-NA code, in column-major order,
+  # which is the element order TMB expects. NAs stay NA.
+  start$ln_smooth_sigma <- lss
+  start$b_smooth <- bsm
+  map$ln_smooth_sigma <- factor(lss_map)
+  map$b_smooth <- factor(bsm_map)
+  list(start = start, map = map)
+}
+
+#' Fix chosen spatially varying fields at "off" in a start/map pair
+#'
+#' The field twin of `fix.smooths.off()`. A field is off when its SD is fixed
+#' at `field.sd.off` (effectively zero) and its values at every mesh vertex at
+#' 0. Used when a season's field SD collapses towards 0, which leaves the
+#' Hessian not positive definite (Atl IMRP Gulls, delta-lognormal: the positive
+#' part's Summer field went to 2e-4, #130).
+#'
+#' @param params A fit's `parlist` (supplies shapes and the starting values
+#'   kept for the other fields).
+#' @param off Logical matrix, fields x components: which to fix.
+#' @param sigma.hat Matrix of the fitted field SDs, same shape as `off`.
+#' @param start,map The start and map lists to add to.
+#' @param field.sd.off The SD a fixed-off field is held at.
+#' @return List with `start` and `map`.
+#' @noRd
+fix.fields.off <- function(params, off, sigma.hat, start, map, field.sd.off = 1e-6) {
+  # The two sdmTMB parameters behind spatial_varying fields (sdmTMB 1.2.0):
+  #  - ln_tau_Z: matrix, fields x components (here 4 seasons x 2 parts). tau
+  #    scales the field's precision; the field SD is
+  #    sigma_Z = 1 / sqrt(4 pi tau^2 kappa^2), so sigma_Z is proportional to
+  #    exp(-ln_tau_Z) at a fixed range;
+  #  - zeta_s: array, mesh vertices x fields x components, the field values
+  #    (random effects).
+  # As in fix.smooths.off(), "fixed" means a start value plus an NA in map.
+  ltz <- matrix(params$ln_tau_Z, nrow = nrow(off), ncol = ncol(off))
+  zeta <- array(params$zeta_s, dim = c(length(params$zeta_s) / length(off), nrow(off), ncol(off)))
+
+  # Existing map codes, or all-distinct codes if nothing is mapped yet (so
+  # every element is estimated separately). Earlier NA entries are kept.
+  ltz_map <- if (is.null(map$ln_tau_Z)) matrix(seq_along(ltz), nrow = nrow(off)) else
+    matrix(as.integer(map$ln_tau_Z), nrow = nrow(off))
+  zeta_map <- if (is.null(map$zeta_s)) array(seq_along(zeta), dim = dim(zeta)) else
+    array(as.integer(map$zeta_s), dim = dim(zeta))
+
+  for (k in seq_len(ncol(off))) for (j in which(off[, k])) {
+    # Move ln_tau_Z so the SD becomes field.sd.off. Since sigma is
+    # proportional to exp(-ln_tau), shifting ln_tau by log(sigma.hat /
+    # field.sd.off) divides sigma by sigma.hat / field.sd.off, exactly, at any
+    # range and whatever mesh scaling sdmTMB applies. Not exactly zero SD,
+    # because TMB still evaluates the field's density with this precision.
+    ltz[j, k] <- ltz[j, k] + log(sigma.hat[j, k] / field.sd.off)
+    ltz_map[j, k] <- NA
+    # Field values fixed at 0 at every vertex: the season gets no spatial
+    # surface in this component. It had almost none anyway (that is what a
+    # collapsed SD means), so the fit is essentially unchanged.
+    zeta[, j, k] <- 0
+    zeta_map[, j, k] <- NA
+  }
+
+  # factor() over the column-major elements, NAs kept: the order TMB expects.
+  start$ln_tau_Z <- ltz
+  start$zeta_s <- zeta
+  map$ln_tau_Z <- factor(ltz_map)
+  map$zeta_s <- factor(zeta_map)
+  list(start = start, map = map)
+}
+
+# Fix the fixed-effect coefficients that the data cannot identify
+#
+# A 0/1 column of the fixed-effect design whose rows hold no detection has no
+# finite maximum-likelihood estimate. In the occurrence part (or a one-part
+# family) its coefficient heads to -Inf, because every row it touches is a
+# zero; in a delta model's positive part it has no data at all. Either way the
+# likelihood is flat along it and the Hessian is not positive definite. Atl
+# IMRP Gulls (0.49.0): 160 fishing-affected Spring segment-rows with no
+# detection, so SeasonSpring:fishing went to -11.95 in the occurrence part
+# (Hessian eigenvalue 4e-6) and stayed at 0 in the positive part (eigenvalue
+# -4e-14).
+#
+# Such a coefficient is fixed, not estimated, through start and map:
+#  - occurrence part (component 1), or the only part: at `sep.value` (-20).
+#    That is the limit the estimate was heading to: those rows' expected value
+#    is then at most exp(-20) = 2e-9 times their segment's level, so they add
+#    nothing to the likelihood and pull on no other parameter. Dave chose
+#    (2026-11-23) to drop such rows; fixing the coefficient there gives the
+#    same estimates to about 1e-9 without removing rows, which would mean
+#    rebuilding the mesh (its projection matrix is per row), in every
+#    cross-validation fold too.
+#  - positive part (component 2): at 0. No positive row uses it, so its value
+#    changes nothing.
+# An all-zero column (no rows at all) is fixed at 0 in both parts.
+#
+# Only 0/1 columns are examined. A continuous column with no detection on
+# its nonzero rows is not separated in this simple way, and is left alone.
+# Predictions are unaffected for the fishing term, because every prediction
+# grid has fishing = 0.
+#
+# X: list of design matrices, one per component (tmb_data$X_ij), rows in
+#   dat's order, columns named as in model.matrix().
+# y: the response, one value per row.
+# params: tmb_params (the parameter layout: b_j, and b_j2 for two parts).
+# start, map: lists to add to; existing entries for other parameters kept.
+# Returns list(start, map, fixed), fixed a character vector of "<column>
+# (component k) = <value>" for the note.
+fix.separated.coefs <- function(X, y, params, start, map, sep.value = -20) {
+  fixed <- character(0)
+  pos <- y > 0
+  # b_j belongs to component 1, b_j2 to component 2 (sdmTMB 1.2.0 builds the
+  # parameter list as b_j = rep(0, ncol(X_ij[[1]])), b_j2 likewise for 2).
+  par_names <- c("b_j", "b_j2")
+  for (k in seq_along(X)) {
+    Xk <- as.matrix(X[[k]])
+    # 0/1 columns only: every entry is exactly 0 or 1.
+    is01 <- apply(Xk, 2, function(v) all(v == 0 | v == 1))
+    n_rows <- colSums(Xk != 0)
+    # Detections on each column's nonzero rows: crossprod of the nonzero
+    # indicator with the positive indicator, one count per column.
+    n_pos <- as.vector(crossprod(Xk != 0, pos))
+    empty <- n_rows == 0
+    no_det <- is01 & n_rows > 0 & n_pos == 0
+    # Value per column: NA = estimated as usual.
+    val <- rep(NA_real_, ncol(Xk))
+    val[empty] <- 0
+    val[no_det] <- if (k == 1L) sep.value else 0
+    if (all(is.na(val))) next
+    pn <- par_names[k]
+    # Start from whatever start already holds for this parameter (a warm
+    # start), otherwise from the build's layout (zeros).
+    b <- if (!is.null(start[[pn]])) start[[pn]] else params[[pn]]
+    b[!is.na(val)] <- val[!is.na(val)]
+    start[[pn]] <- b
+    # map: NA for a fixed coefficient, a distinct integer for each free one.
+    # Any earlier map entry for this parameter is respected (NA stays NA).
+    m <- seq_along(b)
+    if (!is.null(map[[pn]])) m[is.na(map[[pn]])] <- NA
+    m[!is.na(val)] <- NA
+    map[[pn]] <- factor(m)
+    w <- which(!is.na(val))
+    fixed <- c(fixed, sprintf("%s (component %d) = %g", colnames(Xk)[w], k, val[w]))
+  }
+  list(start = start, map = map, fixed = fixed)
+}
+
+#' Fit an sdmTMB DSM to #130's spec
+#'
+#' One Matern field per season (`spatial_varying = ~ 0 + Season`, `time =
+#' "season_num"`, no shared spatial or spatiotemporal field), the range fixed
+#' at `range.km` by mapping `ln_kappa`, and the offset as a column. For a delta
+#' family the positive part's smooths are fixed off unless
+#' `positive.smooths = TRUE`, since sdmTMB will not take a simpler formula
+#' there. If the Hessian is not positive definite and some smooth SDs are below
+#' `collapsed.sd`, or some per-season field SDs are below
+#' `collapsed.field.sd`, the model is refitted once with those smooths and
+#' fields fixed off. Smooths alone restored it in the #134 simulation; Atl IMRP
+#' Gulls needed a field fixed off too (0.48.0). Draws and the bias-corrected
+#' index need a positive definite Hessian.
+#'
+#' @param formula From [sdmtmb.dsm.formula()].
+#' @param dat Data from [prepare.sdmtmb.data()].
+#' @param mesh From [bind.sdmtmb.mesh()], bound to `dat`.
+#' @param family Family key for [sdmtmb.family()].
+#' @param range.km The fixed range, km (150 for NL_EXPL_DRL_RA, #130 trial 1b),
+#'   or `NULL` to estimate it (sdmTMB's own starting value). An estimated
+#'   range followed the mesh down on real data (#130 trial 5); `NULL` exists
+#'   for the #142 simulation, which tests why.
+#' @param offset Offset column (log segment area).
+#' @param positive.smooths Keep a delta model's positive-part smooths.
+#' @param refit.collapsed Refit once with collapsed smooths fixed off when the
+#'   Hessian is not positive definite.
+#' @param collapsed.sd Smooth SD below which a smooth counts as collapsed.
+#' @param collapsed.field.sd Field SD (`sigma_Z`) below which a season's
+#'   spatially varying field counts as collapsed. `0` never fixes a field.
+#' @param fix.separated Fix any 0/1 fixed-effect column with no detection on
+#'   its rows instead of estimating it (0.49.0): at `separated.coef` in the
+#'   occurrence part or a one-part family, where its estimate heads to -Inf,
+#'   and at 0 in a delta model's positive part, where it has no data. Atl IMRP
+#'   Gulls' `SeasonSpring:fishing` (160 rows, no detection) needs it for a
+#'   positive definite Hessian. The fixed ones are in `attr(fit,
+#'   "fixed_coefs")`.
+#' @param separated.coef The value such a coefficient is fixed at (log
+#'   scale). `-20` makes those rows' expected value at most 2e-9 of their
+#'   level, so they contribute nothing, which is what dropping them would do.
+#' @param previous.fit A fit of the same model to the same rows, to warm-start
+#'   from (`sdmTMB(previous_fit = )`); only the response may differ. It also
+#'   carries over that fit's map, so any smooth it fixed off stays off.
+#' @param warm.start A fit of the same formula and family to the same rows at
+#'   a DIFFERENT range, to start from: every parameter starts at its estimate
+#'   there except the range, which is reset to `range.km`. Unlike
+#'   `previous.fit` the map is not carried over, so a smooth that collapsed
+#'   at the other range is free again here. Used to step along a range ladder
+#'   within one cross-validation fold.
+#' @param spatial.varying The `spatial_varying` formula: one Matern field per
+#'   column of its model matrix. `~ 0 + Season` (the default) is one field per
+#'   season; set per model in `sdmtmb.mod.specs`.
+#' @param nthreads TMB threads (`sdmTMBcontrol(parallel = )`).
+#' @return The fitted `sdmTMB`, with attributes `fit_min` (minutes, all fits
+#'   included), `refit_note` (`NULL` if no refit), `fixed_coefs` (see
+#'   `fix.separated`), `sanity_failed` and
+#'   `range_km` (the range of each component, km: `range.km` when fixed, the
+#'   estimate when `range.km = NULL`).
+#' @examples
+#' \dontrun{
+#' fit <- fit.sdmtmb.dsm(sdmtmb.dsm.formula(), dat, mesh, "tw", range.km = 150)
+#' }
+#' @export
+fit.sdmtmb.dsm <- function(formula, dat, mesh, family = "tw", range.km,
+                           offset = "log_area", positive.smooths = FALSE,
+                           refit.collapsed = TRUE, collapsed.sd = 1e-3,
+                           collapsed.field.sd = 1e-2,
+                           fix.separated = TRUE, separated.coef = -20,
+                           previous.fit = NULL, warm.start = NULL,
+                           spatial.varying = ~ 0 + Season, nthreads = 1L) {
+  check.sdmtmb.installed("sdmTMB")
+  checkmate::expect_formula(formula)
+  checkmate::expect_data_frame(dat)
+  checkmate::expect_names(names(dat), must.include = c("Season", "season_num", offset))
+  checkmate::expect_class(mesh, "sdmTMBmesh")
+  checkmate::expect_choice(family, c("tw", "nb", "dg", "dl"))
+  checkmate::expect_number(range.km, lower = 0, finite = TRUE, null.ok = TRUE)
+  checkmate::expect_flag(positive.smooths)
+  checkmate::expect_flag(refit.collapsed)
+  checkmate::expect_number(collapsed.sd, lower = 0)
+  checkmate::expect_number(collapsed.field.sd, lower = 0)
+  checkmate::expect_flag(fix.separated)
+  checkmate::expect_number(separated.coef, finite = TRUE, upper = 0)
+  if (!is.null(previous.fit)) checkmate::expect_class(previous.fit, "sdmTMB")
+  if (!is.null(warm.start)) checkmate::expect_class(warm.start, "sdmTMB")
+  # The two warm starts do different things (see @param) and combining them
+  # would be ambiguous about whose map applies, so refuse both at once.
+  if (!is.null(previous.fit) && !is.null(warm.start))
+    stop("give previous.fit or warm.start, not both")
+  checkmate::expect_formula(spatial.varying)
+  checkmate::expect_count(nthreads, positive = TRUE)
+  # Timed from here, so fit_min includes the build and any refit.
+  t0 <- Sys.time()
+
+  # A delta model has two components (occurrence and positive density), each
+  # with its own linear predictor, fields and parameters; the others have one.
+  # Several parameters below are matrices with one column per component.
+  n_comp <- if (family %in% c("dg", "dl")) 2L else 1L
+
+  # ---- Fix the Matern range ----
+  # The range is fixed rather than estimated: estimated, it follows the mesh
+  # down (70 -> 44 -> 28 km as the mesh was refined, #130 trial 5) and the
+  # totals never settle. sdmTMB parameterises the range through
+  # kappa, with range = sqrt(8) / kappa (the distance at which correlation
+  # falls to about 0.13), so kappa = sqrt(8) / range and the parameter
+  # ln_kappa = log(sqrt(8) / range.km).
+  # ln_kappa is a 2 x n_comp matrix: row 1 for the spatial field (which here
+  # is also what the spatial_varying fields use), row 2 for the spatiotemporal
+  # field (switched off here, but the parameter still exists). Both rows are
+  # given the fixed value and mapped to NA, so neither is estimated.
+  # range.km = NULL leaves start and map empty: ln_kappa is then estimated
+  # from sdmTMB's default start (the #142 free-range candidates). The smooth
+  # fixes below add to these lists, and work the same on empty ones.
+  if (is.null(range.km)) {
+    start <- list()
+    map <- list()
+  } else {
+    start <- list(ln_kappa = matrix(log(sqrt(8) / range.km), nrow = 2, ncol = n_comp))
+    map <- list(ln_kappa = factor(rep(NA, 2 * n_comp)))
+  }
+
+  # ---- Warm start from a fit at another range ----
+  # warm.start$parlist is the named list of every parameter at that fit's
+  # optimum (fixed effects, smooth SDs and coefficients, and the field values
+  # at their conditional modes), in the shapes sdmTMB expects. sdmTMB applies
+  # control$start name by name AFTER building its own defaults (and after
+  # previous_fit, sdmTMB 1.2.0 sdmTMB() source), so passing the whole list
+  # as start starts every parameter there. ln_kappa is then put back to THIS
+  # range: without that the fit would start, and because ln_kappa is mapped
+  # (fixed), stay, at the other range, and the range check below would stop.
+  # The parameter shapes must match, which they do when the formula, family,
+  # spatial.varying and rows are the same; sdmTMB stops on a mismatch.
+  if (!is.null(warm.start)) {
+    start <- utils::modifyList(warm.start$parlist, start)
+  }
+
+  # ---- One sdmTMB call, used for the build, the fit and any refit ----
+  # Defined once so the three calls cannot drift apart. The model:
+  #  - offset: the log segment area column, so the model is for density;
+  #  - spatial = "off", spatiotemporal = "off": no field shared by all seasons
+  #    and no field per time step;
+  #  - spatial_varying = ~ 0 + Season: one Matern field per season, each
+  #    multiplying its Season dummy (1 in that season's rows, 0 elsewhere), so
+  #    each season has its own independent spatial surface. This replaces
+  #    mgcv's s(x, y, by = Season);
+  #  - time = "season_num": indexes the seasons for get_index();
+  #  - do_fit = FALSE builds the TMB inputs without optimising (seconds),
+  #    which is used below to read the smooths' layout;
+  #  - parallel: TMB's OpenMP threads.
+  fit.it <- function(start, map, do.fit = TRUE) {
+    args <- list(formula = formula, data = dat, mesh = mesh, family = sdmtmb.family(family),
+                 offset = offset, time = "season_num", spatial = "off", spatiotemporal = "off",
+                 spatial_varying = spatial.varying, do_fit = do.fit,
+                 control = sdmTMB::sdmTMBcontrol(start = start, map = map, parallel = nthreads))
+    # Warm start: previous_fit makes sdmTMB start every parameter, fixed and
+    # random, at that fit's estimates. Used by the detection-function
+    # uncertainty refits, where only the response changes slightly. Not for
+    # the do_fit = FALSE build, which does not optimise.
+    if (!is.null(previous.fit) && do.fit) args$previous_fit <- previous.fit
+    do.call(sdmTMB::sdmTMB, args)
+  }
+
+  # ---- Delta models: switch off the positive part's smooths ----
+  # The positive part was meant to have no smooths (trial 3b: they shrank to
+  # nothing anyway, and their collapsing SDs made the Hessian non-positive
+  # definite). sdmTMB 1.2.0 refuses a different formula for the two parts of a
+  # delta model when the formula has smooths, so both parts get the full
+  # formula, and the positive part's smooths are then fixed at zero through
+  # start and map.
+  # Build without fitting, to get the parameter layout: tmb_params has the
+  # shapes, tmb_data$X_ij the fixed-effect design per component, and
+  # tmb_data$b_smooth_start where each smooth's coefficients begin. Takes
+  # seconds to a minute, against an hour or more for the fit.
+  built <- fit.it(start, map, do.fit = FALSE)
+
+  # ---- Coefficients the data cannot identify ----
+  # A 0/1 fixed-effect column with no detection on its rows (Gulls'
+  # SeasonSpring:fishing on Atl IMRP) is fixed at its limit; see
+  # fix.separated.coefs() above. The response is the formula's left-hand side.
+  fixed_coefs <- character(0)
+  if (fix.separated) {
+    y <- dat[[all.vars(formula[[2]])[1]]]
+    sep <- fix.separated.coefs(built$tmb_data$X_ij, y, built$tmb_params, start, map, separated.coef)
+    start <- sep$start
+    map <- sep$map
+    fixed_coefs <- sep$fixed
+  }
+
+  if (n_comp == 2L && !positive.smooths) {
+    n_sm <- length(built$tmb_data$b_smooth_start)
+    if (n_sm > 0) {
+      # off: smooths x components. Column 1 (occurrence) all FALSE, column 2
+      # (positive part) all TRUE, so every positive-part smooth is fixed off.
+      off <- matrix(FALSE, nrow = n_sm, ncol = 2)
+      off[, 2] <- TRUE
+      sm <- fix.smooths.off(built$tmb_params, built$tmb_data$b_smooth_start, off, start, map)
+      start <- sm$start
+      map <- sm$map
+    }
+  }
+
+  # ---- The fit ----
+  fit <- fit.it(start, map)
+
+  # ---- Refit if the Hessian is not positive definite ----
+  # A smooth whose SD heads to 0 (shrunk out by its ts penalty) has a log SD
+  # heading to -Inf, where the likelihood is flat. That makes the Hessian of
+  # the fixed effects singular (not positive definite: sd_report$pdHess is
+  # FALSE), and then standard errors, draws and the bias-corrected index are
+  # unreliable or fail. The smooth contributes nothing, so fixing it at zero
+  # changes no estimate but removes the flat direction. This is done once only;
+  # a Hessian still not positive definite after it is left for the caller to
+  # see in sanity_failed.
+  refit_note <- NULL
+  if (refit.collapsed && !isTRUE(fit$sd_report$pdHess)) {
+    # Fitted log SDs, as smooths x components.
+    lss_hat <- matrix(fit$parlist$ln_smooth_sigma, ncol = n_comp)
+    # Which SDs were actually estimated (TRUE) rather than already fixed by
+    # the map (e.g. the delta positive part above). Only estimated ones are
+    # candidates; the fixed ones sit at 1e-6 and would all count as collapsed.
+    lss_map <- if (is.null(map$ln_smooth_sigma)) matrix(TRUE, nrow(lss_hat), n_comp) else
+      matrix(!is.na(map$ln_smooth_sigma), ncol = n_comp)
+    # Collapsed: estimated, and SD below collapsed.sd (1e-3 by default). A
+    # shrunk-out smooth's SD is typically 1e-4 to 1e-5 (trial 2), and a smooth
+    # in use has an SD of order 0.1-10, so the threshold separates them widely.
+    # A model without smooths has an empty ln_smooth_sigma; matrix() of it has
+    # 0 rows, so `off` is empty and nothing is fixed.
+    off <- exp(lss_hat) < collapsed.sd & lss_map
+
+    # ---- Collapsed per-season fields ----
+    # The same failure in a spatially varying field: its SD heads to 0, its
+    # log precision ln_tau_Z to +Inf, and the likelihood is flat along it.
+    # Atl IMRP Gulls (delta-lognormal, 2026-11-22): the positive part's Summer
+    # field sat at 2e-4 at both 150 and 450 km, about 400x below the next
+    # smallest field (0.077), and the smooth-only refit left the Hessian
+    # singular. collapsed.field.sd (1e-2 by default) sits between: fields in
+    # use on Atl IMRP BLKI and Gulls run 0.077-4.7.
+    # The fitted SDs come from the TMB report at the optimum (sigma_Z, fields x
+    # components). Fields already fixed by the map (none, normally) are
+    # excluded, as for the smooths.
+    z_off <- matrix(FALSE, 0, n_comp)
+    sigma_z <- NULL
+    if (length(fit$parlist$ln_tau_Z) > 0 && collapsed.field.sd > 0) {
+      rep_opt <- fit$tmb_obj$report(fit$tmb_obj$env$last.par.best)
+      sigma_z <- matrix(rep_opt$sigma_Z, ncol = n_comp)
+      z_map <- if (is.null(map$ln_tau_Z)) matrix(TRUE, nrow(sigma_z), n_comp) else
+        matrix(!is.na(map$ln_tau_Z), ncol = n_comp)
+      z_off <- sigma_z < collapsed.field.sd & z_map
+    }
+
+    if (any(off) || any(z_off)) {
+      # Start from this fit's estimates (parlist), so the refit is warm, and
+      # add the newly fixed smooths and fields to the existing start and map.
+      if (any(off)) {
+        sm <- fix.smooths.off(fit$parlist, fit$tmb_data$b_smooth_start, off, start, map)
+        start <- sm$start
+        map <- sm$map
+      }
+      if (any(z_off)) {
+        fz <- fix.fields.off(fit$parlist, z_off, sigma_z, start, map)
+        start <- fz$start
+        map <- fz$map
+      }
+      # Which fields, named "<column of spatial.varying's model matrix>
+      # (component k)", so the note says e.g. "SeasonSummer (component 2)".
+      z_names <- if (any(z_off)) {
+        cols <- colnames(fit$tmb_data$z_i)
+        if (is.null(cols)) cols <- paste0("field", seq_len(nrow(z_off)))
+        w <- which(z_off, arr.ind = TRUE)
+        paste(sprintf("%s (component %d)", cols[w[, 1]], w[, 2]), collapse = ", ")
+      }
+      refit_note <- sprintf("refitted with %d collapsed smooth(s) and %d collapsed field(s)%s fixed off; first fit's Hessian not positive definite",
+                            sum(off), sum(z_off), if (any(z_off)) paste0(" [", z_names, "]") else "")
+      fit <- fit.it(start, map)
+    }
+  }
+
+  # ---- Check that the range really was fixed ----
+  # A mistake in the start/map above would let the range be estimated with no
+  # error from sdmTMB, and every later result would quietly depend on it. So
+  # read the range back from each component's random-effect parameters and
+  # require it to equal range.km to 1 part in a million. With range.km =
+  # NULL there is nothing to check, and the estimate is what is recorded.
+  # tidy(model = k) reports the range in the mesh's units (km here) as the
+  # term "range"; one value per component, since the per-season fields of a
+  # component share ln_kappa row 1.
+  range.fit <- numeric(n_comp)
+  for (k in seq_len(n_comp)) {
+    rp <- sdmTMB::tidy(fit, "ran_pars", model = k)
+    r <- rp$estimate[rp$term == "range"]
+    if (!length(r)) stop(sprintf("component %d reports no range", k))
+    if (!is.null(range.km) && any(abs(r / range.km - 1) > 1e-6))
+      stop(sprintf("range meant to be fixed at %g km, but component %d reports %s", range.km, k,
+                   paste(signif(r, 4), collapse = ", ")))
+    range.fit[k] <- r[1]
+  }
+
+  # ---- Record diagnostics on the fit ----
+  # sanity() returns a list of named TRUE/FALSE checks plus an overall
+  # "all_ok". Keep the names of the failed checks only. Expect
+  # "se_magnitude_ok" to fail routinely: it flags the large standard errors of
+  # shrunk smooths' log SDs, which is shrinkage working (trial 2).
+  san <- sdmTMB::sanity(fit, silent = TRUE)
+  attr(fit, "sanity_failed") <- setdiff(names(san)[!unlist(san)], "all_ok")
+  attr(fit, "refit_note") <- refit_note
+  # Which coefficients were fixed because no detection identifies them
+  # (character(0) if none), e.g. "SeasonSpring:fishing (component 1) = -20".
+  attr(fit, "fixed_coefs") <- fixed_coefs
+  attr(fit, "range_km") <- range.fit
+  attr(fit, "fit_min") <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  fit
+}
+
+#' Predicted surface, seasonal totals and their uncertainty from an sdmTMB DSM
+#'
+#' The grid is replicated over the model's platform levels and predicted at
+#' offset 0, so each row is a density, and a cell's abundance sums density x
+#' area over the levels, as `dsm.pred()` does. Returned per cell:
+#'
+#' * `N`, the plug-in surface. Each row is exp(linear predictor), the median of
+#'   a log-normal, not the mean.
+#' * `N_rescaled`, `N` scaled per season so it sums to the bias-corrected
+#'   total: the median's shape at the mean's level. #130 trial 6 found per-cell
+#'   means from draws unusable, so this is the proposed map product.
+#' * with `nsim > 0`, `N_so`, the second-order mean surface: each row's
+#'   density times (1 + v/2), v its variance of log density over the draws,
+#'   summed over platform levels (0.43.0). `N` and `N_rescaled` are too low
+#'   away from survey effort, where the field reverts to its prior and its
+#'   median falls ever further below its mean; `N_rescaled` fixes the level
+#'   but not that shape. #130 found held-out plug-in predictions 2-3x too low
+#'   beyond 25 km from training effort on Atl IMRP. `v` from `nsim` draws has a
+#'   relative standard error of about sqrt(2 / (nsim - 1)) per row.
+#' * with `nsim > 0`, `lo`/`hi`, the 2.5% and 97.5% quantiles of the per-cell
+#'   abundance over draws, each draw summed over platform levels first.
+#'
+#' Per season: `get_index()` with and without bias correction, and with draws
+#' the quantiles of each draw's total. #130 trial 6b found the draws' spread of
+#' the log total 1.4-4.2x `get_index()`'s standard error on NL ATPU; which is
+#' right is open, so both are returned. Each uncertainty step can fail where
+#' the surface does not (it needs the joint precision), so each runs on its
+#' own: a failure leaves its columns `NA` and is recorded in `notes`.
+#'
+#' @details
+#' **Random intercepts** (iid, such as `(1 | cruise_day)`; added in 0.42.0 for
+#' the #142 simulation) have levels a prediction grid cannot have. Every
+#' prediction here is then made with them at 0 (`re_form_iid = NA`, the median
+#' level), and multiplied by `exp(sum(sigma^2) / 2)`, the mean over levels of
+#' a log-link Gaussian random intercept. The surface, `get_index()`'s totals and
+#' each draw are multiplied by the same factor; the draws get no level noise.
+#' The factor uses the point estimate of each sigma, so the standard errors and
+#' the draws leave out the uncertainty in sigma, and understate the
+#' uncertainty of the mean-level surface by that much.
+#'
+#' A **delta model** (logit presence x log positive mean; `delta_lognormal()`,
+#' `delta_gamma()`) with random intercepts is handled since 0.46.0 (Atlantic-DSM
+#' #142). Each part has its own intercept SD, sigma1 and sigma2. The positive
+#' part's factor is `exp(sigma2^2 / 2)` as above, but on the logit link the
+#' mean over levels of `plogis(eta1 + u)` has no closed form, so it is
+#' integrated per row by Gauss-Hermite quadrature (`logitnormal.mean()`). The
+#' two parts' intercepts are treated as independent, which is how sdmTMB fits
+#' them. Each row's density is then multiplied by its own factor, so the
+#' `get_index()` totals are scaled by each season's ratio of mean-level to
+#' median-level plug-in totals, and each draw by its row's factor taken at the
+#' point estimates (exact for a single log-link part, where every row's factor
+#' is the same constant).
+#'
+#' A **Poisson-link delta** (Thorson 2018; `type = "poisson-link"`, which is how
+#' [sdmtmb.family()] builds `"dl"` and `"dg"`) has expected density
+#' `exp(eta1 + eta2)`, log-linear in both parts, so with random intercepts its
+#' factor is exactly `exp((sigma1^2 + sigma2^2) / 2)`, one constant as for a
+#' single log link (0.46.1; 0.46.0 stopped on its log/log links).
+#'
+#' **Days-based level** (0.47.0, reported only). `exp(sigma^2 / 2)` is
+#' exponential in the estimated sigma, and an intercept that absorbs other
+#' short-lived noise inflates sigma: in the #142 simulation a Tweedie fit's
+#' cruise-day SD was 2.4 against a true 1.7 and its totals ran about 2.5x
+#' high. `totals$re_level_days` is the mean over the fitted levels of
+#' `exp(u_d + v_d / 2)` (predicted intercept and its conditional variance;
+#' summed over a Poisson-link delta's parts), beside `totals$re_level`, the
+#' factor applied. Multiply any total or surface by
+#' `re_level_days / re_level` for the days-based version. Computed for one
+#' random-intercept term on a log link or a Poisson-link delta; `NA`
+#' otherwise.
+#'
+#' @param fit Fitted `sdmTMB` ([fit.sdmtmb.dsm()]).
+#' @param grid One row per cell x season, with no `platform` column: `x`, `y`
+#'   (metres), `Season`, `area` (km²), the covariates, and `fishing = 0` for a
+#'   fishing-affected species.
+#' @param season.levels Season names in order (`season.names`).
+#' @param cell.col Column identifying a cell, or `NULL` to identify cells by
+#'   `x` and `y`.
+#' @param nsim Number of draws; 0 for none.
+#' @param bias.correct Which `get_index()` totals to compute: any of `TRUE`
+#'   and `FALSE`.
+#' @return List: `cells` (the grid's cell id, `Season`, `N`, `N_rescaled`,
+#'   `N_so`, `lo`, `hi`), `totals` (per season: `N` and `se_log`
+#'   bias-corrected, `N_plain` and `se_log_plain`, `N_median_sum`, `N_so_sum`,
+#'   `lo_draws`, `hi_draws`, and since 0.47.0 `N_draws_mean`, `re_level`,
+#'   `re_level_days`),
+#'   `notes`, `pred_min`.
+#' @examples
+#' \dontrun{
+#' s <- get.sdmtmb.surface(fit, grid, season.names, nsim = 100)
+#' }
+#' @export
+get.sdmtmb.surface <- function(fit, grid, season.levels, cell.col = NULL, nsim = 0L,
+                               bias.correct = c(TRUE, FALSE)) {
+  check.sdmtmb.installed("sdmTMB")
+  checkmate::expect_class(fit, "sdmTMB")
+  checkmate::expect_data_frame(grid)
+  checkmate::expect_names(names(grid), must.include = c("x", "y", "Season", "area", cell.col),
+                          disjunct.from = "platform")
+  checkmate::expect_character(season.levels, min.len = 1, unique = TRUE)
+  checkmate::expect_count(nsim)
+  checkmate::expect_logical(bias.correct, any.missing = FALSE, min.len = 1, unique = TRUE)
+  t0 <- Sys.time()
+
+  # ---- Replicate the grid over platform levels ----
+  # The model has a platform term, so a prediction is for one platform level
+  # (WD, FD, WN, FN). Each level is a disjoint part of the birds (water vs
+  # flying, distance vs no-distance; see CLAUDE.md's three-axes section), so a
+  # cell's density is the SUM over the levels the model was fitted with, as
+  # dsm.pred() does for mgcv. Take the levels from the fit itself: they vary
+  # by species, and predicting a subset would silently under-report.
+  lv <- levels(fit$data$platform)
+  if (is.null(lv)) stop("the fitted model has no platform factor")
+
+  # Each grid row must be one cell in one season, or the per-cell sums below
+  # would merge rows. key identifies a row by cell (coordinates or cell.col)
+  # and season.
+  key <- if (is.null(cell.col)) paste(grid$x, grid$y, grid$Season) else paste(grid[[cell.col]], grid$Season)
+  if (anyDuplicated(key)) stop("grid has more than one row per cell x season")
+
+  # ---- The harbour mixture (#173, 0.51.0) ----
+  # A fit with the harbour term predicts each cell as (1 - s) of its area at
+  # harbour = 0 plus s at harbour = 1 (harbour.mixture.rows()): gx is the
+  # grid with those rows, the area column holding each row's share of its
+  # cell's area, and src the original grid row of each gx row. Everything
+  # below works per gx row and sums back to grid rows through row_of, which
+  # maps through src, so a cell's two rows are summed like its platform copies
+  # (within each draw too, before any quantile). get_index() weights each row
+  # by its own area, so its totals are the mixture's. Without the term gx is
+  # the grid and src 1..n, exactly as before.
+  if (model.uses.harbour(fit)) {
+    if (is.null(grid$harbour.share))
+      stop("get.sdmtmb.surface: the fit has the harbour term but the grid has no harbour.share column")
+    mix <- harbour.mixture.rows(grid, grid$area)
+    gx <- mix$df
+    gx$area <- mix$off.set
+    src <- mix$source.row
+  } else {
+    gx <- grid
+    src <- seq_len(nrow(grid))
+  }
+
+  # g is gx stacked length(lv) times: rows 1..m are level 1, rows m+1..2m
+  # level 2, and so on (rep(times = ) repeats the whole row sequence;
+  # rep(each = ) gives each level for a whole block of m rows, matching it).
+  g <- gx[rep(seq_len(nrow(gx)), times = length(lv)), , drop = FALSE]
+  g$platform <- factor(rep(lv, each = nrow(gx)), levels = lv)
+  g <- prepare.sdmtmb.data(g, season.levels)
+  # prepare.sdmtmb.data() drops unused platform levels. All levels are used
+  # here, but re-impose the fit's exact level set and order anyway, because
+  # predict() builds the design matrix from the factor's levels and a
+  # mismatch would shift columns.
+  g$platform <- factor(as.character(g$platform), levels = lv)
+
+  # row_of[i] is the original grid row of stacked row i: src, src, ... (1..n,
+  # 1..n, ... without the harbour term). rowsum(..., row_of) then adds the
+  # platform copies of each cell, and its harbour copy, back into one value
+  # per original grid row.
+  row_of <- rep(src, times = length(lv))
+
+  # Offset 0 for every prediction row. sdmTMB would otherwise look for the
+  # offset column (log segment area), which the grid does not have. With
+  # offset 0, exp(prediction) is a density (birds per km^2).
+  off0 <- rep(0, nrow(g))
+  season <- as.character(grid$Season)
+
+  # ---- Error handling for the uncertainty steps ----
+  # The plug-in surface below needs only the point estimates, but the index
+  # and the draws need the joint precision matrix, and can fail (e.g. a
+  # Hessian that is not positive definite). step() runs one of them, and on an
+  # error records "<step name>: <message>" in `notes` and returns NULL, so a
+  # failed step leaves its columns NA instead of losing the whole surface.
+  # `<<-` assigns to `notes` in this function's environment, not inside step().
+  notes <- character()
+  step <- function(name, expr) tryCatch(expr, error = function(e) {
+    notes <<- c(notes, sprintf("%s: %s", name, conditionMessage(e)))
+    NULL
+  })
+
+  # ---- iid random intercepts: predict at the mean level ----
+  # A model with a random intercept, such as (1 | cruise_day) in the #142
+  # simulation, has levels (cruise-days) the grid cannot have: the surface is
+  # wanted for no day in particular. re_form_iid = NA predicts with every
+  # random intercept at 0, the median level, and needs no grouping column in
+  # newdata (checked on sdmTMB 1.2.0). The mean over levels of exp(eta + u),
+  # u ~ N(0, sigma^2), is exp(eta) * exp(sigma^2 / 2), so each prediction is
+  # multiplied by exp(sum of sigma^2 / 2) over the intercepts: the
+  # surface, get_index()'s totals (and their CI limits; the SE of the log
+  # total is unchanged, treating sigma as known) and the draws. That is exact
+  # for a single log-link component. A delta model (0.46.0) has a logit
+  # presence part, where the mean over levels has no closed form; it is
+  # integrated per row in the plug-in block below.
+  # tidy(fit, "ran_pars") lists each random intercept's SD as the term
+  # "sd__(Intercept)" with its grouping variable in group_name; every other
+  # row (range, phi, sigma_Z, the smooths' "sd__s(...)") has group_name NA.
+  # A model with no random intercepts has no group_name column at all
+  # (sdmTMB 1.2.0), so read it as all-NA then. For a delta model, tidy()
+  # reports one part at a time (model = 1 presence, model = 2 positive), and
+  # each part has its own SD (checked on sdmTMB 1.2.0 with a synthetic
+  # delta_lognormal fit, (1 | day): sd 0.70 for presence, 0.64 positive).
+  delta <- isTRUE(fit$family$delta)
+  n_comp <- if (delta) 2L else 1L
+  # re_sd[k]: SD of part k's total random intercept. Several iid intercepts in
+  # one part are independent normals, so their sum has SD sqrt(sum sigma^2).
+  re_sd <- numeric(n_comp)
+  re_desc <- character()
+  # n_re_terms: the most random-intercept terms in any one part; the days-based
+  # level below handles only one term (one grouping factor).
+  n_re_terms <- 0L
+  for (k in seq_len(n_comp)) {
+    rp_all <- as.data.frame(if (delta) sdmTMB::tidy(fit, "ran_pars", model = k) else sdmTMB::tidy(fit, "ran_pars"))
+    grp <- if ("group_name" %in% names(rp_all)) rp_all$group_name else rep(NA_character_, nrow(rp_all))
+    re <- rp_all[!is.na(grp), , drop = FALSE]
+    if (!nrow(re)) next
+    if (!all(re$term == "sd__(Intercept)"))
+      stop("get.sdmtmb.surface: only iid random intercepts are handled; the model has ",
+           paste(unique(re$term), collapse = ", "))
+    re_sd[k] <- sqrt(sum(re$estimate^2))
+    n_re_terms <- max(n_re_terms, nrow(re))
+    re_desc <- c(re_desc, sprintf("%s%s (sd %.3g)", grp[!is.na(grp)],
+                                  if (delta) c(" [presence]", " [positive]")[k] else "", re$estimate))
+  }
+  has_re <- length(re_desc) > 0
+  # re_form_iid = NA: every random intercept at 0 in predict() and get_index().
+  re_args <- if (has_re) list(re_form_iid = NA) else list()
+  # The mean-level factors below are worked out for three kinds of model:
+  #  - a single log-link part: density = exp(eta), factor exp(sigma^2 / 2);
+  #  - a Poisson-link delta (Thorson 2018; type = "poisson-link", as
+  #    sdmtmb.family() builds "dl" and "dg"; sdmTMB reports its links as
+  #    log/log and its type as "poisson_link_delta"). Its expected density is
+  #    exp(eta1 + eta2), log-linear in both parts (checked on sdmTMB 1.2.0:
+  #    type = "response"'s est equals exp(est1 + est2) for delta_lognormal()
+  #    and delta_gamma()), so with independent intercepts in the two parts the
+  #    factor is exactly exp((sigma1^2 + sigma2^2) / 2), as for one log link;
+  #  - a standard delta (logit presence x log positive mean), where the
+  #    presence part is integrated numerically (0.46.0).
+  # Anything else stops rather than being silently mis-scaled.
+  links <- as.character(fit$family$link)
+  poisson_link <- delta && identical(links, c("log", "log")) &&
+    identical(as.character(fit$family$type), "poisson_link_delta")
+  logit_delta <- delta && identical(links, c("logit", "log"))
+  if (has_re && !(identical(links, "log") || poisson_link || logit_delta))
+    stop("get.sdmtmb.surface: random intercepts are handled for a log link, a Poisson-link delta ",
+         "or a logit/log delta model; this model's links are ", paste(links, collapse = "/"))
+
+  # ---- Plug-in surface ----
+  # dens_med: density per stacked row at the parameter estimates, with every
+  # random intercept at 0. For a log-normal quantity this is the median, not
+  # the mean, so these cells sum to less than the bias-corrected total.
+  # dens: the same moved to the mean random-intercept level (equal to dens_med
+  # without random intercepts).
+  if (has_re && logit_delta) {
+    # type = "link" gives each part's linear predictor: est1 = logit of the
+    # presence probability, est2 = log of the positive part's mean (checked on
+    # sdmTMB 1.2.0: plogis(est1) * exp(est2) equals type = "response"'s est).
+    p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "link"), re_args))
+    dens_med <- stats::plogis(p$est1) * exp(p$est2)
+    # Mean over day levels = E[plogis(est1 + u1)] x exp(est2) x E[exp(u2)],
+    # with u1 ~ N(0, re_sd[1]^2), u2 ~ N(0, re_sd[2]^2) independent.
+    dens <- logitnormal.mean(p$est1, re_sd[1]) * exp(p$est2) * exp(re_sd[2]^2 / 2)
+  } else {
+    # type = "response" gives exp(linear predictor) in p$est (for a delta
+    # model, presence x positive mean). The factor is exp(sum of each part's
+    # sigma^2 / 2): one part for a single log link; both parts for a
+    # Poisson-link delta, whose density is exp(eta1 + eta2) (see above). A
+    # delta model without random intercepts has re_sd = c(0, 0), factor 1.
+    p <- do.call(stats::predict, c(list(fit, newdata = g, offset = off0, type = "response"), re_args))
+    dens_med <- p$est
+    dens <- p$est * exp(sum(re_sd^2) / 2)
+  }
+  # Free the prediction (one row per stacked grid row, several columns):
+  # hundreds of thousands of rows on Atl IMRP.
+  rm(p)
+  # mult: each stacked row's mean-level / median-level factor, used for the
+  # index and the draws below. A constant exp(sigma^2 / 2) for a single
+  # log-link part, 1 without random intercepts. A row whose median density
+  # underflows to 0 gets factor 1 (its mean-level density is then ~0 too).
+  mult <- ifelse(dens_med > 0, dens / dens_med, 1)
+  # Abundance per stacked row = density x cell area (km^2; coastal cells are
+  # smaller than the nominal cell). rowsum() sums the platform copies of each
+  # cell: it groups by row_of and returns a 1-column matrix in row_of order
+  # (reorder = TRUE sorts the groups, which here is 1..n, the grid order), so
+  # [, 1] gives a vector aligned with grid.
+  n_cell <- rowsum(dens * g$area, row_of, reorder = TRUE)[, 1]
+  # Per season, the ratio of mean-level to median-level plug-in totals, which
+  # scales get_index()'s totals below. Seasons of the stacked rows are
+  # season[row_of]; rowsum() gives one row per season, named by season.
+  season_g <- season[row_of]
+  re_ratio <- rowsum(dens * g$area, season_g)[, 1] / rowsum(dens_med * g$area, season_g)[, 1]
+  rm(dens_med)
+  if (has_re)
+    notes <- c(notes, sprintf("random intercept(s) %s at the mean level: plug-in totals x%s",
+                              paste(re_desc, collapse = ", "),
+                              paste(sprintf("%.4g", re_ratio), collapse = "/")))
+
+  # ---- Days-based mean level (0.47.0; reported, not applied) ----
+  # The factor above, exp(sigma^2 / 2), is the mean over all possible levels
+  # (days) of a Gaussian intercept, and it is exponential in the estimated
+  # sigma^2. In the #142 simulation a Tweedie fit's cruise-day sigma came out
+  # at 2.4 against a true day SD of 1.7, because the intercept also soaked up
+  # along-track patchiness, and the factor then put seasonal totals about 2.5x
+  # too high. The alternative here is the mean over the levels the model was
+  # actually fitted to, given the data: mean over levels d of
+  # exp(u_d + v_d / 2), u_d the predicted intercept and v_d its conditional
+  # variance (summed over the two parts of a Poisson-link delta, whose density
+  # is exp(eta1 + eta2)). It does not depend on sigma's distributional
+  # assumption, only on the levels that were sampled. It is returned beside
+  # the sigma-based factor (totals$re_level_days and totals$re_level) so a
+  # caller can compare the two; nothing above or below is scaled by it.
+  # Handled for a single log link and a Poisson-link delta with one random
+  # intercept term; NA otherwise (a logit delta has no constant factor, and
+  # with several terms the stacked levels of re_b_pars would mix groupings).
+  re_level_days <- NA_real_
+  if (has_re && !logit_delta && n_re_terms == 1L) {
+    lv_days <- step("days-based level", days.re.level(fit))
+    if (!is.null(lv_days)) {
+      re_level_days <- lv_days
+      notes <- c(notes, sprintf("days-based mean level x%.4g (not applied)", re_level_days))
+    }
+  }
+
+  # ---- Seasonal totals with get_index() ----
+  # get_index() sums density x area over the rows of each time value (season)
+  # and gives a standard error for the log total by the generalised delta
+  # method. With bias_correct = TRUE, TMB's epsilon method corrects the total
+  # from the median towards the mean (needed: uncorrected totals ran
+  # 1.3-1.65x low on NL ATPU, trial 5). It is slower: about 6 min on NL, more
+  # for delta families. The plain version is kept for the mgcv comparison.
+  # newdata/offset/area are passed directly; predict(return_tmb_object = TRUE)
+  # is deprecated in sdmTMB 1.2.0.
+  index <- function(bc) {
+    # predict_args passes re_form_iid = NA through to get_index()'s own
+    # predict() call for a model with random intercepts.
+    ix <- sdmTMB::get_index(fit, newdata = g, area = g$area, offset = off0, bias_correct = bc,
+                            predict_args = re_args)
+    # get_index() labels its rows by season_num (1, 2, ...); translate back.
+    ix$Season <- season.levels[ix$season_num]
+    # Median level to mean level: each season's re_ratio (1 without random
+    # intercepts), looked up by name. The interval limits scale with the
+    # estimate; se (of the log total) does not.
+    for (cl in intersect(c("est", "lwr", "upr"), names(ix))) ix[[cl]] <- ix[[cl]] * unname(re_ratio[ix$Season])
+    ix
+  }
+  # Each version only if asked for (bias.correct can hold TRUE, FALSE or both);
+  # an index not asked for, or one that failed, is NULL.
+  ix_bc <- if (TRUE %in% bias.correct) step("get_index bias-corrected", index(TRUE))
+  ix_plain <- if (FALSE %in% bias.correct) step("get_index", index(FALSE))
+
+  # ---- Optional draws: per-cell and per-total intervals ----
+  # Default: no draws, so the interval columns are NA.
+  lo <- hi <- n_so <- rep(NA_real_, nrow(grid))
+  tot_d <- NULL
+  if (nsim > 0) {
+    # predict(nsim = ) draws parameters from their joint (Gaussian)
+    # approximation and returns a matrix of linear predictors: one row per
+    # stacked grid row, one column per draw (log density, since offset is 0).
+    draws <- step("draws", do.call(stats::predict, c(list(fit, newdata = g, offset = off0, nsim = nsim),
+                                                     re_args)))
+    if (!is.null(draws)) {
+      # Second-order surface (0.43.0). v is each stacked row's variance of the
+      # log density over the draws; dens * (1 + v/2) is the second-order mean
+      # of a log-normal at that row, which #130 trial 6b found calibrated in
+      # sample where the plug-in is low and the draw mean high. It matters
+      # most away from survey effort, where the field's conditional variance
+      # approaches its marginal one: on Atl IMRP's held-out data the plug-in
+      # fell to 1/2-1/3 of the observed beyond 25 km from training effort
+      # (Atlantic-DSM R/Check_sdmtmb_heldout_distance.R). Summed over the
+      # platform copies of each cell like N. Rows in draws are stacked grid
+      # rows, so v lines up with dens and g$area element by element.
+      # Row variance in base R. draws - rowMeans(draws) subtracts each row's
+      # mean from that row: the matrix is stored column by column, so a
+      # vector as long as one column recycles down each column in row order.
+      # It makes one temporary copy of draws (about 200 MB at 256,000 stacked
+      # rows x 100 draws).
+      v <- rowSums((draws - rowMeans(draws))^2) / (ncol(draws) - 1)
+      n_so <- rowsum(dens * (1 + v / 2) * g$area, row_of, reorder = TRUE)[, 1]
+      rm(v)
+      # exp() to density (times mult, the row's mean random-intercept level
+      # factor at the point estimates), x area to abundance, then sum the
+      # platform copies of each cell (rowsum works on every column at once):
+      # Nd is cells x draws. mult and g$area are as long as one column of
+      # draws, so they recycle down each column in row order. For a delta
+      # model, draws are the combined log density (presence x positive), so
+      # the factor cannot be recomputed per draw. Platform levels must be
+      # summed within each draw, before any quantile, because a quantile of a
+      # sum is not the sum of quantiles.
+      Nd <- rowsum(exp(draws) * mult * g$area, row_of, reorder = TRUE)
+      rm(draws)
+      # Per cell, the 2.5% and 97.5% quantiles across draws. apply() over rows
+      # returns a 2 x cells matrix, so t() makes it cells x 2.
+      q <- t(apply(Nd, 1, stats::quantile, probs = c(0.025, 0.975)))
+      lo <- q[, 1]
+      hi <- q[, 2]
+      # Seasonal total in each draw: sum the cells of each season.
+      # rowsum(Nd, season) is seasons x draws, with seasons as row names.
+      tot_d <- rowsum(Nd, season)
+    }
+  }
+
+  # ---- Assemble the per-season table ----
+  # pick() reads one column of an index for season s, or NA if that index was
+  # not computed or failed (NULL).
+  pick <- function(ix, s, col) if (is.null(ix)) NA_real_ else ix[[col]][ix$Season == s]
+  # One row per season present in the grid, in season.levels order.
+  # N/se_log: bias-corrected total and the standard error of its log;
+  # N_plain/se_log_plain: the same without bias correction (equal to the sum
+  # of the plug-in cells); N_median_sum: the plug-in cells summed directly;
+  # lo_draws/hi_draws: 95% interval of the total from the draws.
+  totals <- purrr::map_dfr(intersect(season.levels, unique(season)), function(s) {
+    tibble::tibble(Season = s,
+                   N = pick(ix_bc, s, "est"), se_log = pick(ix_bc, s, "se"),
+                   N_plain = pick(ix_plain, s, "est"), se_log_plain = pick(ix_plain, s, "se"),
+                   N_median_sum = sum(n_cell[season == s]),
+                   # Sum of the second-order cells (NA without draws).
+                   N_so_sum = sum(n_so[season == s]),
+                   lo_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.025)),
+                   hi_draws = if (is.null(tot_d)) NA_real_ else unname(stats::quantile(tot_d[s, ], 0.975)),
+                   # 0.47.0: the mean of the draws' totals, a third estimate of
+                   # the mean-level total beside get_index()'s two (in #142
+                   # the bias-corrected index of a Poisson-link delta with a
+                   # cruise-day intercept fell below the uncorrected one).
+                   N_draws_mean = if (is.null(tot_d)) NA_real_ else mean(tot_d[s, ]),
+                   # 0.47.0: the mean-level factor applied (sigma-based; 1
+                   # without random intercepts) and the days-based one
+                   # (reported only; NA where not computed). N x
+                   # re_level_days / re_level is the days-based total.
+                   re_level = unname(re_ratio[s]), re_level_days = re_level_days)
+  })
+  # ---- Per-cell table ----
+  # The rescaled surface: each season's plug-in cells multiplied by one factor,
+  # bias-corrected total / sum of plug-in cells, so it keeps the plug-in map's
+  # shape but sums to the bias-corrected total. The factor is per season, so
+  # match() looks up each cell's season in `totals`. If the bias-corrected
+  # index failed, N is NA, and so is N_rescaled.
+  scale <- totals$N / totals$N_median_sum
+  cells <- tibble::tibble(Season = factor(season, levels = season.levels), N = n_cell,
+                          N_rescaled = n_cell * scale[match(season, totals$Season)], N_so = n_so,
+                          lo = lo, hi = hi)
+  # Identify each cell as the caller did: by its coordinates, or by cell.col.
+  # setNames() names the column after cell.col, avoiding rlang's `:=`.
+  # Every vector above is in grid row order, so the id columns line up.
+  id <- if (is.null(cell.col)) tibble::tibble(x = grid$x, y = grid$y) else
+    stats::setNames(tibble::tibble(grid[[cell.col]]), cell.col)
+  cells <- dplyr::bind_cols(id, cells)
+  list(cells = cells, totals = totals, notes = notes,
+       pred_min = as.numeric(difftime(Sys.time(), t0, units = "mins")))
+}
+
+#' Mean over the fitted levels of a model's random intercept
+#'
+#' `mean_d exp(u_d + v_d / 2)` over the levels `d` of the model's one iid
+#' random intercept, where `u_d` is the predicted intercept and `v_d` its
+#' conditional variance; for a Poisson-link delta, `u_d` and `v_d` are summed
+#' over the two parts. Used by [get.sdmtmb.surface()] (0.47.0).
+#'
+#' @param fit Fitted `sdmTMB` with one random-intercept term.
+#' @return One number.
+#' @noRd
+days.re.level <- function(fit) {
+  checkmate::expect_class(fit, "sdmTMB")
+  # parList() returns the parameters at the optimum as named arrays, random
+  # effects at their predicted (conditional mode) values. re_b_pars holds the
+  # iid random intercepts as a levels x parts matrix: one column for a single
+  # part, two (presence, positive) for a delta model (checked on sdmTMB 1.2.0
+  # with a synthetic (1 | day) fit: 20 x 1 for tweedie, 20 x 2 for
+  # delta_lognormal(type = "poisson-link")).
+  u <- as.matrix(fit$tmb_obj$env$parList()$re_b_pars)
+  if (!length(u)) stop("the model has no re_b_pars")
+  # diag.cov.random: the conditional variance of every random effect, in the
+  # order of par.random, whose names repeat the parameter name once per
+  # element. The re_b_pars elements come in R's column-major order (all levels
+  # of part 1, then of part 2), the order matrix() fills, so v lines up with u.
+  sdr <- fit$sd_report
+  v_all <- sdr$diag.cov.random
+  if (is.null(v_all)) stop("the sdreport has no diag.cov.random")
+  v <- v_all[names(sdr$par.random) == "re_b_pars"]
+  if (length(v) != length(u)) stop("re_b_pars and its conditional variances differ in length")
+  v <- matrix(v, nrow = nrow(u))
+  # rowSums over parts: a Poisson-link delta's density is exp(eta1 + eta2), so
+  # a level's multiplier is exp(u1 + u2), with variance v1 + v2 when the two
+  # parts' predicted intercepts are treated as independent (their conditional
+  # covariance is left out).
+  mean(exp(rowSums(u) + rowSums(v) / 2))
+}
+
+#' Mean of a logit-normal variable, by Gauss-Hermite quadrature
+#'
+#' `E[plogis(eta + u)]` with `u ~ N(0, sigma^2)`, for each element of `eta`:
+#' the presence probability of a delta model averaged over the levels of a
+#' Gaussian random intercept on the logit scale, which has no closed form
+#' (unlike `exp(sigma^2 / 2)` on a log link). Used by [get.sdmtmb.surface()]
+#' (0.46.0, Atlantic-DSM #142).
+#'
+#' @param eta Numeric vector of logit-scale linear predictors.
+#' @param sigma The random intercept's SD (>= 0); 0 returns `plogis(eta)`.
+#' @param n.nodes Number of quadrature nodes. 40 nodes integrate a smooth
+#'   function like `plogis()` to near machine precision for the SDs met here
+#'   (well under 5 on the logit scale).
+#' @return Numeric vector like `eta`.
+#' @examples
+#' \dontrun{
+#' logitnormal.mean(c(-2, 0, 2), 1)
+#' }
+#' @noRd
+logitnormal.mean <- function(eta, sigma, n.nodes = 40L) {
+  checkmate::expect_numeric(eta)
+  checkmate::expect_number(sigma, lower = 0, finite = TRUE)
+  checkmate::expect_int(n.nodes, lower = 2)
+  # No spread: nothing to average.
+  if (sigma == 0) return(stats::plogis(eta))
+  # Gauss-Hermite nodes and weights for the weight function exp(-x^2), by the
+  # Golub-Welsch method: the nodes are the eigenvalues of the symmetric
+  # tridiagonal Jacobi matrix with off-diagonal sqrt(i / 2), i = 1..n-1, and
+  # each weight is sqrt(pi) x (first element of its unit eigenvector)^2. This
+  # avoids a dependency (statmod::gauss.quad) for 10 lines of base R.
+  i <- seq_len(n.nodes - 1L)
+  J <- matrix(0, n.nodes, n.nodes)
+  J[cbind(i, i + 1L)] <- sqrt(i / 2)
+  J[cbind(i + 1L, i)] <- sqrt(i / 2)
+  e <- eigen(J, symmetric = TRUE)
+  x <- e$values
+  w <- sqrt(pi) * e$vectors[1, ]^2
+  # Change of variable u = sqrt(2) sigma x turns E[f(u)], u ~ N(0, sigma^2),
+  # into sum_j w_j f(sqrt(2) sigma x_j) / sqrt(pi). Accumulate node by node so
+  # memory stays one vector as long as eta (hundreds of thousands of rows),
+  # not a rows x nodes matrix.
+  out <- numeric(length(eta))
+  for (j in seq_len(n.nodes)) out <- out + w[j] * stats::plogis(eta + sqrt(2) * sigma * x[j])
+  out / sqrt(pi)
+}
